@@ -133,7 +133,11 @@ function Import-ConfigFile {
         $eq = $t.IndexOf('=')
         if ($eq -lt 1) { continue }
         $k = $t.Substring(0, $eq).Trim()
-        $v = $t.Substring($eq + 1).Trim().Trim('"', "'")
+        $v = $t.Substring($eq + 1).Trim()
+        # Strip an inline comment - whitespace followed by # or ; - unless the value is
+        # quoted. Without this, "field = name__v  # note" would keep the note as the value.
+        if ($v -notmatch '^["'']') { $v = ($v -split '\s+[#;]', 2)[0].TrimEnd() }
+        $v = $v.Trim('"', "'")
         $cfg[$k] = [Environment]::ExpandEnvironmentVariables($v)
     }
     return $cfg
