@@ -78,7 +78,9 @@ param(
     # How a submission folder name (e.g. 0000) and its application (e.g. e157135)
     # map onto Vault fields, used to resolve the submission__v record when there is
     # no manifest and no export_results.csv. Confirm these match your vault.
-    [string]     $LookupField       = 'name__v',        # submission__v field holding the folder name
+    [string]     $LookupField       = 'name__v',        # submission__v field the folder name is found in
+    [ValidateSet('prefix','exact')]
+    [string]     $SubmissionMatch   = 'prefix',          # folder name is a prefix of name__v ("0000 - ...")
     [string]     $ApplicationRefField = 'application__v', # submission__v -> application reference
     [string]     $ApplicationKeyField = 'name__v',       # application__v field holding e157135
 
@@ -494,12 +496,23 @@ function Resolve-SubmissionId {
     # Resolve a submission__v record from its folder name (the submission number)
     # scoped to its application, via VQL. This is what makes the tool manifest- and
     # export_results.csv-free: the staging folder structure supplies both keys.
+    #
+    # The submission NAME is "0000 - Submission Meeting Minutes", i.e. the folder name
+    # is a PREFIX of name__v, not the whole value - so SubmissionMatch defaults to
+    # 'prefix' (LIKE '0000%'). Set it to 'exact' if LookupField holds just the number.
     param(
         [Parameter(Mandatory)][string]$Key,   # submission folder name, e.g. 0000
         [string]$Application                   # application folder name, e.g. e157135
     )
     $sub = $Key.Replace("'", "\'")
-    $where = "$LookupField = '$sub'"
+    if ($SubmissionMatch -eq 'exact') {
+        $clause = "$LookupField = '$sub'"
+    } else {
+        # Zero-padded 4-digit numbers are prefix-unique (0000 never prefixes 0001),
+        # so '0000%' safely picks "0000 - ...". % and _ can't appear in a folder name.
+        $clause = "$LookupField LIKE '$sub%'"
+    }
+    $where = $clause
     if ($Application) {
         $app = $Application.Replace("'", "\'")
         # VQL parent-field reference scopes the number to one application, so a
@@ -507,10 +520,13 @@ function Resolve-SubmissionId {
         $where += " AND $ApplicationRefField.$ApplicationKeyField = '$app'"
     }
     $r = Invoke-VaultApi -Method POST -Path '/query' -ContentType 'application/x-www-form-urlencoded' `
-            -Body @{ q = "SELECT id FROM submission__v WHERE $where" }
+            -Body @{ q = "SELECT id, name__v FROM submission__v WHERE $where" }
     $rows = @(Get-Field $r 'data' @())
     if ($rows.Count -eq 0) { throw "No submission__v where $where" }
-    if ($rows.Count -gt 1) { throw "$($rows.Count) submission__v records match $where - set SubmissionId in a manifest to disambiguate" }
+    if ($rows.Count -gt 1) {
+        $names = (@($rows | ForEach-Object { Get-Field $_ 'name__v' }) -join '; ')
+        throw "$($rows.Count) submission__v records match $where ($names) - narrow LookupField/ApplicationKeyField or set SubmissionId in a manifest"
+    }
     return $rows[0].id
 }
 
