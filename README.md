@@ -9,7 +9,8 @@ archive with the file name, job id, binder id and any validation messages.
 | File | What it is | View | Download |
 |---|---|---|---|
 | `Import-VaultSubmissions.ps1` | The script. Windows PowerShell 5.1 or PowerShell 7. | [view](https://github.com/kevinnassery/veeva/blob/main/Import-VaultSubmissions.ps1) | [raw](https://raw.githubusercontent.com/kevinnassery/veeva/main/Import-VaultSubmissions.ps1) |
-| `Run-Import.bat` | Double-clickable wrapper — edit the settings at the top. | [view](https://github.com/kevinnassery/veeva/blob/main/Run-Import.bat) | [raw](https://raw.githubusercontent.com/kevinnassery/veeva/main/Run-Import.bat) |
+| `config.ini` | **The only file you edit.** All settings live here. | [view](https://github.com/kevinnassery/veeva/blob/main/config.ini) | [raw](https://raw.githubusercontent.com/kevinnassery/veeva/main/config.ini) |
+| `Run-Import.bat` | Double-clickable launcher. Nothing to edit in it. | [view](https://github.com/kevinnassery/veeva/blob/main/Run-Import.bat) | [raw](https://raw.githubusercontent.com/kevinnassery/veeva/main/Run-Import.bat) |
 | `manifest-template.csv` | Example mapping sheet (the script generates a real one for you). | [view](https://github.com/kevinnassery/veeva/blob/main/manifest-template.csv) | [raw](https://raw.githubusercontent.com/kevinnassery/veeva/main/manifest-template.csv) |
 
 Repository: **https://github.com/kevinnassery/veeva**
@@ -19,7 +20,7 @@ script beside itself:
 
 ```powershell
 $base = 'https://raw.githubusercontent.com/kevinnassery/veeva/main'
-'Import-VaultSubmissions.ps1','Run-Import.bat','manifest-template.csv' | ForEach-Object {
+'Import-VaultSubmissions.ps1','Run-Import.bat','config.ini','manifest-template.csv' | ForEach-Object {
     Invoke-WebRequest "$base/$_" -OutFile $_
 }
 ```
@@ -66,38 +67,50 @@ A flat folder also works, as long as you fill in `ApplicationFolder` in the mani
 
 ## Three steps
 
-## Configuration
+## Configuration — one file
 
-The top of `Import-VaultSubmissions.ps1` is a **CONFIG** block — the settings you actually change,
-grouped together and commented. Fill them in once and the script runs with no arguments at all.
-Anything set there can still be overridden on the command line, which always wins.
+**`config.ini` is the only file you edit.** Both `Import-VaultSubmissions.ps1` and
+`Run-Import.bat` read it, so there is never a second copy to keep in sync. `Run-Import.bat` has
+nothing configurable in it at all.
 
-```powershell
-[string] $VaultDNS    = ''                      # mycompany-rim.veevavault.com
-[string] $ApiVersion  = 'v26.2'                 # one knob for the whole script
-[string] $SessionId   = ''                      # blank = log in for me
-[string] $SourceRoot  = ''                      # D:\SubmissionDownloads  (read-only)
-[string] $OutputRoot  = ''                      # D:\ImportRun
-[string] $StagingRoot = '/SubmissionsArchive'
+```ini
+VaultDNS   = mycompany-rim.veevavault.com
+SourceRoot = D:\SubmissionDownloads          ; read-only to this script
+OutputRoot = D:\ImportRun                    ; must not be inside SourceRoot
+
+MODE = MANIFEST                              ; MANIFEST | DRYRUN | IMPORT
+
+ApiVersion  = v26.2
+SessionId   =                                ; blank = log in for me
+StagingRoot = /SubmissionsArchive
 ```
 
-Below that are **RUN MODE** (what this run should do) and **ADVANCED** (defaults you can ignore).
-`Run-Import.bat` mirrors the same values as `set` lines at its top.
+Precedence is **command line → `config.ini` → built-in defaults**, so a one-off
+`Run-Import.bat -WhatIf` overrides the file without editing it. `%USERPROFILE%`-style variables
+are expanded, and unknown keys produce a warning naming the key rather than being ignored.
+
+**`MODE`** replaces having to remember switches:
+
+| MODE | What happens |
+|---|---|
+| `MANIFEST` | Scan the download, write `manifest.csv`, stop. No Vault calls. |
+| `DRYRUN` | Authenticate, resolve every submission id, upload and import nothing. |
+| `IMPORT` | Do it for real. |
 
 `VaultDNS`, `SourceRoot` and `OutputRoot` have no safe default and are checked at startup with a
 message naming the missing one. They're deliberately *not* `Mandatory` parameters — that would
-prompt on every run even when the CONFIG block is filled in.
+prompt on every run even when `config.ini` already has the answer.
 
 **API version.** Every request is built as `https://<VaultDNS>/api/<ApiVersion>/...`, so
-`$ApiVersion` moves the whole script between releases. It's validated against `v<major>.<minor>`,
+`ApiVersion` moves the whole script between releases. It's validated against `v<major>.<minor>`,
 so a typo fails at startup instead of 404-ing mid-upload.
 
-**Session id.** `$SessionId` in the CONFIG block is the only place a session is configured. Leave
-it blank for normal use — the script authenticates, holds the session in one script-scoped
-variable, and replaces it automatically if Vault expires it mid-run. Set it only to reuse a
-session you already hold. Internally it's written in exactly one function (`Connect-Vault`) and
-read in exactly one place (the `Authorization` header in `Invoke-VaultApi`); no function takes a
-session id as an argument, which is what makes the mid-run re-auth safe.
+**Session id.** `SessionId` in `config.ini` is the only place a session is configured. Leave it
+blank for normal use — the script authenticates, holds the session in one script-scoped variable,
+and replaces it automatically if Vault expires it mid-run. Set it only to reuse a session you
+already hold. Internally it is written in exactly one function (`Connect-Vault`) and read in
+exactly one place (the `Authorization` header in `Invoke-VaultApi`); no function takes a session
+id as an argument, which is what makes the mid-run re-auth safe.
 
 ## Referencing the export output
 

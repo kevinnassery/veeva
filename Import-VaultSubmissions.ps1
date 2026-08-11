@@ -77,11 +77,14 @@
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
     # ======================================================================================
-    #  CONFIG - the settings you actually change.
+    #  All configuration lives in ONE file: config.ini, next to this script.
+    #  Edit that. Do not edit the defaults below - they exist only as fallbacks.
     #
-    #  Edit the values here once and you can run the script with no arguments at all.
-    #  Anything set here can still be overridden on the command line, which always wins.
+    #  Precedence:  command line  >  config.ini  >  the defaults here
     # ======================================================================================
+
+    # Path to the single config file. Blank means config.ini beside this script.
+    [string]     $ConfigFile       = '',
 
     # Vault host name. No https://, no trailing slash.
     #   e.g. 'mycompany-rim.veevavault.com'
@@ -165,17 +168,95 @@ $ProgressPreference    = 'SilentlyContinue'   # large -Body PUTs are ~10x faster
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 # --------------------------------------------------------------------------------------
-# Required config
+# Configuration: one file, one load, applied here
 #
-# These have no safe default, so they must come from either the CONFIG block above or
-# the command line. Checked here rather than with [Parameter(Mandatory)] so that editing
-# the CONFIG block is enough to run the script with no arguments -- a Mandatory parameter
-# would prompt even when the value is filled in above.
+# config.ini is the single place settings live. Run-Import.bat reads the same file, so
+# there is never a second copy to keep in sync. Anything passed explicitly on the command
+# line wins over the file -- that is what $PSBoundParameters checks below.
+# --------------------------------------------------------------------------------------
+
+$IntKeys    = @('PartSizeMB', 'JobTimeoutMinutes', 'JobPollSeconds', 'MaxRetries')
+$SwitchKeys = @('GenerateManifest', 'NameIsSubmissionId')
+$ListKeys   = @('Include', 'ProtectedPath')
+
+function Import-ConfigFile {
+    <#
+      Minimal KEY = VALUE parser. Blank lines and #/; comments ignored, surrounding
+      quotes stripped, lists split on commas. Returns an ordered hashtable.
+    #>
+    param([Parameter(Mandatory)][string]$Path)
+
+    $cfg = [ordered]@{}
+    foreach ($line in (Get-Content -LiteralPath $Path)) {
+        $t = $line.Trim()
+        if (-not $t -or $t.StartsWith('#') -or $t.StartsWith(';') -or $t.StartsWith('[')) { continue }
+        $eq = $t.IndexOf('=')
+        if ($eq -lt 1) { continue }
+        $k = $t.Substring(0, $eq).Trim()
+        $v = $t.Substring($eq + 1).Trim().Trim('"', "'")
+        # Expand %USERPROFILE% and friends so paths can be written the .bat way.
+        $cfg[$k] = [Environment]::ExpandEnvironmentVariables($v)
+    }
+    return $cfg
+}
+
+$ConfigExplicit = $PSBoundParameters.ContainsKey('ConfigFile')
+if ([string]::IsNullOrWhiteSpace($ConfigFile)) {
+    # $PSScriptRoot is empty when dot-sourced or pasted into a console.
+    $here = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).ProviderPath }
+    $ConfigFile = Join-Path $here 'config.ini'
+}
+
+$ConfigMode = ''
+if (Test-Path -LiteralPath $ConfigFile) {
+    $cfg = Import-ConfigFile -Path $ConfigFile
+
+    foreach ($key in $cfg.Keys) {
+        $value = $cfg[$key]
+
+        # MODE is for humans and for Run-Import.bat; translate it into switches here.
+        if ($key -eq 'MODE') { $ConfigMode = $value.ToUpperInvariant(); continue }
+
+        # An explicit command-line argument always wins over the file.
+        if ($PSBoundParameters.ContainsKey($key)) { continue }
+        if (-not (Get-Variable -Name $key -Scope Script -ErrorAction SilentlyContinue)) {
+            Write-Warning "config.ini: ignoring unknown setting '$key'"
+            continue
+        }
+        if ([string]::IsNullOrWhiteSpace($value)) { continue }
+
+        if     ($IntKeys    -contains $key) { Set-Variable -Name $key -Value ([int]$value) }
+        elseif ($SwitchKeys -contains $key) { Set-Variable -Name $key -Value ([bool]($value -match '^(1|true|yes|on)$')) }
+        elseif ($ListKeys   -contains $key) { Set-Variable -Name $key -Value ([string[]]($value -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })) }
+        else                                { Set-Variable -Name $key -Value $value }
+    }
+
+    switch ($ConfigMode) {
+        'MANIFEST' { if (-not $PSBoundParameters.ContainsKey('GenerateManifest')) { $GenerateManifest = $true } }
+        'DRYRUN'   { if (-not $PSBoundParameters.ContainsKey('WhatIf'))           { $WhatIfPreference = $true } }
+        'IMPORT'   { }
+        ''         { }
+        default    { throw "config.ini: MODE must be MANIFEST, DRYRUN or IMPORT (got '$ConfigMode')." }
+    }
+}
+elseif ($ConfigExplicit) {
+    throw "Config file not found: $ConfigFile"
+}
+else {
+    Write-Warning "No config.ini found at $ConfigFile - relying on command-line arguments."
+}
+
+# --------------------------------------------------------------------------------------
+# Required settings
+#
+# No safe default exists for these, so they must come from config.ini or the command line.
+# Checked here rather than with [Parameter(Mandatory)], which would prompt on every run
+# even when config.ini already has the answer.
 # --------------------------------------------------------------------------------------
 
 foreach ($name in @('VaultDNS', 'SourceRoot', 'OutputRoot')) {
     if ([string]::IsNullOrWhiteSpace((Get-Variable -Name $name -ValueOnly))) {
-        throw "$name is not set. Fill it in under CONFIG at the top of this script, or pass -$name on the command line."
+        throw "$name is not set. Add it to $ConfigFile, or pass -$name on the command line."
     }
 }
 $VaultDNS = $VaultDNS -replace '^https?://', '' -replace '/+$', ''
