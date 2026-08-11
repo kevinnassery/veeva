@@ -1,162 +1,95 @@
 <#
 .SYNOPSIS
-    Bulk-imports downloaded submission archives into Veeva Vault RIM Submissions Archive.
+    Imports exported submission dossiers into Veeva Vault RIM Submissions Archive,
+    entirely on the File Staging server. Nothing is downloaded or uploaded.
 
 .DESCRIPTION
-    For each archive in -SourceRoot this script:
-      1. Uploads it to the Vault File Staging server under /SubmissionsArchive/<application>/
-         (resumable upload session, 50 MB parts -- handles multi-GB submissions).
+    Bulk Submission Export leaves its output on File Staging, under
+        /u{UserID}/Submissions Archive Export/{JobID}/...
+    Import Submission can only read from one of two places:
+        /SubmissionsArchive/{app}/{submission}                    folder, .zip or .tar.gz
+        /u{ID}/Submissions Archive Import/{app}/{submission}      folder only, no archives
+    so the exported dossiers are already on the server, just in the wrong location.
+
+    For each dossier this script:
+      1. Relocates it into /SubmissionsArchive/<application>/ with a File Staging move
+         (PUT /items). Server-side: no bytes cross the network. Asynchronous, so the
+         move job is polled to completion.
       2. Calls Import Submission on the matching submission__v record.
-      3. Polls the resulting job to completion.
-      4. Retrieves the import results (binder id/version + validation messages).
-      5. Appends one row per archive to a results CSV -- file name included, so nothing
-         has to be copy/pasted by hand.
+      3. Polls the import job, then retrieves the import results.
+      4. Appends a row to a results CSV - file name, both staging paths, job ids,
+         status, binder id/version and any validation messages.
 
-    SAFETY: the script NEVER writes to, moves, renames or deletes anything under -SourceRoot.
-    Source files are opened read-only. All output goes to -OutputRoot, which is refused if it
-    resolves inside -SourceRoot or inside any path listed in -ProtectedPath.
+    The archive -> submission mapping comes from export_results.csv, which the export
+    wrote next to the dossiers. It is read directly off File Staging; you do not need a
+    local copy, and nothing has to be typed in by hand.
 
-    Re-runnable: archives already recorded as SUCCESS in the results CSV are skipped, so an
-    interrupted run can simply be started again.
+    Re-runnable: dossiers already recorded as SUCCESS are skipped.
 
-.PARAMETER VaultDNS
-    Vault host name, e.g. mycompany-rim.veevavault.com
-
-.PARAMETER SourceRoot
-    Folder holding the downloaded archives. Expected layout (one folder per application):
-        <SourceRoot>\<ApplicationFolder>\<submission>.zip
-    A flat folder of archives also works if you supply -Manifest with ApplicationFolder filled in.
-
-.PARAMETER OutputRoot
-    Where the results CSV, manifest and transcript are written. Created if missing.
-
-.PARAMETER Manifest
-    CSV mapping archives to submission records. Columns:
-        FileName,ApplicationFolder,SubmissionId,SubmissionKey,ActualSubmissionDate,DossierFormatId
-    SubmissionId wins if present; otherwise SubmissionKey is resolved by VQL against -LookupField.
-    Run with -GenerateManifest first to produce this file pre-filled with the file names.
-
-.PARAMETER GenerateManifest
-    Scan -SourceRoot, write a manifest CSV skeleton to -OutputRoot and exit. No Vault calls,
-    no uploads. Fill in SubmissionId (or SubmissionKey) and re-run without this switch.
-
-.EXAMPLE
-    # Step 1 - build the mapping sheet (file names filled in for you)
-    .\Import-VaultSubmissions.ps1 -VaultDNS mycompany-rim.veevavault.com `
-        -SourceRoot D:\SubmissionDownloads -OutputRoot D:\ImportRun -GenerateManifest
-
-.EXAMPLE
-    # Step 2 - dry run: validates mapping + staging paths, uploads and imports nothing
-    .\Import-VaultSubmissions.ps1 -VaultDNS mycompany-rim.veevavault.com `
-        -SourceRoot D:\SubmissionDownloads -OutputRoot D:\ImportRun `
-        -Manifest D:\ImportRun\manifest.csv -WhatIf
-
-.EXAMPLE
-    # Step 3 - the real run
-    .\Import-VaultSubmissions.ps1 -VaultDNS mycompany-rim.veevavault.com `
-        -SourceRoot D:\SubmissionDownloads -OutputRoot D:\ImportRun `
-        -Manifest D:\ImportRun\manifest.csv
+.PARAMETER ConfigFile
+    All settings live in config.ini beside this script. Command line overrides it.
 
 .NOTES
     Windows PowerShell 5.1 compatible (also runs on PowerShell 7).
-
-    API version is a single variable: -ApiVersion (default v26.2), or API_VERSION in
-    Run-Import.bat. Every URL below is built from it.
-
-    Endpoints (documented for v26.1 and v26.2 alike):
-      POST /api/{v}/auth
-      POST /api/{v}/services/file_staging/items                     (create folder)
-      POST /api/{v}/services/file_staging/upload                    (create resumable session)
-      PUT  /api/{v}/services/file_staging/upload/{session_id}       (upload part)
-      POST /api/{v}/services/file_staging/upload/{session_id}       (commit)
-      POST /api/{v}/vobjects/submission__v/{id}/actions/import
-      GET  /api/{v}/services/jobs/{job_id}
-      GET  /api/{v}/vobjects/submission__v/{id}/actions/import/{job_id}/results
+    Endpoints, all relative to https://<VaultDNS>/api/<ApiVersion>:
+      POST /auth
+      GET  /services/file_staging/items/{item}?recursive=true      list the export
+      GET  /services/file_staging/items/content/{item}             read export_results.csv
+      POST /services/file_staging/items                            create target folder
+      PUT  /services/file_staging/items/{item}                     move  (async, job id)
+      POST /vobjects/submission__v/{id}/actions/import             import (async, job id)
+      GET  /services/jobs/{job_id}                                 poll either job
+      GET  /vobjects/submission__v/{id}/actions/import/{job_id}/results
 #>
 
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
     # ======================================================================================
     #  All configuration lives in ONE file: config.ini, next to this script.
-    #  Edit that. Do not edit the defaults below - they exist only as fallbacks.
-    #
     #  Precedence:  command line  >  config.ini  >  the defaults here
     # ======================================================================================
 
-    # Path to the single config file. Blank means config.ini beside this script.
     [string]     $ConfigFile       = '',
 
-    # Vault host name. No https://, no trailing slash.
-    #   e.g. 'mycompany-rim.veevavault.com'
+    # ---- Required ----
     [string]     $VaultDNS         = '',
 
-    # Vault API version. Every request is built as https://<VaultDNS>/api/<ApiVersion>/...
-    # so this one value moves the whole script between releases. Must look like v26.2.
+    # Staging folder holding the export, e.g. '/u5678/Submissions Archive Export/727301'
+    [string]     $SourceStagingPath = '',
+
+    # Local folder for the results CSV and log. Nothing else is written locally.
+    [string]     $OutputRoot       = '',
+
+    # ---- Vault ----
     [ValidatePattern('^v\d+\.\d+$')]
     [string]     $ApiVersion       = 'v26.2',
 
-    # Vault API session id.
-    #
-    #   *** This is the ONLY place a session id is configured. ***
-    #
-    # Leave it blank for normal use: the script authenticates and manages the session
-    # itself, including re-authenticating if it expires mid-run. Set it only when you
-    # already hold a session from somewhere else and want to reuse it.
-    # See the "Session id" block below for how it flows through the script.
+    # The ONLY place a session id is configured. Blank = log in and manage it for me.
     [string]     $SessionId        = '',
 
-    # Folder holding the bulk download. This script only ever reads from it.
-    #   e.g. 'D:\SubmissionDownloads'
-    [string]     $SourceRoot       = '',
-
-    # Where the manifest, results CSV and log are written. Must not be inside SourceRoot.
-    #   e.g. 'D:\ImportRun'
-    [string]     $OutputRoot       = '',
-
-    # Staging root for Submissions Archive imports. Change only if your Vault differs.
+    # Import target root. Archives can only be imported from here.
     [string]     $StagingRoot      = '/SubmissionsArchive',
 
-    # ======================================================================================
-    #  RUN MODE - how this particular run should behave.
-    # ======================================================================================
-
-    # Scan SourceRoot, write a manifest skeleton to OutputRoot, and exit. No Vault calls.
+    # ---- Run mode ----
     [switch]     $GenerateManifest,
-
-    # Mapping sheet produced by -GenerateManifest and then filled in by hand.
     [string]     $Manifest,
 
-    # Vault's own export summary (export_results.csv, found in the
-    # <App>-<Sub>-export-summary.zip that Bulk Submission Export produces). When supplied,
-    # the mapping of archive -> submission record is derived from it and no hand-built
-    # manifest is needed. Column names are detected, since Veeva does not publish a schema.
+    # Staging path of export_results.csv. Blank = look for it under SourceStagingPath.
     [string]     $ExportResultsCsv,
     [string]     $IdColumn,
     [string]     $PathColumn,
-
-    # Use when each downloaded file is named for the submission record id itself
-    # (e.g. 00S000000000001.zip, as produced by a /vobjects/.../attachments/file loop).
     [switch]     $NameIsSubmissionId,
 
-    # Supply credentials non-interactively instead of being prompted.
+    # Return each dossier to its original export path after a successful import.
+    # There is no copy operation in the File Staging API, so a move is otherwise one-way.
+    [switch]     $MoveBack,
+
     [pscredential] $Credential,
 
-    # ======================================================================================
-    #  ADVANCED - sensible defaults; change only if you have a reason.
-    # ======================================================================================
-
-    # VQL field used to resolve SubmissionKey -> submission__v id when SubmissionId is blank.
+    # ---- Advanced ----
     [string]     $LookupField      = 'name__v',
-
-    # Applied when the manifest row leaves DossierFormatId blank.
     [string]     $DefaultDossierFormatId,
-
     [string[]]   $Include          = @('*.zip', '*.tar.gz', '*.tgz'),
-
-    # Folders the script must never write into. Add anything you want fenced off.
-    [string[]]   $ProtectedPath    = @("$env:USERPROFILE\Documents\wave1"),
-
-    [int]        $PartSizeMB       = 50,     # Vault max part size is 50 MB; max 2000 parts.
     [int]        $JobTimeoutMinutes = 120,
     [int]        $JobPollSeconds   = 20,
     [int]        $MaxRetries       = 4
@@ -164,28 +97,49 @@ param(
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
-$ProgressPreference    = 'SilentlyContinue'   # large -Body PUTs are ~10x faster without it
+$ProgressPreference    = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
 # --------------------------------------------------------------------------------------
-# Configuration: one file, one load, applied here
-#
-# config.ini is the single place settings live. Run-Import.bat reads the same file, so
-# there is never a second copy to keep in sync. Anything passed explicitly on the command
-# line wins over the file -- that is what $PSBoundParameters checks below.
+# Small helpers
 # --------------------------------------------------------------------------------------
 
-$IntKeys    = @('PartSizeMB', 'JobTimeoutMinutes', 'JobPollSeconds', 'MaxRetries')
-$SwitchKeys = @('GenerateManifest', 'NameIsSubmissionId')
-$ListKeys   = @('Include', 'ProtectedPath')
+function Get-Field {
+    # Strict-mode-safe property read: missing property or empty value yields $Default.
+    param($Object, [Parameter(Mandatory)][string]$Name, $Default = '')
+    if ($null -eq $Object) { return $Default }
+    $p = $Object.PSObject.Properties[$Name]
+    if ($null -eq $p -or $null -eq $p.Value) { return $Default }
+    if ($p.Value -is [string] -and [string]::IsNullOrWhiteSpace($p.Value)) { return $Default }
+    return $p.Value
+}
 
-function Import-ConfigFile {
+function ConvertTo-StagingUrlPath {
     <#
-      Minimal KEY = VALUE parser. Blank lines and #/; comments ignored, surrounding
-      quotes stripped, lists split on commas. Returns an ordered hashtable.
+      Escapes a staging path for use in a URL segment while keeping the separators.
+      Export folders are literally named "Submissions Archive Export" - the spaces must
+      be encoded or every request 404s.
     #>
     param([Parameter(Mandatory)][string]$Path)
+    $clean = $Path.Replace('\', '/').Trim('/')
+    return (($clean -split '/' | ForEach-Object { [Uri]::EscapeDataString($_) }) -join '/')
+}
 
+function Join-StagingPath {
+    param([Parameter(Mandatory)][string]$Parent, [Parameter(Mandatory)][string]$Child)
+    return ('/' + $Parent.Replace('\', '/').Trim('/') + '/' + $Child.Replace('\', '/').Trim('/'))
+}
+
+# --------------------------------------------------------------------------------------
+# Configuration: one file, one load
+# --------------------------------------------------------------------------------------
+
+$IntKeys    = @('JobTimeoutMinutes', 'JobPollSeconds', 'MaxRetries')
+$SwitchKeys = @('GenerateManifest', 'NameIsSubmissionId', 'MoveBack')
+$ListKeys   = @('Include')
+
+function Import-ConfigFile {
+    param([Parameter(Mandatory)][string]$Path)
     $cfg = [ordered]@{}
     foreach ($line in (Get-Content -LiteralPath $Path)) {
         $t = $line.Trim()
@@ -194,7 +148,6 @@ function Import-ConfigFile {
         if ($eq -lt 1) { continue }
         $k = $t.Substring(0, $eq).Trim()
         $v = $t.Substring($eq + 1).Trim().Trim('"', "'")
-        # Expand %USERPROFILE% and friends so paths can be written the .bat way.
         $cfg[$k] = [Environment]::ExpandEnvironmentVariables($v)
     }
     return $cfg
@@ -202,7 +155,6 @@ function Import-ConfigFile {
 
 $ConfigExplicit = $PSBoundParameters.ContainsKey('ConfigFile')
 if ([string]::IsNullOrWhiteSpace($ConfigFile)) {
-    # $PSScriptRoot is empty when dot-sourced or pasted into a console.
     $here = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).ProviderPath }
     $ConfigFile = Join-Path $here 'config.ini'
 }
@@ -210,27 +162,20 @@ if ([string]::IsNullOrWhiteSpace($ConfigFile)) {
 $ConfigMode = ''
 if (Test-Path -LiteralPath $ConfigFile) {
     $cfg = Import-ConfigFile -Path $ConfigFile
-
     foreach ($key in $cfg.Keys) {
         $value = $cfg[$key]
-
-        # MODE is for humans and for Run-Import.bat; translate it into switches here.
         if ($key -eq 'MODE') { $ConfigMode = $value.ToUpperInvariant(); continue }
-
-        # An explicit command-line argument always wins over the file.
         if ($PSBoundParameters.ContainsKey($key)) { continue }
         if (-not (Get-Variable -Name $key -Scope Script -ErrorAction SilentlyContinue)) {
             Write-Warning "config.ini: ignoring unknown setting '$key'"
             continue
         }
         if ([string]::IsNullOrWhiteSpace($value)) { continue }
-
         if     ($IntKeys    -contains $key) { Set-Variable -Name $key -Value ([int]$value) }
         elseif ($SwitchKeys -contains $key) { Set-Variable -Name $key -Value ([bool]($value -match '^(1|true|yes|on)$')) }
         elseif ($ListKeys   -contains $key) { Set-Variable -Name $key -Value ([string[]]($value -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })) }
         else                                { Set-Variable -Name $key -Value $value }
     }
-
     switch ($ConfigMode) {
         'MANIFEST' { if (-not $PSBoundParameters.ContainsKey('GenerateManifest')) { $GenerateManifest = $true } }
         'DRYRUN'   { if (-not $PSBoundParameters.ContainsKey('WhatIf'))           { $WhatIfPreference = $true } }
@@ -239,78 +184,25 @@ if (Test-Path -LiteralPath $ConfigFile) {
         default    { throw "config.ini: MODE must be MANIFEST, DRYRUN or IMPORT (got '$ConfigMode')." }
     }
 }
-elseif ($ConfigExplicit) {
-    throw "Config file not found: $ConfigFile"
-}
-else {
-    Write-Warning "No config.ini found at $ConfigFile - relying on command-line arguments."
-}
+elseif ($ConfigExplicit) { throw "Config file not found: $ConfigFile" }
+else { Write-Warning "No config.ini found at $ConfigFile - relying on command-line arguments." }
 
-# --------------------------------------------------------------------------------------
-# Required settings
-#
-# No safe default exists for these, so they must come from config.ini or the command line.
-# Checked here rather than with [Parameter(Mandatory)], which would prompt on every run
-# even when config.ini already has the answer.
-# --------------------------------------------------------------------------------------
-
-foreach ($name in @('VaultDNS', 'SourceRoot', 'OutputRoot')) {
+foreach ($name in @('VaultDNS', 'SourceStagingPath', 'OutputRoot')) {
     if ([string]::IsNullOrWhiteSpace((Get-Variable -Name $name -ValueOnly))) {
         throw "$name is not set. Add it to $ConfigFile, or pass -$name on the command line."
     }
 }
-$VaultDNS = $VaultDNS -replace '^https?://', '' -replace '/+$', ''
+$VaultDNS          = $VaultDNS -replace '^https?://', '' -replace '/+$', ''
+$SourceStagingPath = '/' + $SourceStagingPath.Replace('\', '/').Trim('/')
+$StagingRoot       = '/' + $StagingRoot.Replace('\', '/').Trim('/')
 
-# --------------------------------------------------------------------------------------
-# Paths and guard rails
-# --------------------------------------------------------------------------------------
+$OutputRoot = [IO.Path]::GetFullPath([IO.Path]::Combine((Get-Location).ProviderPath, $OutputRoot)).TrimEnd('\')
+if (-not (Test-Path -LiteralPath $OutputRoot)) { New-Item -ItemType Directory -Path $OutputRoot -Force | Out-Null }
 
-function Resolve-FullPath([string]$Path) {
-    return [IO.Path]::GetFullPath(
-        [IO.Path]::Combine((Get-Location).ProviderPath, $Path)
-    ).TrimEnd('\')
-}
-
-function Test-IsUnder([string]$Child, [string]$Parent) {
-    $c = (Resolve-FullPath $Child).ToLowerInvariant()
-    $p = (Resolve-FullPath $Parent).ToLowerInvariant()
-    return ($c -eq $p) -or $c.StartsWith($p + '\')
-}
-
-$SourceRoot = Resolve-FullPath $SourceRoot
-$OutputRoot = Resolve-FullPath $OutputRoot
-
-if (-not (Test-Path -LiteralPath $SourceRoot)) {
-    throw "SourceRoot does not exist: $SourceRoot"
-}
-if (Test-IsUnder $OutputRoot $SourceRoot) {
-    throw "OutputRoot ($OutputRoot) is inside SourceRoot. The download folder is read-only for this script -- pick an OutputRoot somewhere else."
-}
-foreach ($p in $ProtectedPath) {
-    if ([string]::IsNullOrWhiteSpace($p)) { continue }
-    if (Test-Path -LiteralPath $p) {
-        if (Test-IsUnder $OutputRoot $p) { throw "OutputRoot ($OutputRoot) is inside protected path $p. Refusing to write there." }
-    }
-}
-if (-not (Test-Path -LiteralPath $OutputRoot)) {
-    New-Item -ItemType Directory -Path $OutputRoot -Force | Out-Null
-}
-
-$stamp        = Get-Date -Format 'yyyyMMdd-HHmmss'
-$ResultsCsv   = Join-Path $OutputRoot 'import-results.csv'
-$ManifestOut  = Join-Path $OutputRoot 'manifest.csv'
+$stamp         = Get-Date -Format 'yyyyMMdd-HHmmss'
+$ResultsCsv    = Join-Path $OutputRoot 'import-results.csv'
+$ManifestOut   = Join-Path $OutputRoot 'manifest.csv'
 $TranscriptLog = Join-Path $OutputRoot "import-$stamp.log"
-
-function Get-Field {
-    # Strict-mode-safe property read: missing property or empty value yields $Default.
-    # Used for optional manifest columns and optional JSON response fields.
-    param($Object, [Parameter(Mandatory)][string]$Name, $Default = '')
-    if ($null -eq $Object) { return $Default }
-    $p = $Object.PSObject.Properties[$Name]
-    if ($null -eq $p -or $null -eq $p.Value) { return $Default }
-    if ($p.Value -is [string] -and [string]::IsNullOrWhiteSpace($p.Value)) { return $Default }
-    return $p.Value
-}
 
 function Write-Log {
     param([string]$Message, [ValidateSet('INFO','WARN','ERROR','OK')][string]$Level = 'INFO')
@@ -325,178 +217,13 @@ function Write-Log {
 }
 
 # --------------------------------------------------------------------------------------
-# Discover archives (read-only enumeration of SourceRoot)
-# --------------------------------------------------------------------------------------
-
-function Get-SourceArchive {
-    # Post-filter rather than -Include: -Include silently matches nothing in several
-    # LiteralPath/Recurse combinations, which looks like "no files found".
-    Get-ChildItem -LiteralPath $SourceRoot -Recurse -File |
-        Where-Object {
-            $name = $_.Name
-            ($Include | Where-Object { $name -like $_ } | Select-Object -First 1) -ne $null
-        } |
-        Sort-Object FullName |
-        ForEach-Object {
-            # ApplicationFolder = first folder under SourceRoot, else '' for a flat layout
-            $rel = $_.FullName.Substring($SourceRoot.Length).TrimStart('\')
-            $parts = $rel -split '\\'
-            $app = if ($parts.Count -gt 1) { $parts[0] } else { '' }
-            [pscustomobject]@{
-                FileName            = $_.Name
-                FullPath            = $_.FullName
-                SizeBytes           = $_.Length
-                SizeMB              = [math]::Round($_.Length / 1MB, 2)
-                RelativePath        = $rel
-                ApplicationFolder   = $app
-                BaseName            = ($_.Name -replace '\.tar\.gz$|\.tgz$|\.zip$', '')
-            }
-        }
-}
-
-# --------------------------------------------------------------------------------------
-# Vault's own export summary as the source of truth
-#
-# Bulk Submission Export writes export_results.csv / manifest.csv into a
-# <App>-<Sub>-export-summary.zip alongside each <App>-<Sub>.zip dossier. export_results.csv
-# lists every exported submission with the relative path to its submission folder plus
-# Submission record field values -- which is exactly the archive -> record mapping we need.
-#
-# Veeva does not publish the column schema, so columns are detected by name and then by
-# value shape, and can be forced with -IdColumn / -PathColumn.
-# --------------------------------------------------------------------------------------
-
-function Import-ExportResults {
-    param([Parameter(Mandatory)][string]$Path)
-
-    if (-not (Test-Path -LiteralPath $Path)) { throw "ExportResultsCsv not found: $Path" }
-    $rows = @(Import-Csv -LiteralPath $Path)
-    if ($rows.Count -eq 0) { throw "ExportResultsCsv is empty: $Path" }
-
-    $headers = @($rows[0].PSObject.Properties.Name)
-    $sample  = @($rows | Select-Object -First 50)
-
-    # --- id column ---
-    $idCol = $IdColumn
-    if (-not $idCol) {
-        $idCol = @($headers | Where-Object { $_ -match '^(id|submission_?id|submission__v)$' }) | Select-Object -First 1
-    }
-    if (-not $idCol) {
-        # Vault object record ids for submission__v look like 00S............
-        $idCol = @($headers | Where-Object {
-            $c = $_
-            @($sample | ForEach-Object { "$(Get-Field $_ $c)" } | Where-Object { $_ -match '^00S[A-Za-z0-9]{8,}$' }).Count -gt 0
-        }) | Select-Object -First 1
-    }
-    if (-not $idCol) {
-        throw "Could not find a submission id column in $Path. Columns present: $($headers -join ', '). Re-run with -IdColumn <name>."
-    }
-
-    # --- path column ---
-    $pathCol = $PathColumn
-    if (-not $pathCol) {
-        $pathCol = @($headers | Where-Object { $_ -match 'path|folder' }) | Select-Object -First 1
-    }
-    if (-not $pathCol) {
-        $pathCol = @($headers | Where-Object {
-            $c = $_
-            @($sample | ForEach-Object { "$(Get-Field $_ $c)" } | Where-Object { $_ -match '[\\/]' }).Count -gt 0
-        }) | Select-Object -First 1
-    }
-    if (-not $pathCol) {
-        throw "Could not find a submission folder path column in $Path. Columns present: $($headers -join ', '). Re-run with -PathColumn <name>."
-    }
-
-    Write-Log "export_results.csv: using '$idCol' as the submission id and '$pathCol' as the submission folder path"
-
-    $out = @{}
-    foreach ($r in $rows) {
-        $id  = "$(Get-Field $r $idCol)"
-        $rel = "$(Get-Field $r $pathCol)".Replace('\', '/').Trim('/')
-        if (-not $id -or -not $rel) { continue }
-
-        $parts = @($rel -split '/' | Where-Object { $_ })
-        if ($parts.Count -eq 0) { continue }
-        $sub = $parts[-1]
-        $app = if ($parts.Count -ge 2) { $parts[-2] } else { '' }
-
-        $entry = [pscustomobject]@{
-            FileName             = "$app-$sub.zip"
-            ApplicationFolder    = $app
-            SubmissionId         = $id
-            SubmissionKey        = $sub
-            ActualSubmissionDate = ''
-            DossierFormatId      = ''
-        }
-
-        # Primary key: the dossier name Vault emits, "<App>-<Sub>.zip".
-        $out[$entry.FileName] = $entry
-        # Secondary keys for downloads that were renamed on the way out.
-        foreach ($alt in @("$sub.zip", "$id.zip")) {
-            if (-not $out.ContainsKey($alt)) { $out[$alt] = $entry }
-        }
-    }
-
-    if ($out.Count -eq 0) { throw "No usable rows parsed from $Path" }
-    Write-Log "Mapped $($rows.Count) exported submission(s) from $Path" 'OK'
-    return $out
-}
-
-# --------------------------------------------------------------------------------------
-# -GenerateManifest: write the mapping sheet and stop. No network, no uploads.
-# --------------------------------------------------------------------------------------
-
-if ($GenerateManifest) {
-    $archives = @(Get-SourceArchive)
-    if ($archives.Count -eq 0) { throw "No archives matching $($Include -join ', ') found under $SourceRoot" }
-
-    $fromExport = @{}
-    if ($ExportResultsCsv) { $fromExport = Import-ExportResults -Path $ExportResultsCsv }
-
-    $resolved = 0
-    $archives | ForEach-Object {
-        $a = $_
-        $hit = $null
-        if ($fromExport.ContainsKey($a.FileName))      { $hit = $fromExport[$a.FileName] }
-        elseif ($fromExport.ContainsKey("$($a.BaseName).zip")) { $hit = $fromExport["$($a.BaseName).zip"] }
-
-        $subId = ''
-        if ($hit)                    { $subId = $hit.SubmissionId; $resolved++ }
-        elseif ($NameIsSubmissionId) { $subId = $a.BaseName;       $resolved++ }
-
-        [pscustomobject]@{
-            FileName             = $a.FileName
-            RelativePath         = $a.RelativePath
-            SizeMB               = $a.SizeMB
-            ApplicationFolder    = if ($hit -and $hit.ApplicationFolder) { $hit.ApplicationFolder } else { $a.ApplicationFolder }
-            SubmissionId         = $subId
-            SubmissionKey        = if ($hit) { $hit.SubmissionKey } else { $a.BaseName }
-            ActualSubmissionDate = ''
-            DossierFormatId      = ''
-        }
-    } | Export-Csv -LiteralPath $ManifestOut -NoTypeInformation -Encoding UTF8
-
-    Write-Log "Wrote manifest for $($archives.Count) archive(s), $resolved with SubmissionId already filled in: $ManifestOut" 'OK'
-    if ($resolved -lt $archives.Count) {
-        Write-Log "Fill in SubmissionId for the remaining $($archives.Count - $resolved) row(s), or leave SubmissionKey for VQL lookup on $LookupField." 'INFO'
-    }
-    return
-}
-
-# --------------------------------------------------------------------------------------
 # Session id
 #
-# $script:SessionId is the single source of truth for the Vault session. It is:
-#   seeded  here, once, from the -SessionId CONFIG value (blank means "log in for me")
-#   written only by Connect-Vault, on first login and on re-auth after expiry
-#   read    only by Invoke-VaultApi, which stamps it into the Authorization header
-#
-# Nothing else in the script touches it, and no function takes a session id as an
-# argument. That is what makes the mid-run re-auth safe: the header is rebuilt from
-# this variable on every attempt, so a refreshed session is picked up immediately by
-# whatever call was in flight.
-#
-# Vault expects the raw session id in Authorization -- no "Bearer " prefix.
+# $script:SessionId is the single source of truth for the Vault session:
+#   seeded here from the SessionId config value, written only by Connect-Vault,
+#   read only by Invoke-VaultApi when it builds the Authorization header.
+# No function takes a session id as an argument, which is what makes mid-run re-auth
+# safe - the header is rebuilt from this variable on every attempt.
 # --------------------------------------------------------------------------------------
 
 $script:BaseUrl   = "https://$VaultDNS/api/$ApiVersion"
@@ -504,63 +231,50 @@ $script:SessionId = $SessionId
 $script:Cred      = $Credential
 
 function Connect-Vault {
-    if (-not $script:Cred) {
-        $script:Cred = Get-Credential -Message "Vault credentials for $VaultDNS"
-    }
-    $body = @{
-        username = $script:Cred.UserName
-        password = $script:Cred.GetNetworkCredential().Password
-    }
+    if (-not $script:Cred) { $script:Cred = Get-Credential -Message "Vault credentials for $VaultDNS" }
+    $body = @{ username = $script:Cred.UserName; password = $script:Cred.GetNetworkCredential().Password }
     $r = Invoke-RestMethod -Method Post -Uri "$script:BaseUrl/auth" -Body $body `
             -ContentType 'application/x-www-form-urlencoded' -Headers @{ Accept = 'application/json' }
-    if ($r.responseStatus -ne 'SUCCESS') {
-        throw "Authentication failed: $($r | ConvertTo-Json -Depth 5 -Compress)"
-    }
+    if ($r.responseStatus -ne 'SUCCESS') { throw "Authentication failed: $($r | ConvertTo-Json -Depth 5 -Compress)" }
     $script:SessionId = $r.sessionId
     Write-Log "Authenticated to $VaultDNS (vaultId $($r.vaultId), userId $($r.userId))" 'OK'
 }
 
 # --------------------------------------------------------------------------------------
-# Core request helper: retries, session refresh, burst-limit backoff
+# Core request helper
 # --------------------------------------------------------------------------------------
 
 function Invoke-VaultApi {
     param(
         [Parameter(Mandatory)][ValidateSet('GET','POST','PUT','DELETE')][string]$Method,
-        [Parameter(Mandatory)][string]$Path,             # relative to /api/{version}
+        [Parameter(Mandatory)][string]$Path,
         $Body,
         [string]$ContentType,
         [hashtable]$ExtraHeaders = @{},
-        [int]$TimeoutSec = 900,
-        [switch]$NoRetryOn4xx
+        [int]$TimeoutSec = 600,
+        [switch]$Raw                      # return the response body as text, not parsed JSON
     )
 
     $uri = if ($Path -match '^https?://') { $Path } else { "$script:BaseUrl$Path" }
 
     for ($attempt = 1; $attempt -le $MaxRetries; $attempt++) {
-        $headers = @{ Authorization = $script:SessionId; Accept = 'application/json' }
+        $headers = @{ Authorization = $script:SessionId; Accept = if ($Raw) { '*/*' } else { 'application/json' } }
         foreach ($k in $ExtraHeaders.Keys) { $headers[$k] = $ExtraHeaders[$k] }
 
         try {
-            # NB: not $args -- that is an automatic variable and clobbering it breaks splatting.
-            $req = @{
-                Method          = $Method
-                Uri             = $uri
-                Headers         = $headers
-                TimeoutSec      = $TimeoutSec
-                UseBasicParsing = $true
-            }
-            if ($null -ne $Body)  { $req['Body'] = $Body }
-            if ($ContentType)     { $req['ContentType'] = $ContentType }
+            $req = @{ Method = $Method; Uri = $uri; Headers = $headers; TimeoutSec = $TimeoutSec; UseBasicParsing = $true }
+            if ($null -ne $Body) { $req['Body'] = $Body }
+            if ($ContentType)    { $req['ContentType'] = $ContentType }
 
             $resp = Invoke-WebRequest @req
 
-            # Burst limit is a rolling 5-minute window; back off before Vault throttles us.
             $remaining = $resp.Headers['X-VaultAPI-BurstLimitRemaining']
             if ($remaining -and [int]$remaining -lt 200) {
                 Write-Log "Burst limit low ($remaining remaining) - pausing 30s" 'WARN'
                 Start-Sleep -Seconds 30
             }
+
+            if ($Raw) { return $resp.Content }
 
             $json = $null
             if ($resp.Content) { try { $json = $resp.Content | ConvertFrom-Json } catch { } }
@@ -582,19 +296,15 @@ function Invoke-VaultApi {
         catch [System.Net.WebException] {
             $status = $null
             if ($_.Exception.Response) { $status = [int]$_.Exception.Response.StatusCode }
-            $transient = (-not $status) -or ($status -ge 500) -or ($status -eq 429)
-
             if ($status -eq 429) {
                 Write-Log "HTTP 429 rate limited - waiting 60s (attempt $attempt/$MaxRetries)" 'WARN'
                 Start-Sleep -Seconds 60
                 continue
             }
-            if (-not $transient -or $NoRetryOn4xx -or $attempt -eq $MaxRetries) {
+            $transient = (-not $status) -or ($status -ge 500)
+            if (-not $transient -or $attempt -eq $MaxRetries) {
                 $detail = ''
-                try {
-                    $sr = New-Object IO.StreamReader($_.Exception.Response.GetResponseStream())
-                    $detail = $sr.ReadToEnd()
-                } catch { }
+                try { $detail = (New-Object IO.StreamReader($_.Exception.Response.GetResponseStream())).ReadToEnd() } catch { }
                 throw "$Method $Path failed (HTTP $status): $($_.Exception.Message) $detail"
             }
             $wait = [math]::Pow(2, $attempt) * 5
@@ -605,12 +315,45 @@ function Invoke-VaultApi {
     throw "$Method $Path failed after $MaxRetries attempts"
 }
 
+function Wait-VaultJob {
+    param([Parameter(Mandatory)]$JobId, [string]$What = 'job')
+    $running  = @('SCHEDULED','QUEUING','QUEUED','RUNNING','IN_PROGRESS')
+    $deadline = (Get-Date).AddMinutes($JobTimeoutMinutes)
+    while ((Get-Date) -lt $deadline) {
+        $r = Invoke-VaultApi -Method GET -Path "/services/jobs/$JobId"
+        $status = "$(Get-Field (Get-Field $r 'data' $null) 'status' '')".ToUpperInvariant()
+        if ($status -and ($running -notcontains $status)) { return $status }
+        Start-Sleep -Seconds $JobPollSeconds
+    }
+    return "TIMEOUT_AFTER_${JobTimeoutMinutes}_MIN"
+}
+
 # --------------------------------------------------------------------------------------
 # File Staging
 # --------------------------------------------------------------------------------------
 
+function Get-StagingItem {
+    <# Recursive listing of a staging folder. Follows pagination. #>
+    param([Parameter(Mandatory)][string]$Path)
+
+    $items = New-Object System.Collections.ArrayList
+    $next  = "/services/file_staging/items/$(ConvertTo-StagingUrlPath $Path)?recursive=true&limit=500"
+
+    while ($next) {
+        $r = Invoke-VaultApi -Method GET -Path $next
+        foreach ($d in @(Get-Field $r 'data' @())) { [void]$items.Add($d) }
+        $next = Get-Field (Get-Field $r 'responseDetails' $null) 'next_page' ''
+    }
+    return $items
+}
+
+function Get-StagingFileText {
+    param([Parameter(Mandatory)][string]$Path)
+    return Invoke-VaultApi -Method GET -Path "/services/file_staging/items/content/$(ConvertTo-StagingUrlPath $Path)" -Raw
+}
+
 function New-StagingFolder {
-    param([Parameter(Mandatory)][string]$Path)   # e.g. /SubmissionsArchive/nda123456
+    param([Parameter(Mandatory)][string]$Path)
     try {
         Invoke-VaultApi -Method POST -Path '/services/file_staging/items' `
             -ContentType 'application/x-www-form-urlencoded' `
@@ -618,89 +361,179 @@ function New-StagingFolder {
         Write-Log "Staging folder ready: $Path"
     }
     catch {
-        # Already-exists is the normal case on re-runs; anything else is real.
-        if ("$_" -match 'exist') { Write-Log "Staging folder already present: $Path" }
-        else { throw }
+        if ("$_" -match 'exist') { Write-Log "Staging folder already present: $Path" } else { throw }
     }
 }
 
-function Send-StagingFile {
+function Move-StagingItem {
     <#
-      Uploads via a resumable session for every file, regardless of size:
-      one code path, binary-safe on PowerShell 5.1 (no multipart assembly), restartable,
-      and the only supported route above 50 MB.
-      Returns the staging path of the committed file.
+      Server-side relocation. No bytes cross the network. Asynchronous: Vault returns a
+      job id which is polled here. There is no copy operation in the File Staging API,
+      so this is one-way unless -MoveBack is set.
     #>
     param(
-        [Parameter(Mandatory)][string]$LocalPath,
-        [Parameter(Mandatory)][string]$StagingPath   # full destination path incl. file name
+        [Parameter(Mandatory)][string]$Path,      # current full staging path
+        [Parameter(Mandatory)][string]$NewParent  # destination folder
     )
+    $r = Invoke-VaultApi -Method PUT -Path "/services/file_staging/items/$(ConvertTo-StagingUrlPath $Path)" `
+            -ContentType 'application/x-www-form-urlencoded' -Body @{ parent = $NewParent }
 
-    $fi        = Get-Item -LiteralPath $LocalPath
-    $partSize  = $PartSizeMB * 1MB
-    $totalSize = $fi.Length
-    $partCount = [math]::Max(1, [math]::Ceiling($totalSize / $partSize))
-
-    if ($partCount -gt 2000) {
-        throw "$($fi.Name) needs $partCount parts; Vault allows 2000. Raise -PartSizeMB (max 50) or split the archive."
+    $jobId = Get-Field (Get-Field $r 'data' $null) 'job_id' (Get-Field $r 'job_id' '')
+    if ($jobId) {
+        $status = Wait-VaultJob -JobId $jobId -What 'move'
+        if ($status -ne 'SUCCESS') { throw "Move of $Path to $NewParent ended $status (job $jobId)" }
     }
-
-    $session = Invoke-VaultApi -Method POST -Path '/services/file_staging/upload' `
-        -ContentType 'application/x-www-form-urlencoded' `
-        -Body @{ path = $StagingPath; size = $totalSize; overwrite = 'true' }
-
-    $sdata = Get-Field $session 'data' $null
-    $sid   = Get-Field $sdata 'upload_session_id' (Get-Field $sdata 'id' '')
-    if (-not $sid) { throw "No upload session id returned for $($fi.Name)" }
-
-    Write-Log ("Uploading {0} ({1:N1} MB, {2} part(s), session {3})" -f $fi.Name, ($totalSize / 1MB), $partCount, $sid)
-
-    $md5 = [Security.Cryptography.MD5]::Create()
-    # FileShare::Read -- the source download is never locked for writing by this script.
-    $fs  = New-Object IO.FileStream($fi.FullName, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
-    try {
-        $buffer = New-Object byte[] $partSize
-        for ($part = 1; $part -le $partCount; $part++) {
-            $read = $fs.Read($buffer, 0, $partSize)
-            if ($read -le 0) { break }
-
-            # Array.Copy, not $buffer[0..$n] -- the range operator on a 50 MB buffer is
-            # pathologically slow and allocates an object[] of 50 million elements.
-            $chunk = $buffer
-            if ($read -ne $partSize) {
-                $chunk = New-Object byte[] $read
-                [Array]::Copy($buffer, 0, $chunk, 0, $read)
-            }
-            $hash = [Convert]::ToBase64String($md5.ComputeHash($chunk))
-
-            Invoke-VaultApi -Method PUT -Path "/services/file_staging/upload/$sid" `
-                -ContentType 'application/octet-stream' -Body $chunk `
-                -ExtraHeaders @{ 'X-VaultAPI-FilePartNumber' = "$part"; 'Content-MD5' = $hash } | Out-Null
-
-            Write-Log ("  part {0}/{1} ({2:N1} MB) ok" -f $part, $partCount, ($read / 1MB))
-        }
-    }
-    finally {
-        $fs.Close(); $fs.Dispose(); $md5.Dispose()
-    }
-
-    Invoke-VaultApi -Method POST -Path "/services/file_staging/upload/$sid" | Out-Null
-    Write-Log "Committed to staging: $StagingPath" 'OK'
-    return $StagingPath
+    $leaf = ($Path.Replace('\', '/').TrimEnd('/') -split '/')[-1]
+    return (Join-StagingPath $NewParent $leaf)
 }
 
 # --------------------------------------------------------------------------------------
-# Submission lookup, import, job polling
+# Mapping: export_results.csv, read straight off staging
+# --------------------------------------------------------------------------------------
+
+function ConvertFrom-ExportResults {
+    param([Parameter(Mandatory)][string]$Csv)
+
+    $rows = @($Csv | ConvertFrom-Csv)
+    if ($rows.Count -eq 0) { throw 'export_results.csv parsed to zero rows' }
+
+    $headers = @($rows[0].PSObject.Properties.Name)
+    $sample  = @($rows | Select-Object -First 50)
+
+    $idCol = $IdColumn
+    if (-not $idCol) { $idCol = @($headers | Where-Object { $_ -match '^(id|submission_?id|submission__v)$' }) | Select-Object -First 1 }
+    if (-not $idCol) {
+        $idCol = @($headers | Where-Object {
+            $c = $_
+            @($sample | ForEach-Object { "$(Get-Field $_ $c)" } | Where-Object { $_ -match '^00S[A-Za-z0-9]{8,}$' }).Count -gt 0
+        }) | Select-Object -First 1
+    }
+    if (-not $idCol) { throw "No submission id column found. Columns: $($headers -join ', '). Set IdColumn in config.ini." }
+
+    $pathCol = $PathColumn
+    if (-not $pathCol) { $pathCol = @($headers | Where-Object { $_ -match 'path|folder' }) | Select-Object -First 1 }
+    if (-not $pathCol) {
+        $pathCol = @($headers | Where-Object {
+            $c = $_
+            @($sample | ForEach-Object { "$(Get-Field $_ $c)" } | Where-Object { $_ -match '[\\/]' }).Count -gt 0
+        }) | Select-Object -First 1
+    }
+    if (-not $pathCol) { throw "No submission folder path column found. Columns: $($headers -join ', '). Set PathColumn in config.ini." }
+
+    Write-Log "export_results.csv: id column '$idCol', path column '$pathCol'"
+
+    $map = @{}
+    foreach ($r in $rows) {
+        $id  = "$(Get-Field $r $idCol)"
+        $rel = "$(Get-Field $r $pathCol)".Replace('\', '/').Trim('/')
+        if (-not $id -or -not $rel) { continue }
+
+        $parts = @($rel -split '/' | Where-Object { $_ })
+        if ($parts.Count -eq 0) { continue }
+        $sub = $parts[-1]
+        $app = if ($parts.Count -ge 2) { $parts[-2] } else { '' }
+
+        $entry = [pscustomobject]@{
+            ApplicationFolder    = $app
+            SubmissionId         = $id
+            SubmissionKey        = $sub
+            ActualSubmissionDate = ''
+            DossierFormatId      = ''
+        }
+        foreach ($k in @("$app-$sub.zip", "$sub.zip", "$id.zip", "$app-$sub", $sub)) {
+            if ($k -and -not $map.ContainsKey($k)) { $map[$k] = $entry }
+        }
+    }
+    if ($map.Count -eq 0) { throw 'No usable rows parsed from export_results.csv' }
+    return $map
+}
+
+# --------------------------------------------------------------------------------------
+# Discover the export on staging
+# --------------------------------------------------------------------------------------
+
+if (-not $script:SessionId) { Connect-Vault }
+
+Write-Log "Listing export folder on File Staging: $SourceStagingPath"
+$staged = Get-StagingItem -Path $SourceStagingPath
+
+$dossiers = @($staged | Where-Object {
+    $kind = "$(Get-Field $_ 'kind' 'file')"
+    $name = "$(Get-Field $_ 'name' '')"
+    ($kind -ne 'folder') -and (($Include | Where-Object { $name -like $_ } | Select-Object -First 1) -ne $null)
+})
+
+if ($dossiers.Count -eq 0) {
+    throw "No dossiers matching $($Include -join ', ') found under $SourceStagingPath. Listed $($staged.Count) item(s) - check the path, and note that only .zip/.tar.gz can be imported from the staging root."
+}
+Write-Log "Found $($dossiers.Count) dossier(s) under $SourceStagingPath"
+
+# export_results.csv, in place
+$map = @{}
+$exportCsvPath = $ExportResultsCsv
+if (-not $exportCsvPath) {
+    $hit = @($staged | Where-Object { "$(Get-Field $_ 'name' '')" -ieq 'export_results.csv' }) | Select-Object -First 1
+    if ($hit) { $exportCsvPath = "$(Get-Field $hit 'path' '')" }
+}
+if ($exportCsvPath) {
+    Write-Log "Reading mapping from staging: $exportCsvPath"
+    $map = ConvertFrom-ExportResults -Csv (Get-StagingFileText -Path $exportCsvPath)
+    Write-Log "Mapping loaded for $($map.Count) key(s)" 'OK'
+} else {
+    Write-Log "No export_results.csv found under $SourceStagingPath - falling back to file names and VQL." 'WARN'
+}
+
+# A hand-edited manifest overrides the export csv.
+if ($Manifest) {
+    if (-not (Test-Path -LiteralPath $Manifest)) { throw "Manifest not found: $Manifest" }
+    $n = 0
+    foreach ($row in (Import-Csv -LiteralPath $Manifest)) {
+        $fn = Get-Field $row 'FileName'
+        if ($fn) { $map[$fn] = $row; $n++ }
+    }
+    Write-Log "Loaded manifest with $n row(s): $Manifest"
+}
+
+# --------------------------------------------------------------------------------------
+# MODE = MANIFEST: write the mapping sheet and stop
+# --------------------------------------------------------------------------------------
+
+if ($GenerateManifest) {
+    $resolved = 0
+    $dossiers | ForEach-Object {
+        $name = "$(Get-Field $_ 'name' '')"
+        $base = ($name -replace '\.tar\.gz$|\.tgz$|\.zip$', '')
+        $hit  = if ($map.ContainsKey($name)) { $map[$name] } elseif ($map.ContainsKey($base)) { $map[$base] } else { $null }
+        $subId = if ($hit) { Get-Field $hit 'SubmissionId' } elseif ($NameIsSubmissionId) { $base } else { '' }
+        if ($subId) { $resolved++ }
+        [pscustomobject]@{
+            FileName             = $name
+            StagingPath          = "$(Get-Field $_ 'path' '')"
+            SizeMB               = [math]::Round(([double]"$(Get-Field $_ 'size' 0)") / 1MB, 2)
+            ApplicationFolder    = if ($hit) { Get-Field $hit 'ApplicationFolder' } else { '' }
+            SubmissionId         = $subId
+            SubmissionKey        = if ($hit) { Get-Field $hit 'SubmissionKey' } else { $base }
+            ActualSubmissionDate = ''
+            DossierFormatId      = ''
+        }
+    } | Export-Csv -LiteralPath $ManifestOut -NoTypeInformation -Encoding UTF8
+
+    Write-Log "Wrote manifest for $($dossiers.Count) dossier(s), $resolved with SubmissionId filled in: $ManifestOut" 'OK'
+    return
+}
+
+# --------------------------------------------------------------------------------------
+# Submission lookup / import
 # --------------------------------------------------------------------------------------
 
 function Resolve-SubmissionId {
     param([Parameter(Mandatory)][string]$Key)
     $escaped = $Key.Replace("'", "\'")
-    $q = "SELECT id, name__v FROM submission__v WHERE $LookupField = '$escaped'"
-    $r = Invoke-VaultApi -Method POST -Path '/query' -ContentType 'application/x-www-form-urlencoded' -Body @{ q = $q }
-    $rows = @($r.data)
+    $r = Invoke-VaultApi -Method POST -Path '/query' -ContentType 'application/x-www-form-urlencoded' `
+            -Body @{ q = "SELECT id, name__v FROM submission__v WHERE $LookupField = '$escaped'" }
+    $rows = @(Get-Field $r 'data' @())
     if ($rows.Count -eq 0) { throw "No submission__v record where $LookupField = '$Key'" }
-    if ($rows.Count -gt 1) { throw "$($rows.Count) submission__v records match $LookupField = '$Key' -- set SubmissionId explicitly in the manifest" }
+    if ($rows.Count -gt 1) { throw "$($rows.Count) submission__v records match $LookupField = '$Key' - set SubmissionId in the manifest" }
     return $rows[0].id
 }
 
@@ -727,30 +560,11 @@ function Start-SubmissionImport {
     return [pscustomobject]@{ JobId = (Get-Field $r 'job_id' ''); Warnings = $warnings }
 }
 
-function Wait-VaultJob {
-    param([Parameter(Mandatory)]$JobId)
-
-    $running  = @('SCHEDULED','QUEUING','QUEUED','RUNNING','IN_PROGRESS')
-    $deadline = (Get-Date).AddMinutes($JobTimeoutMinutes)
-
-    while ((Get-Date) -lt $deadline) {
-        $r = Invoke-VaultApi -Method GET -Path "/services/jobs/$JobId"
-        $status = "$(Get-Field (Get-Field $r 'data' $null) 'status' '')".ToUpperInvariant()
-        if ($status -and ($running -notcontains $status)) {
-            return $status
-        }
-        Start-Sleep -Seconds $JobPollSeconds
-    }
-    return "TIMEOUT_AFTER_${JobTimeoutMinutes}_MIN"
-}
-
 function Get-ImportResult {
     param([Parameter(Mandatory)][string]$SubmissionId, [Parameter(Mandatory)]$JobId)
     try {
+        # Vault 26R3 stops returning the data array here; importMessages remains.
         $r = Invoke-VaultApi -Method GET -Path "/vobjects/submission__v/$SubmissionId/actions/import/$JobId/results"
-
-        # Note: Vault 26R3 (Dec 2026) stops returning the `data` array here; the endpoint
-        # keeps working and importMessages remains. Hence the tolerant reads below.
         $binderId = ''; $version = ''
         $d = Get-Field $r 'data' $null
         if ($d) {
@@ -769,74 +583,47 @@ function Get-ImportResult {
 }
 
 # --------------------------------------------------------------------------------------
-# Build the work list
+# Main loop
 # --------------------------------------------------------------------------------------
 
-$archives = @(Get-SourceArchive)
-if ($archives.Count -eq 0) { throw "No archives matching $($Include -join ', ') found under $SourceRoot" }
-Write-Log "Found $($archives.Count) archive(s) under $SourceRoot (read-only)"
-
-$map = @{}
-if ($ExportResultsCsv) {
-    # Highest-fidelity source: Vault generated it during the export.
-    $map = Import-ExportResults -Path $ExportResultsCsv
-}
-if ($Manifest) {
-    if (-not (Test-Path -LiteralPath $Manifest)) { throw "Manifest not found: $Manifest" }
-    $n = 0
-    foreach ($row in (Import-Csv -LiteralPath $Manifest)) {
-        $fn = Get-Field $row 'FileName'
-        if ($fn) { $map[$fn] = $row; $n++ }   # a hand-edited manifest overrides the export csv
-    }
-    Write-Log "Loaded manifest with $n row(s): $Manifest"
-}
-if (-not $ExportResultsCsv -and -not $Manifest -and -not $NameIsSubmissionId) {
-    Write-Log "No -ExportResultsCsv, -Manifest or -NameIsSubmissionId: application folder comes from the directory layout and the submission is resolved by VQL on $LookupField = <file base name>." 'WARN'
-}
-
-# Skip anything already imported successfully in a previous run.
 $done = @{}
 if (Test-Path -LiteralPath $ResultsCsv) {
     foreach ($row in (Import-Csv -LiteralPath $ResultsCsv)) {
-        if ($row.Status -eq 'SUCCESS') { $done[$row.FileName] = $true }
+        if ((Get-Field $row 'Status') -eq 'SUCCESS') { $done[(Get-Field $row 'FileName')] = $true }
     }
-    if ($done.Count) { Write-Log "$($done.Count) archive(s) already SUCCESS in $ResultsCsv - they will be skipped" }
+    if ($done.Count) { Write-Log "$($done.Count) dossier(s) already SUCCESS in $ResultsCsv - skipping them" }
 }
-
-if (-not $script:SessionId) { Connect-Vault }
-
-# --------------------------------------------------------------------------------------
-# Main loop
-# --------------------------------------------------------------------------------------
 
 $results   = New-Object System.Collections.ArrayList
 $createdIn = @{}
 $i = 0
 
-foreach ($a in $archives) {
+foreach ($d in $dossiers) {
     $i++
-    $prefix = "[$i/$($archives.Count)] $($a.FileName)"
+    $name       = "$(Get-Field $d 'name' '')"
+    $sourcePath = "$(Get-Field $d 'path' '')"
+    $base       = ($name -replace '\.tar\.gz$|\.tgz$|\.zip$', '')
+    $prefix     = "[$i/$($dossiers.Count)] $name"
 
-    if ($done.ContainsKey($a.FileName)) { Write-Log "$prefix - skipped (already SUCCESS)"; continue }
+    if ($done.ContainsKey($name)) { Write-Log "$prefix - skipped (already SUCCESS)"; continue }
 
-    $row = $null
-    if ($map.ContainsKey($a.FileName))                    { $row = $map[$a.FileName] }
-    elseif ($map.ContainsKey("$($a.BaseName).zip"))       { $row = $map["$($a.BaseName).zip"] }
+    $hit = if ($map.ContainsKey($name)) { $map[$name] } elseif ($map.ContainsKey($base)) { $map[$base] } else { $null }
 
-    $appFolder = Get-Field $row 'ApplicationFolder'    $a.ApplicationFolder
-    $subKey    = Get-Field $row 'SubmissionKey'        $a.BaseName
-    $subId     = Get-Field $row 'SubmissionId'         $(if ($NameIsSubmissionId) { $a.BaseName } else { '' })
-    $dossier   = Get-Field $row 'DossierFormatId'      $DefaultDossierFormatId
-    $subDate   = Get-Field $row 'ActualSubmissionDate' ''
+    $appFolder = Get-Field $hit 'ApplicationFolder' ''
+    $subKey    = Get-Field $hit 'SubmissionKey'     $base
+    $subId     = Get-Field $hit 'SubmissionId'      $(if ($NameIsSubmissionId) { $base } else { '' })
+    $dossier   = Get-Field $hit 'DossierFormatId'   $DefaultDossierFormatId
+    $subDate   = Get-Field $hit 'ActualSubmissionDate' ''
 
     $record = [ordered]@{
-        FileName          = $a.FileName
-        SourcePath        = $a.FullPath
-        SizeMB            = $a.SizeMB
+        FileName          = $name
+        SourceStagingPath = $sourcePath
+        SizeMB            = [math]::Round(([double]"$(Get-Field $d 'size' 0)") / 1MB, 2)
         ApplicationFolder = $appFolder
-        StagingPath       = ''
+        ImportStagingPath = ''
         SubmissionKey     = $subKey
         SubmissionId      = $subId
+        MoveJobDone       = ''
         JobId             = ''
         Status            = ''
         BinderId          = ''
@@ -849,36 +636,38 @@ foreach ($a in $archives) {
 
     try {
         if (-not $appFolder) {
-            throw "No ApplicationFolder for $($a.FileName) -- set it in the manifest or put the archive in a per-application subfolder."
+            throw "No ApplicationFolder for $name - it was not in export_results.csv. Add a manifest row, or set ExportResultsCsv."
         }
 
-        $stagingFolder = "$StagingRoot/$appFolder"
-        $stagingPath   = "$stagingFolder/$($a.FileName)"
-        $record.StagingPath = $stagingPath
+        $targetFolder = "$StagingRoot/$appFolder"
+        $targetPath   = "$targetFolder/$name"
+        $record.ImportStagingPath = $targetPath
 
         if (-not $subId) {
-            # Read-only VQL, so it runs under -WhatIf too -- that is what makes the dry run
-            # worth doing: a bad SubmissionKey surfaces before anything is uploaded.
+            # Read-only VQL, so it runs under -WhatIf too: a bad key surfaces before any move.
             Write-Log "$prefix - resolving submission by $LookupField = '$subKey'"
             $subId = Resolve-SubmissionId -Key $subKey
             $record.SubmissionId = $subId
         }
 
-        if ($PSCmdlet.ShouldProcess("$stagingPath -> submission $subId", 'Upload and import')) {
-            if (-not $createdIn.ContainsKey($stagingFolder)) {
-                New-StagingFolder -Path $stagingFolder
-                $createdIn[$stagingFolder] = $true
+        if ($PSCmdlet.ShouldProcess("$sourcePath -> $targetPath, submission $subId", 'Move on staging and import')) {
+            if (-not $createdIn.ContainsKey($targetFolder)) {
+                New-StagingFolder -Path $targetFolder
+                $createdIn[$targetFolder] = $true
             }
 
-            Send-StagingFile -LocalPath $a.FullPath -StagingPath $stagingPath | Out-Null
+            Write-Log "$prefix - moving on staging to $targetFolder (server-side, no transfer)"
+            $moved = Move-StagingItem -Path $sourcePath -NewParent $targetFolder
+            $record.MoveJobDone = 'yes'
+            $record.ImportStagingPath = $moved
 
-            $job = Start-SubmissionImport -SubmissionId $subId -StagingPath $stagingPath `
+            $job = Start-SubmissionImport -SubmissionId $subId -StagingPath $moved `
                         -DossierFormatId $dossier -ActualSubmissionDate $subDate
             $record.JobId    = $job.JobId
             $record.Warnings = $job.Warnings
             Write-Log "$prefix - import job $($job.JobId) started; polling"
 
-            $status = Wait-VaultJob -JobId $job.JobId
+            $status = Wait-VaultJob -JobId $job.JobId -What 'import'
             $record.Status = $status
 
             $res = Get-ImportResult -SubmissionId $subId -JobId $job.JobId
@@ -888,10 +677,18 @@ foreach ($a in $archives) {
 
             if ($status -eq 'SUCCESS') { Write-Log "$prefix - SUCCESS (binder $($res.BinderId) v$($res.BinderVersion))" 'OK' }
             else                       { Write-Log "$prefix - job ended $status. $($res.Messages)" 'ERROR' }
+
+            if ($MoveBack) {
+                $originalParent = ($sourcePath.Replace('\', '/').TrimEnd('/') -split '/')
+                $originalParent = ($originalParent[0..($originalParent.Count - 2)]) -join '/'
+                Write-Log "$prefix - returning dossier to $originalParent"
+                Move-StagingItem -Path $moved -NewParent $originalParent | Out-Null
+                $record.MoveJobDone = 'yes (returned)'
+            }
         }
         else {
             $record.Status = 'WHATIF'
-            Write-Log "$prefix - WhatIf: would upload to $stagingPath and import into submission $subId"
+            Write-Log "$prefix - WhatIf: would move to $targetPath and import into submission $subId"
         }
     }
     catch {
@@ -902,8 +699,6 @@ foreach ($a in $archives) {
 
     $record.FinishedUtc = (Get-Date).ToUniversalTime().ToString('s')
     [void]$results.Add([pscustomobject]$record)
-
-    # Flush after every archive so an interrupted run still leaves a usable CSV.
     $results | Export-Csv -LiteralPath $ResultsCsv -NoTypeInformation -Encoding UTF8
 }
 
@@ -911,14 +706,16 @@ foreach ($a in $archives) {
 # Summary
 # --------------------------------------------------------------------------------------
 
-$ok    = @($results | Where-Object Status -eq 'SUCCESS').Count
-$bad   = @($results | Where-Object { $_.Status -notin @('SUCCESS','WHATIF') }).Count
-$what  = @($results | Where-Object Status -eq 'WHATIF').Count
+$ok   = @($results | Where-Object Status -eq 'SUCCESS').Count
+$bad  = @($results | Where-Object { $_.Status -notin @('SUCCESS','WHATIF') }).Count
+$what = @($results | Where-Object Status -eq 'WHATIF').Count
 
 Write-Log '----------------------------------------------------------------'
-Write-Log "Processed $($results.Count) archive(s): $ok succeeded, $bad failed, $what dry-run" $(if ($bad) { 'WARN' } else { 'OK' })
+Write-Log "Processed $($results.Count) dossier(s): $ok succeeded, $bad failed, $what dry-run" $(if ($bad) { 'WARN' } else { 'OK' })
 Write-Log "Results CSV : $ResultsCsv"
 Write-Log "Log         : $TranscriptLog"
-Write-Log "Source files untouched in: $SourceRoot"
+if (-not $MoveBack -and $ok -gt 0) {
+    Write-Log "Note: imported dossiers now live under $StagingRoot, not $SourceStagingPath. The File Staging API has no copy operation, so the move is one-way unless MoveBack is set." 'WARN'
+}
 
 if ($bad -gt 0) { exit 1 }
