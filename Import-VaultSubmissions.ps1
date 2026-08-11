@@ -64,6 +64,7 @@ param(
 
     # ---- Run mode ----
     [switch]     $GenerateManifest,
+    [switch]     $Probe,                 # find which application field holds e157135, then exit
     [string]     $Manifest,
 
     # Staging path of export_results.csv. Blank = look for it under SourceStagingPath.
@@ -171,10 +172,11 @@ if (Test-Path -LiteralPath $ConfigFile) {
     }
     switch ($ConfigMode) {
         'MANIFEST' { if (-not $PSBoundParameters.ContainsKey('GenerateManifest')) { $GenerateManifest = $true } }
+        'PROBE'    { if (-not $PSBoundParameters.ContainsKey('Probe'))            { $Probe = $true } }
         'DRYRUN'   { if (-not $PSBoundParameters.ContainsKey('WhatIf'))           { $WhatIfPreference = $true } }
         'IMPORT'   { }
         ''         { }
-        default    { throw "config.ini: MODE must be MANIFEST, DRYRUN or IMPORT (got '$ConfigMode')." }
+        default    { throw "config.ini: MODE must be MANIFEST, PROBE, DRYRUN or IMPORT (got '$ConfigMode')." }
     }
 }
 elseif ($ConfigExplicit) { throw "Config file not found: $ConfigFile" }
@@ -404,6 +406,56 @@ function ConvertFrom-ExportResults {
 }
 
 # --------------------------------------------------------------------------------------
+# PROBE: find which application field holds e157135
+#
+# When the automatic lookup can't find the application by name, run this (MODE = PROBE)
+# to have Vault tell you the field to use. It lists the application object's fields,
+# queries them, and reports which one contains the folder name - the value to put in
+# ApplicationKeyField. Read-only; changes nothing.
+# --------------------------------------------------------------------------------------
+
+function Invoke-ApplicationProbe {
+    param([string]$Key)
+    Write-Log "PROBE: searching $ApplicationObject for a field holding '$Key'"
+
+    $meta   = Invoke-VaultApi -Method GET -Path "/metadata/vobjects/$ApplicationObject"
+    $obj    = Get-Field $meta 'object' $meta
+    $fields = @(Get-Field $obj 'fields' @())
+    if ($fields.Count -eq 0) { throw "Could not read fields of $ApplicationObject via /metadata/vobjects/$ApplicationObject" }
+
+    # Only String fields can hold an alphanumeric like e157135; always include id.
+    $names = @('id') + @($fields | Where-Object { "$(Get-Field $_ 'type' '')" -eq 'String' } |
+                         ForEach-Object { Get-Field $_ 'name' } | Where-Object { $_ })
+    $names = @($names | Select-Object -Unique)
+    $sel   = $names -join ', '
+
+    $r    = Invoke-VaultApi -Method POST -Path '/query' -ContentType 'application/x-www-form-urlencoded' `
+                -Body @{ q = "SELECT $sel FROM $ApplicationObject" }
+    $rows = @(Get-Field $r 'data' @())
+    Write-Log "PROBE: scanned $($rows.Count) $ApplicationObject record(s) across $($names.Count) field(s)"
+
+    $exact = @{}; $partial = @{}
+    foreach ($row in $rows) {
+        foreach ($f in $names) {
+            $v = "$(Get-Field $row $f '')"
+            if (-not $v) { continue }
+            if     ($v -ieq $Key)                        { $exact[$f]   = $v }
+            elseif ($v -match [regex]::Escape($Key))     { $partial[$f] = $v }
+        }
+    }
+
+    if ($exact.Count) {
+        foreach ($f in $exact.Keys) { Write-Log "PROBE: EXACT match - '$Key' is in field '$f'" 'OK' }
+        Write-Log "PROBE: set  ApplicationKeyField = $((@($exact.Keys))[0])  in config.ini" 'OK'
+    } elseif ($partial.Count) {
+        foreach ($f in $partial.Keys) { Write-Log "PROBE: partial match - field '$f' = '$($partial[$f])'" 'WARN' }
+        Write-Log "PROBE: no exact match; a field above contains '$Key'. Pick the right one for ApplicationKeyField." 'WARN'
+    } else {
+        Write-Log "PROBE: '$Key' not found in any String field of $ApplicationObject. It may be a different object, or the folder name isn't an application key at all. Fields checked: $sel" 'ERROR'
+    }
+}
+
+# --------------------------------------------------------------------------------------
 # Discover the dossiers on staging
 # --------------------------------------------------------------------------------------
 
@@ -412,6 +464,8 @@ if (-not $script:SessionId) { Connect-Vault }
 # The application is the folder SourceStagingPath points at, e.g. e157135 in
 # /SubmissionsArchive/e157135. Its direct children are the submissions.
 $ApplicationKey = @($SourceStagingPath -split '/' | Where-Object { $_ })[-1]
+
+if ($Probe) { Invoke-ApplicationProbe -Key $ApplicationKey; return }
 
 Write-Log "Listing submissions on File Staging: $SourceStagingPath (application '$ApplicationKey')"
 $staged = Get-StagingItem -Path $SourceStagingPath      # direct children only
