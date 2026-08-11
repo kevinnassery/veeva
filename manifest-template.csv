@@ -1,4 +1,4 @@
-FileName,StagingPath,SizeMB,ApplicationFolder,SubmissionId,SubmissionKey,ActualSubmissionDate,DossierFormatId
-nda123456-0000.zip,/SubmissionsArchive/e15713S/nda123456/0000.zip,412.7,nda123456,00S000000000001,0000,2026-03-14,
-nda123456-0001.zip,/SubmissionsArchive/e15713S/nda123456/0001.zip,88.2,nda123456,,0001,,
-nda654321-0013.zip,/SubmissionsArchive/e15713S/nda654321/0013.zip,1204.5,nda654321,00S000000000002,0013,,00V000000000009
+FileName,StagingPath,SubmissionId,SubmissionKey,ActualSubmissionDate,DossierFormatId
+nda123456-0000.zip,/SubmissionsArchive/e15713S/nda123456/0000.zip,00S000000000001,0000,2026-03-14,
+nda123456-0001.zip,/SubmissionsArchive/e15713S/nda123456/0001.zip,,0001,,
+nda654321-0013.zip,/SubmissionsArchive/e15713S/nda654321/0013.zip,00S000000000002,0013,,00V000000000009
