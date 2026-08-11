@@ -1,0 +1,7 @@
+# Run artifacts — never commit import output or credentials
+import-results.csv
+import-*.log
+manifest.csv
+*.zip
+*.tar.gz
+*.tgz

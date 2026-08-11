@@ -1,0 +1,4 @@
+FileName,RelativePath,SizeMB,ApplicationFolder,SubmissionId,SubmissionKey,ActualSubmissionDate,DossierFormatId
+0000.zip,nda123456\0000.zip,412.7,nda123456,00S000000000001,0000,2026-03-14,
+0001.zip,nda123456\0001.zip,88.2,nda123456,,0001,,
+0013.zip,nda654321\0013.zip,1204.5,nda654321,00S000000000002,0013,,00V000000000009
