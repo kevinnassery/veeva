@@ -64,7 +64,6 @@ param(
 
     # ---- Run mode ----
     [switch]     $GenerateManifest,
-    [switch]     $Probe,                 # find which application field holds e157135, then exit
     [string]     $Manifest,
 
     # Staging path of export_results.csv. Blank = look for it under SourceStagingPath.
@@ -172,11 +171,10 @@ if (Test-Path -LiteralPath $ConfigFile) {
     }
     switch ($ConfigMode) {
         'MANIFEST' { if (-not $PSBoundParameters.ContainsKey('GenerateManifest')) { $GenerateManifest = $true } }
-        'PROBE'    { if (-not $PSBoundParameters.ContainsKey('Probe'))            { $Probe = $true } }
         'DRYRUN'   { if (-not $PSBoundParameters.ContainsKey('WhatIf'))           { $WhatIfPreference = $true } }
         'IMPORT'   { }
         ''         { }
-        default    { throw "config.ini: MODE must be MANIFEST, PROBE, DRYRUN or IMPORT (got '$ConfigMode')." }
+        default    { throw "config.ini: MODE must be MANIFEST, DRYRUN or IMPORT (got '$ConfigMode')." }
     }
 }
 elseif ($ConfigExplicit) { throw "Config file not found: $ConfigFile" }
@@ -406,17 +404,18 @@ function ConvertFrom-ExportResults {
 }
 
 # --------------------------------------------------------------------------------------
-# PROBE: find which application field holds e157135
+# Auto-detect the application key field
 #
-# When the automatic lookup can't find the application by name, run this (MODE = PROBE)
-# to have Vault tell you the field to use. It lists the application object's fields,
-# queries them, and reports which one contains the folder name - the value to put in
-# ApplicationKeyField. Read-only; changes nothing.
+# The staging folder name (e157135) may live in any application field - here it is the
+# XML Application Number, not name__v. Find-ApplicationMatch reads the application
+# object's fields and finds which one holds it, so the lookup works with no config.
 # --------------------------------------------------------------------------------------
 
-function Invoke-ApplicationProbe {
-    param([string]$Key)
-    Write-Log "PROBE: searching $ApplicationObject for a field holding '$Key'"
+function Find-ApplicationMatch {
+    # Scan the application object's String fields for one whose value equals $Key
+    # (the staging folder name, e.g. e157135). Returns the exact-match field + record id
+    # plus any partial matches. Shared by the automatic lookup and by -Probe.
+    param([Parameter(Mandatory)][string]$Key)
 
     $meta   = Invoke-VaultApi -Method GET -Path "/metadata/vobjects/$ApplicationObject"
     $obj    = Get-Field $meta 'object' $meta
@@ -427,32 +426,23 @@ function Invoke-ApplicationProbe {
     $names = @('id') + @($fields | Where-Object { "$(Get-Field $_ 'type' '')" -eq 'String' } |
                          ForEach-Object { Get-Field $_ 'name' } | Where-Object { $_ })
     $names = @($names | Select-Object -Unique)
-    $sel   = $names -join ', '
 
     $r    = Invoke-VaultApi -Method POST -Path '/query' -ContentType 'application/x-www-form-urlencoded' `
-                -Body @{ q = "SELECT $sel FROM $ApplicationObject" }
+                -Body @{ q = "SELECT $($names -join ', ') FROM $ApplicationObject" }
     $rows = @(Get-Field $r 'data' @())
-    Write-Log "PROBE: scanned $($rows.Count) $ApplicationObject record(s) across $($names.Count) field(s)"
 
-    $exact = @{}; $partial = @{}
+    $exactField = ''; $exactId = ''
+    $partials = New-Object System.Collections.ArrayList
     foreach ($row in $rows) {
         foreach ($f in $names) {
+            if ($f -eq 'id') { continue }
             $v = "$(Get-Field $row $f '')"
             if (-not $v) { continue }
-            if     ($v -ieq $Key)                        { $exact[$f]   = $v }
-            elseif ($v -match [regex]::Escape($Key))     { $partial[$f] = $v }
+            if     ($v -ieq $Key)                    { if (-not $exactField) { $exactField = $f; $exactId = "$(Get-Field $row 'id' '')" } }
+            elseif ($v -match [regex]::Escape($Key)) { [void]$partials.Add([pscustomobject]@{ Field = $f; Value = $v }) }
         }
     }
-
-    if ($exact.Count) {
-        foreach ($f in $exact.Keys) { Write-Log "PROBE: EXACT match - '$Key' is in field '$f'" 'OK' }
-        Write-Log "PROBE: set  ApplicationKeyField = $((@($exact.Keys))[0])  in config.ini" 'OK'
-    } elseif ($partial.Count) {
-        foreach ($f in $partial.Keys) { Write-Log "PROBE: partial match - field '$f' = '$($partial[$f])'" 'WARN' }
-        Write-Log "PROBE: no exact match; a field above contains '$Key'. Pick the right one for ApplicationKeyField." 'WARN'
-    } else {
-        Write-Log "PROBE: '$Key' not found in any String field of $ApplicationObject. It may be a different object, or the folder name isn't an application key at all. Fields checked: $sel" 'ERROR'
-    }
+    return [pscustomobject]@{ ExactField = $exactField; ExactId = $exactId; Partials = $partials; Scanned = $rows.Count; Fields = ($names.Count - 1) }
 }
 
 # --------------------------------------------------------------------------------------
@@ -464,8 +454,6 @@ if (-not $script:SessionId) { Connect-Vault }
 # The application is the folder SourceStagingPath points at, e.g. e157135 in
 # /SubmissionsArchive/e157135. Its direct children are the submissions.
 $ApplicationKey = @($SourceStagingPath -split '/' | Where-Object { $_ })[-1]
-
-if ($Probe) { Invoke-ApplicationProbe -Key $ApplicationKey; return }
 
 Write-Log "Listing submissions on File Staging: $SourceStagingPath (application '$ApplicationKey')"
 $staged = Get-StagingItem -Path $SourceStagingPath      # direct children only
@@ -564,15 +552,37 @@ function Get-ApplicationId {
     if (-not $Key) { return '' }
 
     try {
+        # 1. Try the configured field (fast path). Tolerate 0 rows OR an invalid-field
+        #    error by falling through to the auto-scan; only genuine ambiguity stops us.
         $k = $Key.Replace("'", "\'")
-        $r = Invoke-VaultApi -Method POST -Path '/query' -ContentType 'application/x-www-form-urlencoded' `
-                -Body @{ q = "SELECT id FROM $ApplicationObject WHERE $ApplicationKeyField = '$k'" }
-        $rows = @(Get-Field $r 'data' @())
-        if ($rows.Count -eq 0) { throw "No $ApplicationObject where $ApplicationKeyField = '$Key' - check ApplicationObject / ApplicationKeyField in config.ini" }
-        if ($rows.Count -gt 1) { throw "$($rows.Count) $ApplicationObject records match $ApplicationKeyField = '$Key'" }
-        $script:AppId = $rows[0].id
-        Write-Log "Application '$Key' resolved to $ApplicationObject $($script:AppId)" 'OK'
-        return $script:AppId
+        try {
+            $r = Invoke-VaultApi -Method POST -Path '/query' -ContentType 'application/x-www-form-urlencoded' `
+                    -Body @{ q = "SELECT id FROM $ApplicationObject WHERE $ApplicationKeyField = '$k'" }
+            $rows = @(Get-Field $r 'data' @())
+            if ($rows.Count -eq 1) {
+                $script:AppId = $rows[0].id
+                Write-Log "Application '$Key' resolved to $ApplicationObject $($script:AppId) (via $ApplicationKeyField)" 'OK'
+                return $script:AppId
+            }
+            if ($rows.Count -gt 1) { throw "$($rows.Count) $ApplicationObject records match $ApplicationKeyField = '$Key' - narrow ApplicationKeyField" }
+        }
+        catch {
+            if ("$_" -match 'records match') { throw }   # genuine ambiguity - don't paper over it
+            Write-Log "Application not found via '$ApplicationKeyField' - scanning $ApplicationObject fields for '$Key'" 'INFO'
+        }
+
+        # 2. Auto-detect: find whichever field actually holds the folder name.
+        $m = Find-ApplicationMatch -Key $Key
+        if ($m.ExactField) {
+            $script:AppId = $m.ExactId
+            Write-Log "Application '$Key' resolved to $ApplicationObject $($m.ExactId) (auto-detected field '$($m.ExactField)')" 'OK'
+            if ($m.ExactField -ne $ApplicationKeyField) {
+                Write-Log "Tip: set ApplicationKeyField = $($m.ExactField) in config.ini to skip this scan next time" 'INFO'
+            }
+            return $script:AppId
+        }
+        $hint = if ($m.Partials.Count) { ' Fields that merely contain it: ' + ((@($m.Partials | ForEach-Object { $_.Field }) | Select-Object -Unique) -join ', ') + '.' } else { '' }
+        throw "Could not find $ApplicationObject '$Key' by field '$ApplicationKeyField' or by scanning $($m.Fields) String field(s) across $($m.Scanned) record(s).$hint"
     }
     catch { $script:AppErr = "$_"; throw }
 }
