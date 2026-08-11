@@ -123,6 +123,20 @@ BinderId, BinderVersion, Warnings, Messages, StartedUtc, FinishedUtc
 Rewritten after every dossier, so an interrupted run still leaves a usable file, and re-running
 skips anything already `SUCCESS`.
 
+## Worked example
+
+[`examples/`](https://github.com/kevinnassery/veeva/tree/main/examples) shows three dossiers
+carried through the run:
+
+- [`manifest.example.csv`](https://github.com/kevinnassery/veeva/blob/main/examples/manifest.example.csv)
+  — the worklist you'd review before importing: `SubmissionId` filled in per row.
+- [`import-results.example.csv`](https://github.com/kevinnassery/veeva/blob/main/examples/import-results.example.csv)
+  — the output. Two `SUCCESS` (one carrying a non-fatal `SUBMISSION_MISMATCH` warning — the import
+  still ran) and one `ERROR` with the reason (`invalid or missing index.xml`) in `Messages`.
+
+That's the whole loop: a `SUCCESS` row gets a `BinderId` and version; a warning is advisory; an
+`ERROR` row tells you what to fix and is retried on the next run.
+
 ## Prerequisites
 
 - The dossiers are staged under the Submissions Archive root (`.zip`/`.tar.gz` can only be

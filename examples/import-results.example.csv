@@ -1,0 +1,4 @@
+FileName,StagingPath,SizeMB,SubmissionKey,SubmissionId,JobId,Status,BinderId,BinderVersion,Warnings,Messages,StartedUtc,FinishedUtc
+nda210001-0000.zip,/SubmissionsArchive/e15713S/nda210001/0000.zip,412.7,0000,00S000000000101,80231,SUCCESS,0PB000000000A01,0.1,,,2026-08-11T18:40:12,2026-08-11T18:47:55
+nda210001-0001.zip,/SubmissionsArchive/e15713S/nda210001/0001.zip,88.2,0001,00S000000000102,80232,SUCCESS,0PB000000000A02,0.1,SUBMISSION_MISMATCH: Folder name 0001 does not match submission number on record,,2026-08-11T18:47:56,2026-08-11T18:51:03
+bla761234-0000.zip,/SubmissionsArchive/e15713S/bla761234/0000.zip,1204.5,0000,00S000000000201,80233,ERROR,,,,invalid or missing index.xml at dossier root,2026-08-11T18:51:04,2026-08-11T18:53:40
