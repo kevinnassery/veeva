@@ -102,11 +102,11 @@ Fallbacks, in precedence order:
 ## Three steps
 
 1. **`MODE = MANIFEST`** — writes `manifest.csv`, the worklist: one row per dossier found under
-   `SourceStagingPath`, each of which will be imported. Columns are `FileName`, `StagingPath`,
-   `SubmissionId`, `SubmissionKey`, `ActualSubmissionDate`, `DossierFormatId` — `SubmissionId` is
-   filled in wherever `export_results.csv` could supply it; a blank one is a row that needs
-   attention. `FileName` is the join key and `StagingPath` identifies the dossier (file names can
-   repeat across applications); the rest are what import actually consumes. Imports nothing.
+   `SourceStagingPath`, each of which will be imported. Columns are `FileName`, `SubmissionId`,
+   `SubmissionKey`, `ActualSubmissionDate`, `DossierFormatId` — exactly what import reads, nothing
+   else. `SubmissionId` is filled in wherever `export_results.csv` could supply it; a blank one is a
+   row that needs attention. `FileName` is the join key back to the live staging listing, so the
+   dossier's real path isn't carried in the sheet. Imports nothing.
 2. **`MODE = DRYRUN`** — authenticates and resolves every submission id (the VQL lookup is
    read-only, so it genuinely runs). Imports nothing. Fix anything showing `ERROR` first.
 3. **`MODE = IMPORT`** — for real.

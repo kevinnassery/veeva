@@ -447,12 +447,11 @@ if ($GenerateManifest) {
         $hit  = if ($map.ContainsKey($name)) { $map[$name] } elseif ($map.ContainsKey($base)) { $map[$base] } else { $null }
         $subId = if ($hit) { Get-Field $hit 'SubmissionId' } elseif ($NameIsSubmissionId) { $base } else { '' }
         if ($subId) { $resolved++ }
-        # Columns: FileName is the join key; StagingPath identifies the dossier (file
-        # names can repeat across applications); the rest are what import actually uses.
-        # SizeMB / ApplicationFolder were informational only and are not read back.
+        # Only the columns import actually reads. FileName is the join key back to the
+        # live staging listing; the rest are what you fill in. The dossier's real staging
+        # path comes from that live listing at import time, so it is not carried here.
         [pscustomobject]@{
             FileName             = $name
-            StagingPath          = "$(Get-Field $_ 'path' '')"
             SubmissionId         = $subId
             SubmissionKey        = if ($hit) { Get-Field $hit 'SubmissionKey' } else { $base }
             ActualSubmissionDate = ''
