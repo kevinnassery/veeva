@@ -1,28 +1,24 @@
 <#
 .SYNOPSIS
-    Imports exported submission dossiers into Veeva Vault RIM Submissions Archive,
-    entirely on the File Staging server. Nothing is downloaded or uploaded.
+    Imports submission dossiers that are already on Veeva Vault File Staging into
+    RIM Submissions Archive. Nothing is moved, downloaded or uploaded.
 
 .DESCRIPTION
-    Bulk Submission Export leaves its output on File Staging, under
-        /u{UserID}/Submissions Archive Export/{JobID}/...
-    Import Submission can only read from one of two places:
-        /SubmissionsArchive/{app}/{submission}                    folder, .zip or .tar.gz
-        /u{ID}/Submissions Archive Import/{app}/{submission}      folder only, no archives
-    so the exported dossiers are already on the server, just in the wrong location.
+    The dossiers are staged under the Submissions Archive root, e.g.
+        /SubmissionsArchive/{JobID}/{application}/{submission}
+    or  /SubmissionsArchive/{application}/{submission}
+    and Import Submission reads them straight from there.
 
     For each dossier this script:
-      1. Relocates it into /SubmissionsArchive/<application>/ with a File Staging move
-         (PUT /items). Server-side: no bytes cross the network. Asynchronous, so the
-         move job is polled to completion.
-      2. Calls Import Submission on the matching submission__v record.
-      3. Polls the import job, then retrieves the import results.
-      4. Appends a row to a results CSV - file name, both staging paths, job ids,
-         status, binder id/version and any validation messages.
+      1. Calls Import Submission on the matching submission__v record, pointing at
+         the dossier's existing staging path.
+      2. Polls the import job, then retrieves the import results.
+      3. Appends a row to a results CSV - file name, staging path, job id, status,
+         binder id/version and any validation messages.
 
-    The archive -> submission mapping comes from export_results.csv, which the export
-    wrote next to the dossiers. It is read directly off File Staging; you do not need a
-    local copy, and nothing has to be typed in by hand.
+    The archive -> submission mapping comes from export_results.csv, which Bulk
+    Submission Export wrote next to the dossiers. It is read directly off File
+    Staging; no local copy is needed and nothing has to be typed in by hand.
 
     Re-runnable: dossiers already recorded as SUCCESS are skipped.
 
@@ -33,12 +29,10 @@
     Windows PowerShell 5.1 compatible (also runs on PowerShell 7).
     Endpoints, all relative to https://<VaultDNS>/api/<ApiVersion>:
       POST /auth
-      GET  /services/file_staging/items/{item}?recursive=true      list the export
+      GET  /services/file_staging/items/{item}?recursive=true      list the dossiers
       GET  /services/file_staging/items/content/{item}             read export_results.csv
-      POST /services/file_staging/items                            create target folder
-      PUT  /services/file_staging/items/{item}                     move  (async, job id)
       POST /vobjects/submission__v/{id}/actions/import             import (async, job id)
-      GET  /services/jobs/{job_id}                                 poll either job
+      GET  /services/jobs/{job_id}                                 poll the import job
       GET  /vobjects/submission__v/{id}/actions/import/{job_id}/results
 #>
 
@@ -54,7 +48,8 @@ param(
     # ---- Required ----
     [string]     $VaultDNS         = '',
 
-    # Staging folder holding the export, e.g. '/u5678/Submissions Archive Export/727301'
+    # File Staging folder holding the dossiers, under the Submissions Archive root.
+    #   e.g. '/SubmissionsArchive/e15713S'  or  '/SubmissionsArchive'
     [string]     $SourceStagingPath = '',
 
     # Local folder for the results CSV and log. Nothing else is written locally.
@@ -67,9 +62,6 @@ param(
     # The ONLY place a session id is configured. Blank = log in and manage it for me.
     [string]     $SessionId        = '',
 
-    # Import target root. Archives can only be imported from here.
-    [string]     $StagingRoot      = '/SubmissionsArchive',
-
     # ---- Run mode ----
     [switch]     $GenerateManifest,
     [string]     $Manifest,
@@ -79,10 +71,6 @@ param(
     [string]     $IdColumn,
     [string]     $PathColumn,
     [switch]     $NameIsSubmissionId,
-
-    # Return each dossier to its original export path after a successful import.
-    # There is no copy operation in the File Staging API, so a move is otherwise one-way.
-    [switch]     $MoveBack,
 
     [pscredential] $Credential,
 
@@ -115,19 +103,11 @@ function Get-Field {
 }
 
 function ConvertTo-StagingUrlPath {
-    <#
-      Escapes a staging path for use in a URL segment while keeping the separators.
-      Export folders are literally named "Submissions Archive Export" - the spaces must
-      be encoded or every request 404s.
-    #>
+    # Escape each path segment for a URL while keeping the separators. Staging folders
+    # can contain spaces (e.g. "Submissions Archive Export"), which otherwise 404.
     param([Parameter(Mandatory)][string]$Path)
     $clean = $Path.Replace('\', '/').Trim('/')
     return (($clean -split '/' | ForEach-Object { [Uri]::EscapeDataString($_) }) -join '/')
-}
-
-function Join-StagingPath {
-    param([Parameter(Mandatory)][string]$Parent, [Parameter(Mandatory)][string]$Child)
-    return ('/' + $Parent.Replace('\', '/').Trim('/') + '/' + $Child.Replace('\', '/').Trim('/'))
 }
 
 # --------------------------------------------------------------------------------------
@@ -135,7 +115,7 @@ function Join-StagingPath {
 # --------------------------------------------------------------------------------------
 
 $IntKeys    = @('JobTimeoutMinutes', 'JobPollSeconds', 'MaxRetries')
-$SwitchKeys = @('GenerateManifest', 'NameIsSubmissionId', 'MoveBack')
+$SwitchKeys = @('GenerateManifest', 'NameIsSubmissionId')
 $ListKeys   = @('Include')
 
 function Import-ConfigFile {
@@ -194,7 +174,6 @@ foreach ($name in @('VaultDNS', 'SourceStagingPath', 'OutputRoot')) {
 }
 $VaultDNS          = $VaultDNS -replace '^https?://', '' -replace '/+$', ''
 $SourceStagingPath = '/' + $SourceStagingPath.Replace('\', '/').Trim('/')
-$StagingRoot       = '/' + $StagingRoot.Replace('\', '/').Trim('/')
 
 $OutputRoot = [IO.Path]::GetFullPath([IO.Path]::Combine((Get-Location).ProviderPath, $OutputRoot)).TrimEnd('\')
 if (-not (Test-Path -LiteralPath $OutputRoot)) { New-Item -ItemType Directory -Path $OutputRoot -Force | Out-Null }
@@ -252,7 +231,7 @@ function Invoke-VaultApi {
         [string]$ContentType,
         [hashtable]$ExtraHeaders = @{},
         [int]$TimeoutSec = 600,
-        [switch]$Raw                      # return the response body as text, not parsed JSON
+        [switch]$Raw
     )
 
     $uri = if ($Path -match '^https?://') { $Path } else { "$script:BaseUrl$Path" }
@@ -316,7 +295,7 @@ function Invoke-VaultApi {
 }
 
 function Wait-VaultJob {
-    param([Parameter(Mandatory)]$JobId, [string]$What = 'job')
+    param([Parameter(Mandatory)]$JobId)
     $running  = @('SCHEDULED','QUEUING','QUEUED','RUNNING','IN_PROGRESS')
     $deadline = (Get-Date).AddMinutes($JobTimeoutMinutes)
     while ((Get-Date) -lt $deadline) {
@@ -329,16 +308,13 @@ function Wait-VaultJob {
 }
 
 # --------------------------------------------------------------------------------------
-# File Staging
+# File Staging - read only
 # --------------------------------------------------------------------------------------
 
 function Get-StagingItem {
-    <# Recursive listing of a staging folder. Follows pagination. #>
     param([Parameter(Mandatory)][string]$Path)
-
     $items = New-Object System.Collections.ArrayList
     $next  = "/services/file_staging/items/$(ConvertTo-StagingUrlPath $Path)?recursive=true&limit=500"
-
     while ($next) {
         $r = Invoke-VaultApi -Method GET -Path $next
         foreach ($d in @(Get-Field $r 'data' @())) { [void]$items.Add($d) }
@@ -350,41 +326,6 @@ function Get-StagingItem {
 function Get-StagingFileText {
     param([Parameter(Mandatory)][string]$Path)
     return Invoke-VaultApi -Method GET -Path "/services/file_staging/items/content/$(ConvertTo-StagingUrlPath $Path)" -Raw
-}
-
-function New-StagingFolder {
-    param([Parameter(Mandatory)][string]$Path)
-    try {
-        Invoke-VaultApi -Method POST -Path '/services/file_staging/items' `
-            -ContentType 'application/x-www-form-urlencoded' `
-            -Body @{ kind = 'folder'; path = $Path; overwrite = 'false' } | Out-Null
-        Write-Log "Staging folder ready: $Path"
-    }
-    catch {
-        if ("$_" -match 'exist') { Write-Log "Staging folder already present: $Path" } else { throw }
-    }
-}
-
-function Move-StagingItem {
-    <#
-      Server-side relocation. No bytes cross the network. Asynchronous: Vault returns a
-      job id which is polled here. There is no copy operation in the File Staging API,
-      so this is one-way unless -MoveBack is set.
-    #>
-    param(
-        [Parameter(Mandatory)][string]$Path,      # current full staging path
-        [Parameter(Mandatory)][string]$NewParent  # destination folder
-    )
-    $r = Invoke-VaultApi -Method PUT -Path "/services/file_staging/items/$(ConvertTo-StagingUrlPath $Path)" `
-            -ContentType 'application/x-www-form-urlencoded' -Body @{ parent = $NewParent }
-
-    $jobId = Get-Field (Get-Field $r 'data' $null) 'job_id' (Get-Field $r 'job_id' '')
-    if ($jobId) {
-        $status = Wait-VaultJob -JobId $jobId -What 'move'
-        if ($status -ne 'SUCCESS') { throw "Move of $Path to $NewParent ended $status (job $jobId)" }
-    }
-    $leaf = ($Path.Replace('\', '/').TrimEnd('/') -split '/')[-1]
-    return (Join-StagingPath $NewParent $leaf)
 }
 
 # --------------------------------------------------------------------------------------
@@ -449,12 +390,12 @@ function ConvertFrom-ExportResults {
 }
 
 # --------------------------------------------------------------------------------------
-# Discover the export on staging
+# Discover the dossiers on staging
 # --------------------------------------------------------------------------------------
 
 if (-not $script:SessionId) { Connect-Vault }
 
-Write-Log "Listing export folder on File Staging: $SourceStagingPath"
+Write-Log "Listing dossiers on File Staging: $SourceStagingPath"
 $staged = Get-StagingItem -Path $SourceStagingPath
 
 $dossiers = @($staged | Where-Object {
@@ -464,7 +405,7 @@ $dossiers = @($staged | Where-Object {
 })
 
 if ($dossiers.Count -eq 0) {
-    throw "No dossiers matching $($Include -join ', ') found under $SourceStagingPath. Listed $($staged.Count) item(s) - check the path, and note that only .zip/.tar.gz can be imported from the staging root."
+    throw "No dossiers matching $($Include -join ', ') found under $SourceStagingPath. Listed $($staged.Count) item(s) - check the path."
 }
 Write-Log "Found $($dossiers.Count) dossier(s) under $SourceStagingPath"
 
@@ -594,99 +535,57 @@ if (Test-Path -LiteralPath $ResultsCsv) {
     if ($done.Count) { Write-Log "$($done.Count) dossier(s) already SUCCESS in $ResultsCsv - skipping them" }
 }
 
-$results   = New-Object System.Collections.ArrayList
-$createdIn = @{}
-$script:AnyMoved = $false
+$results = New-Object System.Collections.ArrayList
 $i = 0
 
 foreach ($d in $dossiers) {
     $i++
-    $name       = "$(Get-Field $d 'name' '')"
-    $sourcePath = "$(Get-Field $d 'path' '')"
-    $base       = ($name -replace '\.tar\.gz$|\.tgz$|\.zip$', '')
-    $prefix     = "[$i/$($dossiers.Count)] $name"
+    $name        = "$(Get-Field $d 'name' '')"
+    $stagingPath = "$(Get-Field $d 'path' '')"
+    $base        = ($name -replace '\.tar\.gz$|\.tgz$|\.zip$', '')
+    $prefix      = "[$i/$($dossiers.Count)] $name"
 
     if ($done.ContainsKey($name)) { Write-Log "$prefix - skipped (already SUCCESS)"; continue }
 
     $hit = if ($map.ContainsKey($name)) { $map[$name] } elseif ($map.ContainsKey($base)) { $map[$base] } else { $null }
 
-    $appFolder = Get-Field $hit 'ApplicationFolder' ''
-    $subKey    = Get-Field $hit 'SubmissionKey'     $base
-    $subId     = Get-Field $hit 'SubmissionId'      $(if ($NameIsSubmissionId) { $base } else { '' })
-    $dossier   = Get-Field $hit 'DossierFormatId'   $DefaultDossierFormatId
-    $subDate   = Get-Field $hit 'ActualSubmissionDate' ''
+    $subKey  = Get-Field $hit 'SubmissionKey'        $base
+    $subId   = Get-Field $hit 'SubmissionId'         $(if ($NameIsSubmissionId) { $base } else { '' })
+    $dossier = Get-Field $hit 'DossierFormatId'      $DefaultDossierFormatId
+    $subDate = Get-Field $hit 'ActualSubmissionDate' ''
 
     $record = [ordered]@{
-        FileName          = $name
-        SourceStagingPath = $sourcePath
-        SizeMB            = [math]::Round(([double]"$(Get-Field $d 'size' 0)") / 1MB, 2)
-        ApplicationFolder = $appFolder
-        ImportStagingPath = ''
-        SubmissionKey     = $subKey
-        SubmissionId      = $subId
-        MoveJobDone       = ''
-        JobId             = ''
-        Status            = ''
-        BinderId          = ''
-        BinderVersion     = ''
-        Warnings          = ''
-        Messages          = ''
-        StartedUtc        = (Get-Date).ToUniversalTime().ToString('s')
-        FinishedUtc       = ''
+        FileName      = $name
+        StagingPath   = $stagingPath
+        SizeMB        = [math]::Round(([double]"$(Get-Field $d 'size' 0)") / 1MB, 2)
+        SubmissionKey = $subKey
+        SubmissionId  = $subId
+        JobId         = ''
+        Status        = ''
+        BinderId      = ''
+        BinderVersion = ''
+        Warnings      = ''
+        Messages      = ''
+        StartedUtc    = (Get-Date).ToUniversalTime().ToString('s')
+        FinishedUtc   = ''
     }
 
     try {
-        if (-not $appFolder) {
-            throw "No ApplicationFolder for $name - it was not in export_results.csv. Add a manifest row, or set ExportResultsCsv."
-        }
-
-        $targetFolder = "$StagingRoot/$appFolder"
-        $targetPath   = "$targetFolder/$name"
-        $record.ImportStagingPath = $targetPath
-
-        # If the dossier is already staged under StagingRoot/<application> - which is the
-        # case when the export was written straight to the archive root rather than to a
-        # user Export folder - there is nothing to move.
-        $segs          = @($sourcePath.Replace('\', '/').TrimEnd('/') -split '/')
-        $currentParent = ($segs[0..($segs.Count - 2)]) -join '/'
-        $alreadyInPlace = ($currentParent.TrimEnd('/') -ieq $targetFolder.TrimEnd('/'))
-
         if (-not $subId) {
-            # Read-only VQL, so it runs under -WhatIf too: a bad key surfaces before any move.
+            # Read-only VQL, so it runs under -WhatIf too: a bad key surfaces before importing.
             Write-Log "$prefix - resolving submission by $LookupField = '$subKey'"
             $subId = Resolve-SubmissionId -Key $subKey
             $record.SubmissionId = $subId
         }
 
-        if ($PSCmdlet.ShouldProcess("$sourcePath -> $targetPath, submission $subId", 'Move on staging and import')) {
-            # If the dossier is already sitting there, the folder plainly exists.
-            if (-not $alreadyInPlace -and -not $createdIn.ContainsKey($targetFolder)) {
-                New-StagingFolder -Path $targetFolder
-                $createdIn[$targetFolder] = $true
-            }
-
-            if ($alreadyInPlace) {
-                # Staged directly under StagingRoot/<application> already, so there is
-                # nothing to relocate. Import reads it where it sits.
-                Write-Log "$prefix - already under $targetFolder; no move needed"
-                $moved = $sourcePath
-                $record.MoveJobDone = 'not needed'
-            }
-            else {
-                Write-Log "$prefix - moving on staging to $targetFolder (server-side, no transfer)"
-                $moved = Move-StagingItem -Path $sourcePath -NewParent $targetFolder
-                $record.MoveJobDone = 'yes'
-                $script:AnyMoved = $true
-            }
-            $record.ImportStagingPath = $moved
-
-            $job = Start-SubmissionImport -SubmissionId $subId -StagingPath $moved `
+        if ($PSCmdlet.ShouldProcess("submission $subId from $stagingPath", 'Import')) {
+            $job = Start-SubmissionImport -SubmissionId $subId -StagingPath $stagingPath `
                         -DossierFormatId $dossier -ActualSubmissionDate $subDate
             $record.JobId    = $job.JobId
             $record.Warnings = $job.Warnings
             Write-Log "$prefix - import job $($job.JobId) started; polling"
 
-            $status = Wait-VaultJob -JobId $job.JobId -What 'import'
+            $status = Wait-VaultJob -JobId $job.JobId
             $record.Status = $status
 
             $res = Get-ImportResult -SubmissionId $subId -JobId $job.JobId
@@ -696,19 +595,10 @@ foreach ($d in $dossiers) {
 
             if ($status -eq 'SUCCESS') { Write-Log "$prefix - SUCCESS (binder $($res.BinderId) v$($res.BinderVersion))" 'OK' }
             else                       { Write-Log "$prefix - job ended $status. $($res.Messages)" 'ERROR' }
-
-            if ($MoveBack -and -not $alreadyInPlace) {
-                $originalParent = ($sourcePath.Replace('\', '/').TrimEnd('/') -split '/')
-                $originalParent = ($originalParent[0..($originalParent.Count - 2)]) -join '/'
-                Write-Log "$prefix - returning dossier to $originalParent"
-                Move-StagingItem -Path $moved -NewParent $originalParent | Out-Null
-                $record.MoveJobDone = 'yes (returned)'
-            }
         }
         else {
             $record.Status = 'WHATIF'
-            $plan = if ($alreadyInPlace) { "already in place at $targetPath" } else { "move to $targetPath" }
-            Write-Log "$prefix - WhatIf: would $plan and import into submission $subId"
+            Write-Log "$prefix - WhatIf: would import $stagingPath into submission $subId"
         }
     }
     catch {
@@ -734,8 +624,5 @@ Write-Log '----------------------------------------------------------------'
 Write-Log "Processed $($results.Count) dossier(s): $ok succeeded, $bad failed, $what dry-run" $(if ($bad) { 'WARN' } else { 'OK' })
 Write-Log "Results CSV : $ResultsCsv"
 Write-Log "Log         : $TranscriptLog"
-if (-not $MoveBack -and $script:AnyMoved) {
-    Write-Log "Note: imported dossiers now live under $StagingRoot, not $SourceStagingPath. The File Staging API has no copy operation, so the move is one-way unless MoveBack is set." 'WARN'
-}
 
 if ($bad -gt 0) { exit 1 }

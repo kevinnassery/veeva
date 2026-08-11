@@ -1,39 +1,24 @@
 # Veeva Vault RIM — Submissions Archive bulk import
 
-Imports exported submission dossiers into Submissions Archive **entirely on the File Staging
-server**. Nothing is downloaded, nothing is uploaded, no local disk is involved beyond a log and a
-results CSV.
+Imports submission dossiers that are **already on File Staging** into RIM Submissions Archive.
+Nothing is moved, downloaded or uploaded — each dossier is imported from where it sits.
 
-## Why there's a move step
+## How it works
 
-Bulk Submission Export leaves its output on File Staging, under:
+The dossiers live on File Staging under the Submissions Archive root, e.g.
 
 ```
-/u{UserID}/Submissions Archive Export/{JobID}/...
+/SubmissionsArchive/e15713S/nda123456/0000.zip
 ```
 
-Import Submission can only read from one of two places:
+Import Submission reads them straight from there. For each dossier the script calls Import
+Submission on the matching `submission__v` record, polls the import job, retrieves the results, and
+writes a row to a CSV — file name, staging path, job id, status, binder id/version and any
+validation messages.
 
-| Location | Accepts |
-|---|---|
-| `/SubmissionsArchive/{application}/{submission}` | folder, `.zip` or `.tar.gz` |
-| `/u{ID}/Submissions Archive Import/{application}/{submission}` | folder only — *"Vault does not support importing .zip or .tar.gz files from user folders."* |
-
-The export writes to a third location, and the folder is literally named `Export`, not `Import`. So
-the dossiers are already on the server, just in the wrong drawer. This tool relocates each one into
-`/SubmissionsArchive/<application>/` with a single `PUT /services/file_staging/items` — server-side,
-zero bytes across the network — then imports it.
-
-That move is asynchronous (Vault returns a job id, which the script polls), and **the File Staging
-API has no copy operation, only move**. So the relocation is one-way unless you set
-`MoveBack = true`, which returns each dossier to its export path after a successful import.
-
-**If the dossiers are already under the archive root**, none of that happens. Point
-`SourceStagingPath` at `/SubmissionsArchive/...` and the script detects, per dossier, that its
-parent already matches `StagingRoot/<application>` — it skips the move, skips creating the folder,
-imports in place, and records `MoveJobDone = not needed`. `MoveBack` is ignored for those, and the
-one-way warning at the end only appears if something actually moved. The root is set in one place,
-`StagingRoot` in `config.ini`.
+The archive → submission mapping comes from `export_results.csv`, which Bulk Submission Export
+wrote next to the dossiers. It's read **in place off File Staging**, so no local copy is needed and
+nothing has to be typed in by hand.
 
 ## Download
 
@@ -65,16 +50,14 @@ Or `git clone https://github.com/kevinnassery/veeva.git`
 never a second copy to keep in sync.
 
 ```ini
-VaultDNS          = mycompany-rim.veevavault.com
-SourceStagingPath = /u5678/Submissions Archive Export/727301
-OutputRoot        = D:\ImportRun
+VaultDNS          = sb-endo-endo-rim-sbx.veevavault.com
+SourceStagingPath = /SubmissionsArchive/e15713S
+OutputRoot        = C:\Users\Sarah.Nassery
 
 MODE = MANIFEST              ; MANIFEST | DRYRUN | IMPORT
 
-ApiVersion  = v26.2
-SessionId   =                ; blank = log in for me
-StagingRoot = /SubmissionsArchive
-MoveBack    = false
+ApiVersion = v26.2
+SessionId  =                 ; blank = log in for me
 ```
 
 Precedence is **command line → `config.ini` → built-in defaults**, so `Run-Import.bat -WhatIf`
@@ -83,8 +66,8 @@ unknown keys warn by name rather than being silently ignored.
 
 | MODE | What happens |
 |---|---|
-| `MANIFEST` | List the export, write `manifest.csv`, stop. Nothing is moved. |
-| `DRYRUN` | Resolve every submission id and show the moves. Nothing changes. |
+| `MANIFEST` | List the dossiers, write `manifest.csv`, stop. Nothing imported. |
+| `DRYRUN` | Resolve every submission id. Import nothing. |
 | `IMPORT` | Do it for real. |
 
 **API version.** Every request is built as `https://<VaultDNS>/api/<ApiVersion>/...`, so
@@ -93,22 +76,21 @@ a typo fails at startup instead of 404-ing mid-run.
 
 **Session id.** `SessionId` is the only place a session is configured. Leave it blank for normal
 use — the script authenticates, holds the session in one script-scoped variable, and replaces it
-automatically if Vault expires it mid-run. Internally it is written in exactly one function
-(`Connect-Vault`) and read in exactly one place (the `Authorization` header in `Invoke-VaultApi`);
-no function takes a session id as an argument, which is what makes the mid-run re-auth safe.
+automatically if Vault expires it mid-run. Paste a value in to reuse a session you already hold.
+Internally it is written in exactly one function (`Connect-Vault`) and read in exactly one place
+(the `Authorization` header in `Invoke-VaultApi`); no function takes a session id as an argument,
+which is what makes the mid-run re-auth safe.
 
 ## Mapping dossiers to submission records
 
 You should not have to type anything in. The export already wrote `export_results.csv` next to the
 dossiers — one row per submission, with the relative path to its submission folder plus Submission
-record field values. The script **reads it in place off File Staging**, so no local copy is needed.
-Leave `ExportResultsCsv` blank and it finds the file under `SourceStagingPath`.
+record field values. The script reads it in place off File Staging; leave `ExportResultsCsv` blank
+and it finds the file under `SourceStagingPath`.
 
 Veeva does not publish the column schema for that CSV, so the script detects the id column (by
 name, then by `00S…` value shape) and the folder-path column (by name, then by value shape), logs
-which two it picked, and accepts `IdColumn` / `PathColumn` to override. From `nda123456/0000` it
-derives application `nda123456`, submission `0000`, and indexes the entry under several likely file
-names so renamed dossiers still match.
+which two it picked, and accepts `IdColumn` / `PathColumn` to override.
 
 Fallbacks, in precedence order:
 
@@ -119,12 +101,11 @@ Fallbacks, in precedence order:
 
 ## Three steps
 
-1. **`MODE = MANIFEST`** — lists the export folder and writes `manifest.csv` with `FileName`,
-   `StagingPath`, `SizeMB`, `ApplicationFolder` and `SubmissionId` already filled in wherever
-   `export_results.csv` could supply them. No changes to anything.
-2. **`MODE = DRYRUN`** — authenticates, resolves every submission id (the VQL lookup is read-only,
-   so it genuinely runs), and prints the move each dossier would make. Nothing is moved or imported.
-   Fix anything showing `ERROR` before step 3.
+1. **`MODE = MANIFEST`** — lists the dossiers and writes `manifest.csv` with `FileName`,
+   `StagingPath`, `SizeMB`, `ApplicationFolder` and `SubmissionId` filled in wherever
+   `export_results.csv` could supply them. Imports nothing.
+2. **`MODE = DRYRUN`** — authenticates and resolves every submission id (the VQL lookup is
+   read-only, so it genuinely runs). Imports nothing. Fix anything showing `ERROR` first.
 3. **`MODE = IMPORT`** — for real.
 
 ## Output
@@ -132,17 +113,17 @@ Fallbacks, in precedence order:
 `import-results.csv` in `OutputRoot`, one row per dossier:
 
 ```
-FileName, SourceStagingPath, SizeMB, ApplicationFolder, ImportStagingPath, SubmissionKey,
-SubmissionId, MoveJobDone, JobId, Status, BinderId, BinderVersion, Warnings, Messages,
-StartedUtc, FinishedUtc
+FileName, StagingPath, SizeMB, SubmissionKey, SubmissionId, JobId, Status,
+BinderId, BinderVersion, Warnings, Messages, StartedUtc, FinishedUtc
 ```
 
-Both staging paths are recorded, so a one-way move is always traceable. The CSV is rewritten after
-every dossier, so an interrupted run still leaves a usable file, and re-running skips anything
-already `SUCCESS`.
+Rewritten after every dossier, so an interrupted run still leaves a usable file, and re-running
+skips anything already `SUCCESS`.
 
 ## Prerequisites
 
+- The dossiers are staged under the Submissions Archive root (`.zip`/`.tar.gz` can only be
+  imported from there — Vault does not import archives from user folders)
 - `application__v` and `submission__v` records already exist with identification fields populated
 - API access, plus view/edit on the target `submission__v` records
 - **RIM Submissions Archive: Export** and **File Staging: Access** permissions
@@ -151,10 +132,8 @@ already `SUCCESS`.
 
 ## Things worth knowing
 
-- **Export size caps.** A single Bulk Submission Export tops out at 50,000 files / 5.3 GB, so a
-  large wave arrives as several export jobs. Run the script once per job folder.
-- **Spaces in staging paths** — the export folder is literally named `Submissions Archive Export`.
-  Path segments are URL-escaped, which matters because unescaped spaces 404.
+- **Spaces in staging paths** — path segments are URL-escaped, which matters because unescaped
+  spaces 404.
 - **Import warnings** like `APPLICATION_MISMATCH` / `SUBMISSION_MISMATCH` are non-fatal; the job
   still runs. They land in the `Warnings` column and mean the folder name didn't match the record.
 - **Vault 26R3 (Dec 2026)** stops returning the `data` array from the import-results endpoint. The
@@ -174,4 +153,3 @@ live vault.** Do the `DRYRUN` pass on two or three dossiers before turning it lo
 - [Import Submission — API v26.1](https://general.veevavault.dev/regulatory/vault-api/api-reference/26.1/rim-submissions-archive/import-submission/)
 - [Retrieve Submission Import Results — API v26.1](https://general.veevavault.dev/regulatory/vault-api/api-reference/26.1/rim-submissions-archive/retrieve-submission-import-results/)
 - [Accessing Your Vault's File Staging](https://platform.veevavault.help/en/gr/38653/)
-- [File Staging endpoints (VAPIL reference)](https://veeva.github.io/vault-api-library/javadoc/21.1.4/com/veeva/vault/vapil/api/request/FileStagingRequest.html)
