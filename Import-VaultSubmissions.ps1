@@ -499,20 +499,28 @@ function Get-ApplicationId {
     # A direct-equality filter on the id later avoids VQL relationship traversal,
     # which is what the "Unknown relationship [application__v]" error was about.
     param([string]$Key)
-    if ($script:AppIdResolved) { return $script:AppId }
+    # Cache both success and failure, so every submission reports the SAME real cause
+    # rather than the first showing the app error and the rest a misleading one.
+    if ($script:AppIdResolved) {
+        if ($script:AppErr) { throw $script:AppErr }
+        return $script:AppId
+    }
     $script:AppIdResolved = $true
-    $script:AppId = ''
+    $script:AppId = ''; $script:AppErr = $null
     if (-not $Key) { return '' }
 
-    $k = $Key.Replace("'", "\'")
-    $r = Invoke-VaultApi -Method POST -Path '/query' -ContentType 'application/x-www-form-urlencoded' `
-            -Body @{ q = "SELECT id FROM $ApplicationObject WHERE $ApplicationKeyField = '$k'" }
-    $rows = @(Get-Field $r 'data' @())
-    if ($rows.Count -eq 0) { throw "No $ApplicationObject where $ApplicationKeyField = '$Key' - check ApplicationObject / ApplicationKeyField in config.ini" }
-    if ($rows.Count -gt 1) { throw "$($rows.Count) $ApplicationObject records match $ApplicationKeyField = '$Key'" }
-    $script:AppId = $rows[0].id
-    Write-Log "Application '$Key' resolved to $ApplicationObject $($script:AppId)"
-    return $script:AppId
+    try {
+        $k = $Key.Replace("'", "\'")
+        $r = Invoke-VaultApi -Method POST -Path '/query' -ContentType 'application/x-www-form-urlencoded' `
+                -Body @{ q = "SELECT id FROM $ApplicationObject WHERE $ApplicationKeyField = '$k'" }
+        $rows = @(Get-Field $r 'data' @())
+        if ($rows.Count -eq 0) { throw "No $ApplicationObject where $ApplicationKeyField = '$Key' - check ApplicationObject / ApplicationKeyField in config.ini" }
+        if ($rows.Count -gt 1) { throw "$($rows.Count) $ApplicationObject records match $ApplicationKeyField = '$Key'" }
+        $script:AppId = $rows[0].id
+        Write-Log "Application '$Key' resolved to $ApplicationObject $($script:AppId)" 'OK'
+        return $script:AppId
+    }
+    catch { $script:AppErr = "$_"; throw }
 }
 
 function Resolve-SubmissionId {
