@@ -28,6 +28,13 @@ That move is asynchronous (Vault returns a job id, which the script polls), and 
 API has no copy operation, only move**. So the relocation is one-way unless you set
 `MoveBack = true`, which returns each dossier to its export path after a successful import.
 
+**If the dossiers are already under the archive root**, none of that happens. Point
+`SourceStagingPath` at `/SubmissionsArchive/...` and the script detects, per dossier, that its
+parent already matches `StagingRoot/<application>` — it skips the move, skips creating the folder,
+imports in place, and records `MoveJobDone = not needed`. `MoveBack` is ignored for those, and the
+one-way warning at the end only appears if something actually moved. The root is set in one place,
+`StagingRoot` in `config.ini`.
+
 ## Download
 
 | File | What it is | View | Download |

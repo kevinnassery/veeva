@@ -596,6 +596,7 @@ if (Test-Path -LiteralPath $ResultsCsv) {
 
 $results   = New-Object System.Collections.ArrayList
 $createdIn = @{}
+$script:AnyMoved = $false
 $i = 0
 
 foreach ($d in $dossiers) {
@@ -643,6 +644,13 @@ foreach ($d in $dossiers) {
         $targetPath   = "$targetFolder/$name"
         $record.ImportStagingPath = $targetPath
 
+        # If the dossier is already staged under StagingRoot/<application> - which is the
+        # case when the export was written straight to the archive root rather than to a
+        # user Export folder - there is nothing to move.
+        $segs          = @($sourcePath.Replace('\', '/').TrimEnd('/') -split '/')
+        $currentParent = ($segs[0..($segs.Count - 2)]) -join '/'
+        $alreadyInPlace = ($currentParent.TrimEnd('/') -ieq $targetFolder.TrimEnd('/'))
+
         if (-not $subId) {
             # Read-only VQL, so it runs under -WhatIf too: a bad key surfaces before any move.
             Write-Log "$prefix - resolving submission by $LookupField = '$subKey'"
@@ -651,14 +659,25 @@ foreach ($d in $dossiers) {
         }
 
         if ($PSCmdlet.ShouldProcess("$sourcePath -> $targetPath, submission $subId", 'Move on staging and import')) {
-            if (-not $createdIn.ContainsKey($targetFolder)) {
+            # If the dossier is already sitting there, the folder plainly exists.
+            if (-not $alreadyInPlace -and -not $createdIn.ContainsKey($targetFolder)) {
                 New-StagingFolder -Path $targetFolder
                 $createdIn[$targetFolder] = $true
             }
 
-            Write-Log "$prefix - moving on staging to $targetFolder (server-side, no transfer)"
-            $moved = Move-StagingItem -Path $sourcePath -NewParent $targetFolder
-            $record.MoveJobDone = 'yes'
+            if ($alreadyInPlace) {
+                # Staged directly under StagingRoot/<application> already, so there is
+                # nothing to relocate. Import reads it where it sits.
+                Write-Log "$prefix - already under $targetFolder; no move needed"
+                $moved = $sourcePath
+                $record.MoveJobDone = 'not needed'
+            }
+            else {
+                Write-Log "$prefix - moving on staging to $targetFolder (server-side, no transfer)"
+                $moved = Move-StagingItem -Path $sourcePath -NewParent $targetFolder
+                $record.MoveJobDone = 'yes'
+                $script:AnyMoved = $true
+            }
             $record.ImportStagingPath = $moved
 
             $job = Start-SubmissionImport -SubmissionId $subId -StagingPath $moved `
@@ -678,7 +697,7 @@ foreach ($d in $dossiers) {
             if ($status -eq 'SUCCESS') { Write-Log "$prefix - SUCCESS (binder $($res.BinderId) v$($res.BinderVersion))" 'OK' }
             else                       { Write-Log "$prefix - job ended $status. $($res.Messages)" 'ERROR' }
 
-            if ($MoveBack) {
+            if ($MoveBack -and -not $alreadyInPlace) {
                 $originalParent = ($sourcePath.Replace('\', '/').TrimEnd('/') -split '/')
                 $originalParent = ($originalParent[0..($originalParent.Count - 2)]) -join '/'
                 Write-Log "$prefix - returning dossier to $originalParent"
@@ -688,7 +707,8 @@ foreach ($d in $dossiers) {
         }
         else {
             $record.Status = 'WHATIF'
-            Write-Log "$prefix - WhatIf: would move to $targetPath and import into submission $subId"
+            $plan = if ($alreadyInPlace) { "already in place at $targetPath" } else { "move to $targetPath" }
+            Write-Log "$prefix - WhatIf: would $plan and import into submission $subId"
         }
     }
     catch {
@@ -714,7 +734,7 @@ Write-Log '----------------------------------------------------------------'
 Write-Log "Processed $($results.Count) dossier(s): $ok succeeded, $bad failed, $what dry-run" $(if ($bad) { 'WARN' } else { 'OK' })
 Write-Log "Results CSV : $ResultsCsv"
 Write-Log "Log         : $TranscriptLog"
-if (-not $MoveBack -and $ok -gt 0) {
+if (-not $MoveBack -and $script:AnyMoved) {
     Write-Log "Note: imported dossiers now live under $StagingRoot, not $SourceStagingPath. The File Staging API has no copy operation, so the move is one-way unless MoveBack is set." 'WARN'
 }
 
