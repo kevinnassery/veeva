@@ -4,13 +4,35 @@ Uploads a folder of downloaded submission archives to Vault's File Staging serve
 **Import Submission** against each matching `submission__v` record, then writes one CSV row per
 archive with the file name, job id, binder id and any validation messages.
 
-Files:
+## Download
 
-| File | What it is |
-|---|---|
-| `Import-VaultSubmissions.ps1` | The script. Windows PowerShell 5.1 or PowerShell 7. |
-| `Run-Import.bat` | Double-clickable wrapper — edit four settings at the top. |
-| `manifest-template.csv` | Example of the mapping sheet (the script generates a real one for you). |
+| File | What it is | View | Download |
+|---|---|---|---|
+| `Import-VaultSubmissions.ps1` | The script. Windows PowerShell 5.1 or PowerShell 7. | [view](https://github.com/kevinnassery/veeva/blob/main/Import-VaultSubmissions.ps1) | [raw](https://raw.githubusercontent.com/kevinnassery/veeva/main/Import-VaultSubmissions.ps1) |
+| `Run-Import.bat` | Double-clickable wrapper — edit the settings at the top. | [view](https://github.com/kevinnassery/veeva/blob/main/Run-Import.bat) | [raw](https://raw.githubusercontent.com/kevinnassery/veeva/main/Run-Import.bat) |
+| `manifest-template.csv` | Example mapping sheet (the script generates a real one for you). | [view](https://github.com/kevinnassery/veeva/blob/main/manifest-template.csv) | [raw](https://raw.githubusercontent.com/kevinnassery/veeva/main/manifest-template.csv) |
+
+Repository: **https://github.com/kevinnassery/veeva**
+
+Grab all three at once — keep the `.ps1` and `.bat` in the same folder, the wrapper looks for the
+script beside itself:
+
+```powershell
+$base = 'https://raw.githubusercontent.com/kevinnassery/veeva/main'
+'Import-VaultSubmissions.ps1','Run-Import.bat','manifest-template.csv' | ForEach-Object {
+    Invoke-WebRequest "$base/$_" -OutFile $_
+}
+```
+
+Or clone it:
+
+```
+git clone https://github.com/kevinnassery/veeva.git
+```
+
+> Windows marks files downloaded from the internet as blocked. If PowerShell refuses to run the
+> script, either unblock it — `Unblock-File .\Import-VaultSubmissions.ps1` — or use `Run-Import.bat`,
+> which launches it with `-ExecutionPolicy Bypass` already set.
 
 ## What it does not do
 
