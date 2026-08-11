@@ -66,12 +66,38 @@ A flat folder also works, as long as you fill in `ApplicationFolder` in the mani
 
 ## Three steps
 
-## API version
+## Configuration
 
-Every request is built as `https://<VaultDNS>/api/<ApiVersion>/...`. The default is **`v26.2`**;
-change it in exactly one place — `-ApiVersion v26.3` on the command line, the parameter default in
-the script, or `set API_VERSION=` at the top of `Run-Import.bat`. The value is validated against
-`v<major>.<minor>` so a typo fails immediately instead of 404-ing mid-upload.
+The top of `Import-VaultSubmissions.ps1` is a **CONFIG** block — the settings you actually change,
+grouped together and commented. Fill them in once and the script runs with no arguments at all.
+Anything set there can still be overridden on the command line, which always wins.
+
+```powershell
+[string] $VaultDNS    = ''                      # mycompany-rim.veevavault.com
+[string] $ApiVersion  = 'v26.2'                 # one knob for the whole script
+[string] $SessionId   = ''                      # blank = log in for me
+[string] $SourceRoot  = ''                      # D:\SubmissionDownloads  (read-only)
+[string] $OutputRoot  = ''                      # D:\ImportRun
+[string] $StagingRoot = '/SubmissionsArchive'
+```
+
+Below that are **RUN MODE** (what this run should do) and **ADVANCED** (defaults you can ignore).
+`Run-Import.bat` mirrors the same values as `set` lines at its top.
+
+`VaultDNS`, `SourceRoot` and `OutputRoot` have no safe default and are checked at startup with a
+message naming the missing one. They're deliberately *not* `Mandatory` parameters — that would
+prompt on every run even when the CONFIG block is filled in.
+
+**API version.** Every request is built as `https://<VaultDNS>/api/<ApiVersion>/...`, so
+`$ApiVersion` moves the whole script between releases. It's validated against `v<major>.<minor>`,
+so a typo fails at startup instead of 404-ing mid-upload.
+
+**Session id.** `$SessionId` in the CONFIG block is the only place a session is configured. Leave
+it blank for normal use — the script authenticates, holds the session in one script-scoped
+variable, and replaces it automatically if Vault expires it mid-run. Set it only to reuse a
+session you already hold. Internally it's written in exactly one function (`Connect-Vault`) and
+read in exactly one place (the `Authorization` header in `Invoke-VaultApi`); no function takes a
+session id as an argument, which is what makes the mid-run re-auth safe.
 
 ## Referencing the export output
 

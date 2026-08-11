@@ -76,22 +76,52 @@
 
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
-    [Parameter(Mandatory = $true)]  [string]   $VaultDNS,
-    [Parameter(Mandatory = $true)]  [string]   $SourceRoot,
-    [Parameter(Mandatory = $true)]  [string]   $OutputRoot,
+    # ======================================================================================
+    #  CONFIG - the settings you actually change.
+    #
+    #  Edit the values here once and you can run the script with no arguments at all.
+    #  Anything set here can still be overridden on the command line, which always wins.
+    # ======================================================================================
 
-    [string]     $Manifest,
-    [switch]     $GenerateManifest,
+    # Vault host name. No https://, no trailing slash.
+    #   e.g. 'mycompany-rim.veevavault.com'
+    [string]     $VaultDNS         = '',
 
-    # ---- API version -------------------------------------------------------------------
-    # Every request is built as https://<VaultDNS>/api/<ApiVersion>/... so this one setting
-    # moves the whole script between releases. Override on the command line, or edit the
-    # default here / API_VERSION in Run-Import.bat. Must look like v26.2.
+    # Vault API version. Every request is built as https://<VaultDNS>/api/<ApiVersion>/...
+    # so this one value moves the whole script between releases. Must look like v26.2.
     [ValidatePattern('^v\d+\.\d+$')]
     [string]     $ApiVersion       = 'v26.2',
 
-    [pscredential] $Credential,
-    [string]     $SessionId,
+    # Vault API session id.
+    #
+    #   *** This is the ONLY place a session id is configured. ***
+    #
+    # Leave it blank for normal use: the script authenticates and manages the session
+    # itself, including re-authenticating if it expires mid-run. Set it only when you
+    # already hold a session from somewhere else and want to reuse it.
+    # See the "Session id" block below for how it flows through the script.
+    [string]     $SessionId        = '',
+
+    # Folder holding the bulk download. This script only ever reads from it.
+    #   e.g. 'D:\SubmissionDownloads'
+    [string]     $SourceRoot       = '',
+
+    # Where the manifest, results CSV and log are written. Must not be inside SourceRoot.
+    #   e.g. 'D:\ImportRun'
+    [string]     $OutputRoot       = '',
+
+    # Staging root for Submissions Archive imports. Change only if your Vault differs.
+    [string]     $StagingRoot      = '/SubmissionsArchive',
+
+    # ======================================================================================
+    #  RUN MODE - how this particular run should behave.
+    # ======================================================================================
+
+    # Scan SourceRoot, write a manifest skeleton to OutputRoot, and exit. No Vault calls.
+    [switch]     $GenerateManifest,
+
+    # Mapping sheet produced by -GenerateManifest and then filled in by hand.
+    [string]     $Manifest,
 
     # Vault's own export summary (export_results.csv, found in the
     # <App>-<Sub>-export-summary.zip that Bulk Submission Export produces). When supplied,
@@ -105,8 +135,12 @@ param(
     # (e.g. 00S000000000001.zip, as produced by a /vobjects/.../attachments/file loop).
     [switch]     $NameIsSubmissionId,
 
-    # Staging root for Submissions Archive imports. Do not change unless your Vault differs.
-    [string]     $StagingRoot      = '/SubmissionsArchive',
+    # Supply credentials non-interactively instead of being prompted.
+    [pscredential] $Credential,
+
+    # ======================================================================================
+    #  ADVANCED - sensible defaults; change only if you have a reason.
+    # ======================================================================================
 
     # VQL field used to resolve SubmissionKey -> submission__v id when SubmissionId is blank.
     [string]     $LookupField      = 'name__v',
@@ -129,6 +163,22 @@ Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 $ProgressPreference    = 'SilentlyContinue'   # large -Body PUTs are ~10x faster without it
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+# --------------------------------------------------------------------------------------
+# Required config
+#
+# These have no safe default, so they must come from either the CONFIG block above or
+# the command line. Checked here rather than with [Parameter(Mandatory)] so that editing
+# the CONFIG block is enough to run the script with no arguments -- a Mandatory parameter
+# would prompt even when the value is filled in above.
+# --------------------------------------------------------------------------------------
+
+foreach ($name in @('VaultDNS', 'SourceRoot', 'OutputRoot')) {
+    if ([string]::IsNullOrWhiteSpace((Get-Variable -Name $name -ValueOnly))) {
+        throw "$name is not set. Fill it in under CONFIG at the top of this script, or pass -$name on the command line."
+    }
+}
+$VaultDNS = $VaultDNS -replace '^https?://', '' -replace '/+$', ''
 
 # --------------------------------------------------------------------------------------
 # Paths and guard rails
@@ -353,7 +403,19 @@ if ($GenerateManifest) {
 }
 
 # --------------------------------------------------------------------------------------
-# Authentication
+# Session id
+#
+# $script:SessionId is the single source of truth for the Vault session. It is:
+#   seeded  here, once, from the -SessionId CONFIG value (blank means "log in for me")
+#   written only by Connect-Vault, on first login and on re-auth after expiry
+#   read    only by Invoke-VaultApi, which stamps it into the Authorization header
+#
+# Nothing else in the script touches it, and no function takes a session id as an
+# argument. That is what makes the mid-run re-auth safe: the header is rebuilt from
+# this variable on every attempt, so a refreshed session is picked up immediately by
+# whatever call was in flight.
+#
+# Vault expects the raw session id in Authorization -- no "Bearer " prefix.
 # --------------------------------------------------------------------------------------
 
 $script:BaseUrl   = "https://$VaultDNS/api/$ApiVersion"

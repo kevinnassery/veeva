@@ -12,6 +12,9 @@ REM  manifest, the results CSV and the log - lands in OUTPUT_ROOT.
 REM ============================================================================
 
 REM --- Settings ---------------------------------------------------------------
+REM  These mirror the CONFIG block at the top of Import-VaultSubmissions.ps1.
+REM  Whatever you set here is passed on the command line and overrides the
+REM  script's own values, so you only need to fill them in one place - here.
 
 set VAULT_DNS=mycompany-rim.veevavault.com
 
