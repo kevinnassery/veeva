@@ -49,7 +49,7 @@ param(
     [string]     $VaultDNS         = '',
 
     # File Staging folder holding the dossiers, under the Submissions Archive root.
-    #   e.g. '/SubmissionsArchive/e15713S'  or  '/SubmissionsArchive'
+    #   e.g. '/SubmissionsArchive/e157135'  or  '/SubmissionsArchive'
     [string]     $SourceStagingPath = '',
 
     # Local folder for the results CSV and log. Nothing else is written locally.

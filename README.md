@@ -8,7 +8,7 @@ Nothing is moved, downloaded or uploaded — each dossier is imported from where
 The dossiers live on File Staging under the Submissions Archive root, e.g.
 
 ```
-/SubmissionsArchive/e15713S/nda123456/0000.zip
+/SubmissionsArchive/e157135/nda123456/0000.zip
 ```
 
 Import Submission reads them straight from there. For each dossier the script calls Import
@@ -51,7 +51,7 @@ never a second copy to keep in sync.
 
 ```ini
 VaultDNS          = sb-endo-endo-rim-sbx.veevavault.com
-SourceStagingPath = /SubmissionsArchive/e15713S
+SourceStagingPath = /SubmissionsArchive/e157135
 OutputRoot        = C:\Users\Sarah.Nassery
 
 MODE = MANIFEST              ; MANIFEST | DRYRUN | IMPORT
