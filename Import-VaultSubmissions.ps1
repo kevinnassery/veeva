@@ -81,8 +81,9 @@ param(
     [string]     $LookupField       = 'name__v',        # submission__v field the folder name is found in
     [ValidateSet('prefix','exact')]
     [string]     $SubmissionMatch   = 'prefix',          # folder name is a prefix of name__v ("0000 - ...")
-    [string]     $ApplicationRefField = 'application__v', # submission__v -> application reference
+    [string]     $ApplicationObject   = 'application__v', # object queried to turn e157135 into an id
     [string]     $ApplicationKeyField = 'name__v',       # application__v field holding e157135
+    [string]     $ApplicationRefField = 'application__v', # submission__v field storing the application id
 
     [string]     $DefaultDossierFormatId,
     [string[]]   $Include          = @('*.zip', '*.tar.gz', '*.tgz'),
@@ -492,17 +493,39 @@ if ($GenerateManifest) {
 # Submission lookup / import
 # --------------------------------------------------------------------------------------
 
+function Get-ApplicationId {
+    # Turn the application folder name (e157135) into its record id, once per run.
+    # Cached so we query the application object a single time, not per submission.
+    # A direct-equality filter on the id later avoids VQL relationship traversal,
+    # which is what the "Unknown relationship [application__v]" error was about.
+    param([string]$Key)
+    if ($script:AppIdResolved) { return $script:AppId }
+    $script:AppIdResolved = $true
+    $script:AppId = ''
+    if (-not $Key) { return '' }
+
+    $k = $Key.Replace("'", "\'")
+    $r = Invoke-VaultApi -Method POST -Path '/query' -ContentType 'application/x-www-form-urlencoded' `
+            -Body @{ q = "SELECT id FROM $ApplicationObject WHERE $ApplicationKeyField = '$k'" }
+    $rows = @(Get-Field $r 'data' @())
+    if ($rows.Count -eq 0) { throw "No $ApplicationObject where $ApplicationKeyField = '$Key' - check ApplicationObject / ApplicationKeyField in config.ini" }
+    if ($rows.Count -gt 1) { throw "$($rows.Count) $ApplicationObject records match $ApplicationKeyField = '$Key'" }
+    $script:AppId = $rows[0].id
+    Write-Log "Application '$Key' resolved to $ApplicationObject $($script:AppId)"
+    return $script:AppId
+}
+
 function Resolve-SubmissionId {
     # Resolve a submission__v record from its folder name (the submission number)
-    # scoped to its application, via VQL. This is what makes the tool manifest- and
-    # export_results.csv-free: the staging folder structure supplies both keys.
+    # scoped to its application id, via VQL. This is what makes the tool manifest-
+    # and export_results.csv-free: the staging folder structure supplies both keys.
     #
     # The submission NAME is "0000 - Submission Meeting Minutes", i.e. the folder name
     # is a PREFIX of name__v, not the whole value - so SubmissionMatch defaults to
     # 'prefix' (LIKE '0000%'). Set it to 'exact' if LookupField holds just the number.
     param(
         [Parameter(Mandatory)][string]$Key,   # submission folder name, e.g. 0000
-        [string]$Application                   # application folder name, e.g. e157135
+        [string]$ApplicationId                 # application record id (from Get-ApplicationId)
     )
     $sub = $Key.Replace("'", "\'")
     if ($SubmissionMatch -eq 'exact') {
@@ -513,11 +536,9 @@ function Resolve-SubmissionId {
         $clause = "$LookupField LIKE '$sub%'"
     }
     $where = $clause
-    if ($Application) {
-        $app = $Application.Replace("'", "\'")
-        # VQL parent-field reference scopes the number to one application, so a
-        # submission number that repeats across applications stays unambiguous.
-        $where += " AND $ApplicationRefField.$ApplicationKeyField = '$app'"
+    if ($ApplicationId) {
+        # Direct equality on the reference field's stored id - no relationship traversal.
+        $where += " AND $ApplicationRefField = '$ApplicationId'"
     }
     $r = Invoke-VaultApi -Method POST -Path '/query' -ContentType 'application/x-www-form-urlencoded' `
             -Body @{ q = "SELECT id, name__v FROM submission__v WHERE $where" }
@@ -525,7 +546,7 @@ function Resolve-SubmissionId {
     if ($rows.Count -eq 0) { throw "No submission__v where $where" }
     if ($rows.Count -gt 1) {
         $names = (@($rows | ForEach-Object { Get-Field $_ 'name__v' }) -join '; ')
-        throw "$($rows.Count) submission__v records match $where ($names) - narrow LookupField/ApplicationKeyField or set SubmissionId in a manifest"
+        throw "$($rows.Count) submission__v records match $where ($names) - narrow LookupField or set SubmissionId in a manifest"
     }
     return $rows[0].id
 }
@@ -588,6 +609,7 @@ if (Test-Path -LiteralPath $ResultsCsv) {
 }
 
 $results = New-Object System.Collections.ArrayList
+$script:AppIdResolved = $false   # Get-ApplicationId caches into $script:AppId after first call
 $i = 0
 
 foreach ($d in $dossiers) {
@@ -626,7 +648,8 @@ foreach ($d in $dossiers) {
         if (-not $subId) {
             # Read-only VQL, so it runs under -WhatIf too: a bad key surfaces before importing.
             Write-Log "$prefix - resolving submission '$subKey' in application '$ApplicationKey'"
-            $subId = Resolve-SubmissionId -Key $subKey -Application $ApplicationKey
+            $appId = Get-ApplicationId -Key $ApplicationKey   # cached after the first call
+            $subId = Resolve-SubmissionId -Key $subKey -ApplicationId $appId
             $record.SubmissionId = $subId
         }
 
