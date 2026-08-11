@@ -5,20 +5,27 @@ Nothing is moved, downloaded or uploaded — each dossier is imported from where
 
 ## How it works
 
-The dossiers live on File Staging under the Submissions Archive root, e.g.
+The submissions live on File Staging under the Submissions Archive root, one folder per submission
+inside the application folder:
 
 ```
-/SubmissionsArchive/e157135/nda123456/0000.zip
+/SubmissionsArchive/e157135/0000      <- application e157135, submission 0000
+/SubmissionsArchive/e157135/0001
+/SubmissionsArchive/e157135/0002
+...
 ```
 
-Import Submission reads them straight from there. For each dossier the script calls Import
-Submission on the matching `submission__v` record, polls the import job, retrieves the results, and
-writes a row to a CSV — file name, staging path, job id, status, binder id/version and any
-validation messages.
+Point `SourceStagingPath` at the application folder (`/SubmissionsArchive/e157135`). The script
+lists its children over the API — each folder (or `.zip`/`.tar.gz`) is one submission — and for each
+one it:
 
-The archive → submission mapping comes from `export_results.csv`, which Bulk Submission Export
-wrote next to the dossiers. It's read **in place off File Staging**, so no local copy is needed and
-nothing has to be typed in by hand.
+1. Resolves the `submission__v` record by looking it up in Vault: folder name `0000` is the
+   submission number, `e157135` is the application. **No manifest, no CSV, nothing typed in.**
+2. Calls Import Submission on that record, pointing at the folder's staging path.
+3. Polls the import job, retrieves the results, and writes a row to `import-results.csv` — name,
+   staging path, job id, status, binder id/version and any validation messages.
+
+Submissions import in place; nothing is moved, downloaded or uploaded.
 
 ## Download
 
@@ -81,23 +88,33 @@ Internally it is written in exactly one function (`Connect-Vault`) and read in e
 (the `Authorization` header in `Invoke-VaultApi`); no function takes a session id as an argument,
 which is what makes the mid-run re-auth safe.
 
-## Mapping dossiers to submission records
+## Mapping submissions to records — automatic
 
-You should not have to type anything in. The export already wrote `export_results.csv` next to the
-dossiers — one row per submission, with the relative path to its submission folder plus Submission
-record field values. The script reads it in place off File Staging; leave `ExportResultsCsv` blank
-and it finds the file under `SourceStagingPath`.
+By default you type nothing. Each submission's `submission__v` record is found by VQL from the
+staging layout itself: the folder name is the submission number, the application folder is the
+application. The query is
 
-Veeva does not publish the column schema for that CSV, so the script detects the id column (by
-name, then by `00S…` value shape) and the folder-path column (by name, then by value shape), logs
-which two it picked, and accepts `IdColumn` / `PathColumn` to override.
+```
+SELECT id FROM submission__v
+WHERE <LookupField> = '0000' AND <ApplicationRefField>.<ApplicationKeyField> = 'e157135'
+```
 
-Fallbacks, in precedence order:
+scoping the number to one application so repeats across applications stay unambiguous. Three
+`config.ini` settings say how your vault names those fields — **confirm they match your object
+model**:
 
-1. `Manifest` — a hand-filled sheet; overrides everything for the file names it lists
-2. `export_results.csv` — read off staging, automatic
-3. `NameIsSubmissionId = true` — each dossier is named `<submission_id>.zip`
-4. VQL lookup on `LookupField` (default `name__v`) using the file's base name
+| Setting | Default | Is |
+|---|---|---|
+| `LookupField` | `name__v` | the `submission__v` field holding the folder name (`0000`) |
+| `ApplicationRefField` | `application__v` | the `submission__v` → application reference |
+| `ApplicationKeyField` | `name__v` | the `application__v` field holding `e157135` |
+
+If a folder name matches zero or more than one record, that submission errors (rather than
+guessing) and you can pin it with a manifest. Override the automatic lookup, in precedence order:
+
+1. `Manifest` — a hand-filled `FileName,SubmissionId,…` sheet; wins for any row it lists
+2. `ExportResultsCsv` — if you happen to have one; columns auto-detected (`IdColumn`/`PathColumn` to force)
+3. `NameIsSubmissionId = true` — each submission is named for its record id
 
 ## Three steps
 

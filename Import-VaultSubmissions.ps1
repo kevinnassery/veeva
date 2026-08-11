@@ -75,7 +75,13 @@ param(
     [pscredential] $Credential,
 
     # ---- Advanced ----
-    [string]     $LookupField      = 'name__v',
+    # How a submission folder name (e.g. 0000) and its application (e.g. e157135)
+    # map onto Vault fields, used to resolve the submission__v record when there is
+    # no manifest and no export_results.csv. Confirm these match your vault.
+    [string]     $LookupField       = 'name__v',        # submission__v field holding the folder name
+    [string]     $ApplicationRefField = 'application__v', # submission__v -> application reference
+    [string]     $ApplicationKeyField = 'name__v',       # application__v field holding e157135
+
     [string]     $DefaultDossierFormatId,
     [string[]]   $Include          = @('*.zip', '*.tar.gz', '*.tgz'),
     [int]        $JobTimeoutMinutes = 120,
@@ -312,9 +318,10 @@ function Wait-VaultJob {
 # --------------------------------------------------------------------------------------
 
 function Get-StagingItem {
-    param([Parameter(Mandatory)][string]$Path)
+    param([Parameter(Mandatory)][string]$Path, [switch]$Recursive)
     $items = New-Object System.Collections.ArrayList
-    $next  = "/services/file_staging/items/$(ConvertTo-StagingUrlPath $Path)?recursive=true&limit=500"
+    $rec   = if ($Recursive) { 'true' } else { 'false' }
+    $next  = "/services/file_staging/items/$(ConvertTo-StagingUrlPath $Path)?recursive=$rec&limit=500"
     while ($next) {
         $r = Invoke-VaultApi -Method GET -Path $next
         foreach ($d in @(Get-Field $r 'data' @())) { [void]$items.Add($d) }
@@ -395,24 +402,35 @@ function ConvertFrom-ExportResults {
 
 if (-not $script:SessionId) { Connect-Vault }
 
-Write-Log "Listing dossiers on File Staging: $SourceStagingPath"
-$staged = Get-StagingItem -Path $SourceStagingPath
+# The application is the folder SourceStagingPath points at, e.g. e157135 in
+# /SubmissionsArchive/e157135. Its direct children are the submissions.
+$ApplicationKey = @($SourceStagingPath -split '/' | Where-Object { $_ })[-1]
 
+Write-Log "Listing submissions on File Staging: $SourceStagingPath (application '$ApplicationKey')"
+$staged = Get-StagingItem -Path $SourceStagingPath      # direct children only
+
+# A dossier is either a submission folder (uncompressed eCTD) or a .zip/.tar.gz,
+# sitting directly under SourceStagingPath. Skip Vault's own VFMTemp scratch folder.
 $dossiers = @($staged | Where-Object {
     $kind = "$(Get-Field $_ 'kind' 'file')"
     $name = "$(Get-Field $_ 'name' '')"
-    ($kind -ne 'folder') -and (($Include | Where-Object { $name -like $_ } | Select-Object -First 1) -ne $null)
+    if ($name -ieq 'VFMTemp' -or $name.StartsWith('.')) { return $false }
+    if ($kind -eq 'folder') { return $true }
+    return (($Include | Where-Object { $name -like $_ } | Select-Object -First 1) -ne $null)
 })
 
 if ($dossiers.Count -eq 0) {
-    throw "No dossiers matching $($Include -join ', ') found under $SourceStagingPath. Listed $($staged.Count) item(s) - check the path."
+    throw "No submission folders or archives found directly under $SourceStagingPath (listed $($staged.Count) item(s)). Point SourceStagingPath at the application folder whose children are the submissions."
 }
-Write-Log "Found $($dossiers.Count) dossier(s) under $SourceStagingPath"
+Write-Log "Found $($dossiers.Count) submission(s) under $SourceStagingPath"
 
-# export_results.csv, in place
+# export_results.csv, if the export left one anywhere under the path. Optional:
+# with the /SubmissionsArchive/<app>/<submission> layout there usually isn't one,
+# and submissions resolve by folder name + application via VQL instead.
 $map = @{}
 $exportCsvPath = $ExportResultsCsv
 if (-not $exportCsvPath) {
+    # Only look among direct children - never recurse into the eCTD trees to find it.
     $hit = @($staged | Where-Object { "$(Get-Field $_ 'name' '')" -ieq 'export_results.csv' }) | Select-Object -First 1
     if ($hit) { $exportCsvPath = "$(Get-Field $hit 'path' '')" }
 }
@@ -421,7 +439,7 @@ if ($exportCsvPath) {
     $map = ConvertFrom-ExportResults -Csv (Get-StagingFileText -Path $exportCsvPath)
     Write-Log "Mapping loaded for $($map.Count) key(s)" 'OK'
 } else {
-    Write-Log "No export_results.csv found under $SourceStagingPath - falling back to file names and VQL." 'WARN'
+    Write-Log "No export_results.csv - resolving each submission by folder name + application via VQL." 'INFO'
 }
 
 # A hand-edited manifest overrides the export csv.
@@ -443,7 +461,8 @@ if ($GenerateManifest) {
     $resolved = 0
     $dossiers | ForEach-Object {
         $name = "$(Get-Field $_ 'name' '')"
-        $base = ($name -replace '\.tar\.gz$|\.tgz$|\.zip$', '')
+        # Folders keep their name; archives lose the extension.
+        $base = if ("$(Get-Field $_ 'kind' 'file')" -eq 'folder') { $name } else { $name -replace '\.tar\.gz$|\.tgz$|\.zip$', '' }
         $hit  = if ($map.ContainsKey($name)) { $map[$name] } elseif ($map.ContainsKey($base)) { $map[$base] } else { $null }
         $subId = if ($hit) { Get-Field $hit 'SubmissionId' } elseif ($NameIsSubmissionId) { $base } else { '' }
         if ($subId) { $resolved++ }
@@ -468,13 +487,26 @@ if ($GenerateManifest) {
 # --------------------------------------------------------------------------------------
 
 function Resolve-SubmissionId {
-    param([Parameter(Mandatory)][string]$Key)
-    $escaped = $Key.Replace("'", "\'")
+    # Resolve a submission__v record from its folder name (the submission number)
+    # scoped to its application, via VQL. This is what makes the tool manifest- and
+    # export_results.csv-free: the staging folder structure supplies both keys.
+    param(
+        [Parameter(Mandatory)][string]$Key,   # submission folder name, e.g. 0000
+        [string]$Application                   # application folder name, e.g. e157135
+    )
+    $sub = $Key.Replace("'", "\'")
+    $where = "$LookupField = '$sub'"
+    if ($Application) {
+        $app = $Application.Replace("'", "\'")
+        # VQL parent-field reference scopes the number to one application, so a
+        # submission number that repeats across applications stays unambiguous.
+        $where += " AND $ApplicationRefField.$ApplicationKeyField = '$app'"
+    }
     $r = Invoke-VaultApi -Method POST -Path '/query' -ContentType 'application/x-www-form-urlencoded' `
-            -Body @{ q = "SELECT id, name__v FROM submission__v WHERE $LookupField = '$escaped'" }
+            -Body @{ q = "SELECT id FROM submission__v WHERE $where" }
     $rows = @(Get-Field $r 'data' @())
-    if ($rows.Count -eq 0) { throw "No submission__v record where $LookupField = '$Key'" }
-    if ($rows.Count -gt 1) { throw "$($rows.Count) submission__v records match $LookupField = '$Key' - set SubmissionId in the manifest" }
+    if ($rows.Count -eq 0) { throw "No submission__v where $where" }
+    if ($rows.Count -gt 1) { throw "$($rows.Count) submission__v records match $where - set SubmissionId in a manifest to disambiguate" }
     return $rows[0].id
 }
 
@@ -542,7 +574,7 @@ foreach ($d in $dossiers) {
     $i++
     $name        = "$(Get-Field $d 'name' '')"
     $stagingPath = "$(Get-Field $d 'path' '')"
-    $base        = ($name -replace '\.tar\.gz$|\.tgz$|\.zip$', '')
+    $base        = if ("$(Get-Field $d 'kind' 'file')" -eq 'folder') { $name } else { $name -replace '\.tar\.gz$|\.tgz$|\.zip$', '' }
     $prefix      = "[$i/$($dossiers.Count)] $name"
 
     if ($done.ContainsKey($name)) { Write-Log "$prefix - skipped (already SUCCESS)"; continue }
@@ -573,8 +605,8 @@ foreach ($d in $dossiers) {
     try {
         if (-not $subId) {
             # Read-only VQL, so it runs under -WhatIf too: a bad key surfaces before importing.
-            Write-Log "$prefix - resolving submission by $LookupField = '$subKey'"
-            $subId = Resolve-SubmissionId -Key $subKey
+            Write-Log "$prefix - resolving submission '$subKey' in application '$ApplicationKey'"
+            $subId = Resolve-SubmissionId -Key $subKey -Application $ApplicationKey
             $record.SubmissionId = $subId
         }
 
