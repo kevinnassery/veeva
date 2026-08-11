@@ -33,7 +33,9 @@ Submissions import in place; nothing is moved, downloaded or uploaded.
 |---|---|---|---|
 | `Import-VaultSubmissions.ps1` | The script. Windows PowerShell 5.1 or PowerShell 7. | [view](https://github.com/kevinnassery/veeva/blob/main/Import-VaultSubmissions.ps1) | [raw](https://raw.githubusercontent.com/kevinnassery/veeva/main/Import-VaultSubmissions.ps1) |
 | `config.ini` | **The only file you edit.** All settings live here. | [view](https://github.com/kevinnassery/veeva/blob/main/config.ini) | [raw](https://raw.githubusercontent.com/kevinnassery/veeva/main/config.ini) |
-| `Run-Import.bat` | Double-clickable launcher. Nothing to edit in it. | [view](https://github.com/kevinnassery/veeva/blob/main/Run-Import.bat) | [raw](https://raw.githubusercontent.com/kevinnassery/veeva/main/Run-Import.bat) |
+| `Run-Import.bat` | Double-clickable launcher for one application. | [view](https://github.com/kevinnassery/veeva/blob/main/Run-Import.bat) | [raw](https://raw.githubusercontent.com/kevinnassery/veeva/main/Run-Import.bat) |
+| `Run-Apps.bat` + `Process-Apps.ps1` | Batch launcher: process every application in `apps.txt`. | [view](https://github.com/kevinnassery/veeva/blob/main/Run-Apps.bat) | [raw](https://raw.githubusercontent.com/kevinnassery/veeva/main/Run-Apps.bat) |
+| `apps.txt` | List of applications for the batch launcher, one per line. | [view](https://github.com/kevinnassery/veeva/blob/main/apps.txt) | [raw](https://raw.githubusercontent.com/kevinnassery/veeva/main/apps.txt) |
 | `manifest-template.csv` | Example mapping sheet (the script generates a real one for you). | [view](https://github.com/kevinnassery/veeva/blob/main/manifest-template.csv) | [raw](https://raw.githubusercontent.com/kevinnassery/veeva/main/manifest-template.csv) |
 
 Repository: **https://github.com/kevinnassery/veeva**
@@ -127,6 +129,35 @@ guessing) and you can pin it with a manifest. Override the automatic lookup, in 
 2. **`MODE = DRYRUN`** — authenticates and resolves every submission id (the VQL lookup is
    read-only, so it genuinely runs). Imports nothing. Fix anything showing `ERROR` first.
 3. **`MODE = IMPORT`** — for real.
+
+## Processing many applications — `apps.txt`
+
+To process several applications in one go, list them in **`apps.txt`** (one per line) and run
+**`Run-Apps.bat`** instead of `Run-Import.bat`:
+
+```
+# apps.txt - one application (Submissions Archive folder) per line
+e157135
+e157136
+e157140
+```
+
+`Run-Apps.bat` (set `MODE` at its top: `MANIFEST` | `DRYRUN` | `IMPORT`) runs the import for each
+application in turn. It:
+
+- asks for your Vault credentials **once** and reuses them for every application;
+- inherits everything else from `config.ini` (VaultDNS, field mappings, …) — you do **not** set
+  `SourceStagingPath` per app, the wrapper does that from each line;
+- writes each application's results to its **own** folder, so nothing overwrites:
+  `<OutputRoot>\<app>\import-results.csv`;
+- prints a per-application pass/fail summary at the end;
+- on `IMPORT`, asks you to type `YES` once before doing anything real.
+
+A line starting with `/` is treated as a full staging path; otherwise it's taken as a folder under
+`/SubmissionsArchive`. Lines beginning with `#` are comments.
+
+For a single application, `Run-Import.bat` + `config.ini` is still the simplest path — `apps.txt` is
+just the batch form of the same run.
 
 ## Output
 

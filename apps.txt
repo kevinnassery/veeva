@@ -1,0 +1,13 @@
+# Applications to process - one per line.
+#
+# Each line is the Submissions Archive folder name (the application's staging
+# folder), e.g. e157135. Lines starting with # are comments and are skipped.
+# A line beginning with / is treated as a full staging path as-is.
+#
+# The wrapper runs the import for each application listed here, in order, and
+# writes each one's results to its own folder: <OutputRoot>\<app>\import-results.csv
+
+e157135
+# e157136
+# e157140
+# /SubmissionsArchive/e157200
