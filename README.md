@@ -3,6 +3,127 @@
 Imports submission dossiers that are **already on File Staging** into RIM Submissions Archive.
 Nothing is moved, downloaded or uploaded — each dossier is imported from where it sits.
 
+## Updating and running
+
+### Update to the latest version
+
+The scripts are replaced, not patched. Open PowerShell **in the folder that holds them** and
+run this — it overwrites each file with the current version from GitHub:
+
+```powershell
+$base = 'https://raw.githubusercontent.com/kevinnassery/veeva/main'
+'Import-VaultSubmissions.ps1','Process-Apps.ps1','Run-Import.bat','Run-Apps.bat','apps.txt' |
+    ForEach-Object { Invoke-WebRequest "$base/$_" -OutFile $_ }
+```
+
+**`config.ini` is deliberately not in that list** — updating never overwrites your settings.
+When a release adds a setting, fetch the new file *beside* yours and copy the lines you want:
+
+```powershell
+Invoke-WebRequest "$base/config.ini" -OutFile config.ini.new    # $base from above
+```
+
+Then re-run whatever you were running. Nothing else is installed and there is no state to
+migrate; the script's only inputs are `config.ini` and what it reads from Vault.
+
+> If PowerShell refuses to run a freshly downloaded file, Windows has marked it as blocked.
+> Either `Unblock-File .\*.ps1`, or use the `.bat` launchers — they already pass
+> `-ExecutionPolicy Bypass`.
+
+### Example usage
+
+| What you want | How |
+|---|---|
+| One application, settings from `config.ini` | Double-click **`Run-Import.bat`** |
+| One application, list what's there | `Run-Import.bat -GenerateManifest` |
+| One application, one-off dry run | `Run-Import.bat -WhatIf` (needs `MODE = DRYRUN` or `IMPORT`) |
+| One application, spot-check ~10% of it | `Run-Import.bat -SamplePercent 10` |
+| Every application in `apps.txt` | Double-click **`Run-Apps.bat`** (set `MODE` at its top) |
+| Every application, sampling 10% of each | Set `SAMPLE=10` at the top of `Run-Apps.bat` |
+| Ignore an earlier run's reports, start clean | `Run-Import.bat -ExistingResults Restart` |
+| Direct, no launcher | `.\Import-VaultSubmissions.ps1 -WhatIf -SamplePercent 25` |
+
+Two things to know about how `MODE` and the switches interact:
+
+- **`SamplePercent` narrows whichever `MODE` you're in** — it never starts an import on its
+  own. Under the shipped `MODE = MANIFEST`, `-SamplePercent 10` writes a manifest of a random
+  10%; under `IMPORT` it imports that 10%.
+- **`MODE = MANIFEST` stops after writing the manifest.** It wins over `-WhatIf`, so a dry run
+  needs `MODE = DRYRUN` or `MODE = IMPORT` in `config.ini`. Set `MODE` first, then use the
+  switches to vary a single run.
+
+### Continuing or starting fresh
+
+If the CSV reports this run writes — `import-results.csv` and `manifest.csv` — are already in
+`OutputRoot` from an earlier run, the script says what it found and asks, **before it
+authenticates or touches Vault**:
+
+```
+[WARN] Reports from an earlier run are already in C:\Users\Sarah.Nassery :
+[WARN]   import-results.csv - 21 row(s), 18 SUCCESS, application e134128, written 2026-08-11 16:03
+[WARN]   manifest.csv - 21 row(s), 0 SUCCESS, application e134128, written 2026-08-11 15:58
+[C]ontinue this run (skip what already succeeded), or [R]estart (rotate these aside and begin fresh)? [C]
+```
+
+The summary is there so you can answer without opening the file — the row count, how many
+landed, **which application they belong to**, and when they were written. That last pair is
+usually the deciding factor: reports naming a different application are from a different wave.
+
+| Answer | What happens |
+|---|---|
+| **`C`** (or Enter) | Continue. Submissions already `SUCCESS` are skipped, their rows preserved. |
+| **`R`** | Restart. The reports are rotated aside and this run starts with an empty sheet. |
+
+**Restart renames, it never deletes.** Each report is moved to a name carrying the time it was
+*written* — not the time you restarted — so the file is labelled by the run whose data it holds:
+
+```
+import-results.csv  ->  import-results-20260811-160312.csv
+manifest.csv        ->  manifest-20260811-155841.csv
+```
+
+Rotating twice in the same second appends `-2`, `-3`, … so nothing is ever overwritten.
+
+To skip the question, set it in `config.ini` or pass it on the command line:
+
+```ini
+ExistingResults = Prompt      ; Prompt (default) | Resume | Restart
+```
+
+```powershell
+Run-Import.bat -ExistingResults Restart
+```
+
+Two behaviours worth knowing:
+
+- **`Run-Apps.bat` asks once for the whole batch.** It checks every application's folder up
+  front and applies your single answer to all of them, so a twelve-application wave doesn't stop
+  twelve times. The importer is always handed an explicit answer and never prompts mid-run.
+- **Non-interactive runs never block.** A scheduled task, or any run with input redirected,
+  continues rather than waiting for an answer nobody is there to give, and logs that it did.
+  Pass `-ExistingResults Restart` explicitly if an unattended run should start clean.
+
+A typical first pass on a new application, start to finish:
+
+```powershell
+# 1. See what's there - writes manifest.csv, imports nothing   (MODE = MANIFEST)
+.\Import-VaultSubmissions.ps1 -GenerateManifest
+
+# 2. Resolve every submission id for real, still importing nothing
+.\Import-VaultSubmissions.ps1 -WhatIf
+
+# 3. Set MODE = IMPORT in config.ini, then import a random 10% and read the results CSV
+.\Import-VaultSubmissions.ps1 -SamplePercent 10
+
+# 4. Import the rest - anything already SUCCESS is skipped
+.\Import-VaultSubmissions.ps1
+```
+
+Steps 1 and 2 need no edit: `-GenerateManifest` and `-WhatIf` override `MODE` from the command
+line. Turning a real import **on** is the one thing that isn't a switch — it needs
+`MODE = IMPORT` in `config.ini` (or `Run-Apps.bat`), which is deliberate: nothing you can type
+by accident starts importing.
+
 ## How it works
 
 The submissions live on File Staging under the Submissions Archive root, one folder per submission
@@ -63,21 +184,48 @@ VaultDNS          = sb-endo-endo-rim-sbx.veevavault.com
 SourceStagingPath = /SubmissionsArchive/e157135
 OutputRoot        = C:\Users\Sarah.Nassery
 
-MODE = MANIFEST              ; MANIFEST | DRYRUN | IMPORT
+MODE            = MANIFEST   ; MANIFEST | DRYRUN | IMPORT
+SamplePercent   =            ; blank = all of them; 1-100 = a random sample
+ExistingResults = Prompt     ; reports already there: Prompt | Resume | Restart
 
 ApiVersion = v26.2
 SessionId  =                 ; blank = log in for me
 ```
 
 Precedence is **command line → `config.ini` → built-in defaults**, so `Run-Import.bat -WhatIf`
-gives a one-off dry run without editing the file. `%USERPROFILE%`-style variables are expanded, and
-unknown keys warn by name rather than being silently ignored.
+gives a one-off dry run without editing the file — with the caveat that `MODE = MANIFEST` writes
+the manifest and stops, so switch `MODE` off `MANIFEST` first. `%USERPROFILE%`-style variables are
+expanded, and unknown keys warn by name rather than being silently ignored.
 
 | MODE | What happens |
 |---|---|
 | `MANIFEST` | List the dossiers, write `manifest.csv`, stop. Nothing imported. |
 | `DRYRUN` | Resolve every submission id. Import nothing. |
 | `IMPORT` | Do it for real. |
+
+### Sampling — `SamplePercent`
+
+`SamplePercent` takes a whole number 1–100 and processes only that percentage of the
+submissions found, chosen at random. Blank or `0` processes all of them. It applies to
+whichever `MODE` you're in, so a sampled `MANIFEST`, `DRYRUN` and `IMPORT` all describe the
+same kind of subset.
+
+```ini
+SamplePercent = 10
+```
+
+or, without editing anything, `Run-Import.bat -SamplePercent 10`.
+
+- **Rounded up.** 10% of 11 submissions is 2, not 1 — a small percentage of a small
+  application never selects nothing.
+- **Fresh sample every run.** It is not a stable subset: running twice at 10% gives two
+  independent draws that may overlap. Sampling is for spot-checking, not for splitting a
+  wave into chunks — to do that, run the whole application and let the skip logic work.
+- **Loud in the log.** The selected folder names are printed up front and the summary ends
+  with a `SAMPLE n%` line, so a sampled run can't be mistaken for a full one.
+- **Safe to repeat.** Submissions already recorded `SUCCESS` are still skipped, and results
+  from earlier runs are carried forward rather than overwritten — a 10% run never erases
+  the record of the other 90%.
 
 **API version.** Every request is built as `https://<VaultDNS>/api/<ApiVersion>/...`, so
 `ApiVersion` moves the whole script between releases. It's validated against `v<major>.<minor>`, so
@@ -153,6 +301,16 @@ application in turn. It:
 - prints a per-application pass/fail summary at the end;
 - on `IMPORT`, asks you to type `YES` once before doing anything real.
 
+To sample, set `SAMPLE` next to `MODE` at the top of `Run-Apps.bat`:
+
+```bat
+set "MODE=DRYRUN"
+set "SAMPLE=10"
+```
+
+That takes a random 10% of **each** application in `apps.txt` — every app is still visited,
+each one partially — which is what you want for a spot-check across a wave.
+
 A line starting with `/` is treated as a full staging path; otherwise it's taken as a folder under
 `/SubmissionsArchive`. Lines beginning with `#` are comments.
 
@@ -169,7 +327,14 @@ BinderId, BinderVersion, Warnings, Messages, StartedUtc, FinishedUtc
 ```
 
 Rewritten after every dossier, so an interrupted run still leaves a usable file, and re-running
-skips anything already `SUCCESS`.
+skips anything already `SUCCESS`. Rows an earlier run wrote for dossiers this run didn't touch —
+skipped, or not picked by `SamplePercent` — are carried through, so the file accumulates the
+whole application rather than being replaced by whatever the last run happened to cover. A
+re-processed dossier is replaced where it already sat, so the file keeps its order run to run.
+
+That accumulation is what you're choosing between in the
+[continue-or-restart](#continuing-or-starting-fresh) prompt: continuing adds to this file,
+restarting rotates it aside and begins a new one.
 
 ## Worked example
 

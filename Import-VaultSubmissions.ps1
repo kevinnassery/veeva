@@ -25,6 +25,11 @@
 .PARAMETER ConfigFile
     All settings live in config.ini beside this script. Command line overrides it.
 
+.PARAMETER SamplePercent
+    Process a random percentage (1-100) of the submissions found instead of all of
+    them. 0 = no sampling. Rounded up, so a small percentage still picks at least
+    one. A fresh sample is drawn every run.
+
 .NOTES
     Windows PowerShell 5.1 compatible (also runs on PowerShell 7).
     Endpoints, all relative to https://<VaultDNS>/api/<ApiVersion>:
@@ -71,6 +76,23 @@ param(
     [string]     $IdColumn,
     [string]     $PathColumn,
     [switch]     $NameIsSubmissionId,
+
+    # ---- Sampling ----
+    # Process only a random percentage of the submissions found, for spot-checking a
+    # large application without running the whole wave. 0 (or 100) = no sampling.
+    # The count is rounded UP, so a small percentage of a small set still picks at
+    # least one. Each run draws a fresh sample; it is not a stable subset.
+    [ValidateRange(0, 100)]
+    [int]        $SamplePercent    = 0,
+
+    # ---- Existing output reports ----
+    # What to do when this run's CSV reports (import-results.csv, manifest.csv) are
+    # already sitting in OutputRoot from an earlier run.
+    #   Prompt  = ask (default). Non-interactive hosts fall back to Resume.
+    #   Resume  = keep them: skip what already succeeded, carry the old rows forward.
+    #   Restart = rotate them aside to <name>-<when they were written>.csv, start clean.
+    [ValidateSet('Prompt', 'Resume', 'Restart')]
+    [string]     $ExistingResults  = 'Prompt',
 
     [pscredential] $Credential,
 
@@ -123,7 +145,7 @@ function ConvertTo-StagingUrlPath {
 # Configuration: one file, one load
 # --------------------------------------------------------------------------------------
 
-$IntKeys    = @('JobTimeoutMinutes', 'JobPollSeconds', 'MaxRetries')
+$IntKeys    = @('JobTimeoutMinutes', 'JobPollSeconds', 'MaxRetries', 'SamplePercent')
 $SwitchKeys = @('GenerateManifest', 'NameIsSubmissionId')
 $ListKeys   = @('Include')
 
@@ -206,6 +228,96 @@ function Write-Log {
         default { Write-Host $line }
     }
     Add-Content -LiteralPath $TranscriptLog -Value $line -Encoding UTF8
+}
+
+# --------------------------------------------------------------------------------------
+# Existing output reports
+#
+# The CSV reports this run writes - import-results.csv and manifest.csv - may already be
+# in OutputRoot from an earlier run. Continuing is usually right: it skips what already
+# succeeded and keeps the old rows. But if the last run was a different application or a
+# different wave, those rows are not this run's, and you want a clean sheet.
+#
+# Restarting ROTATES, it never deletes: the old report is renamed to carry the time it
+# was written, so the record survives and the new run starts empty.
+#
+# Decided here, before authenticating, so the question is asked while you are still
+# watching rather than several minutes into a run.
+# --------------------------------------------------------------------------------------
+
+function Get-ReportSummary {
+    # One line describing an existing report, so the prompt can be answered without
+    # opening the file - how many rows, how many landed, and which application they were.
+    param([Parameter(Mandatory)][string]$Path)
+    try {
+        $when = (Get-Item -LiteralPath $Path).LastWriteTime.ToString('yyyy-MM-dd HH:mm')
+        $rows = @(Import-Csv -LiteralPath $Path)
+        if ($rows.Count -eq 0) { return "empty, written $when" }
+        $ok   = @($rows | Where-Object { (Get-Field $_ 'Status') -eq 'SUCCESS' }).Count
+        # The application is the folder above the submission in each StagingPath.
+        $apps = @($rows | ForEach-Object {
+                    $seg = @("$(Get-Field $_ 'StagingPath' '')" -split '/' | Where-Object { $_ })
+                    if ($seg.Count -ge 2) { $seg[$seg.Count - 2] }
+                 } | Where-Object { $_ } | Select-Object -Unique)
+        $for  = if ($apps.Count -eq 1) { ", application $($apps[0])" }
+                elseif ($apps.Count -gt 1) { ", applications $($apps -join '/')" } else { '' }
+        return "$($rows.Count) row(s), $ok SUCCESS$for, written $when"
+    }
+    catch { return "unreadable ($_)" }
+}
+
+function Move-ExistingReport {
+    # Rename an existing report out of the way. Named for when it was WRITTEN, not now -
+    # the file holds that run's data, so that is the timestamp worth carrying.
+    param([Parameter(Mandatory)][string]$Path)
+    $dir  = Split-Path -Parent $Path
+    $base = [IO.Path]::GetFileNameWithoutExtension($Path)
+    $ext  = [IO.Path]::GetExtension($Path)
+    $when = (Get-Item -LiteralPath $Path).LastWriteTime.ToString('yyyyMMdd-HHmmss')
+    $dest = Join-Path $dir "$base-$when$ext"
+    $n    = 1
+    while (Test-Path -LiteralPath $dest) { $n++; $dest = Join-Path $dir "$base-$when-$n$ext" }
+    Move-Item -LiteralPath $Path -Destination $dest
+    return $dest
+}
+
+$existingReports = @(@($ResultsCsv, $ManifestOut) | Where-Object { Test-Path -LiteralPath $_ })
+if ($existingReports.Count) {
+    $action = $ExistingResults
+    if ($action -eq 'Prompt') {
+        Write-Log "Reports from an earlier run are already in $OutputRoot :" 'WARN'
+        foreach ($f in $existingReports) {
+            Write-Log ("  {0} - {1}" -f (Split-Path -Leaf $f), (Get-ReportSummary -Path $f)) 'WARN'
+        }
+        # UserInteractive alone is not enough - it stays true in a console whose stdin has
+        # been redirected (scheduled task, piped input), where Read-Host would block with
+        # nobody there to answer. Both conditions, or we do not ask.
+        if ([Environment]::UserInteractive -and -not [Console]::IsInputRedirected) {
+            # C and R, not "resume"/"restart" - those share a first letter and a typo
+            # would silently pick the wrong one.
+            $ans = ''
+            while ($ans -notmatch '^(C|CONTINUE|R|RESTART)$') {
+                $ans = "$(Read-Host '[C]ontinue this run (skip what already succeeded), or [R]estart (rotate these aside and begin fresh)? [C]')".Trim().ToUpperInvariant()
+                if (-not $ans) { $ans = 'C' }
+            }
+            $action = if ($ans -match '^R') { 'Restart' } else { 'Resume' }
+        }
+        else {
+            $action = 'Resume'
+            Write-Log "Not an interactive session - continuing. Pass -ExistingResults Restart to start fresh." 'WARN'
+        }
+    }
+
+    if ($action -eq 'Restart') {
+        foreach ($f in $existingReports) {
+            $moved = Move-ExistingReport -Path $f
+            Write-Log "Rotated $(Split-Path -Leaf $f) -> $(Split-Path -Leaf $moved)" 'OK'
+        }
+        Write-Log "Starting fresh - nothing will be skipped as already imported." 'WARN'
+    }
+    else {
+        Write-Log "Continuing - anything already SUCCESS will be skipped and its row kept."
+    }
 }
 
 # --------------------------------------------------------------------------------------
@@ -473,6 +585,19 @@ if ($dossiers.Count -eq 0) {
 }
 Write-Log "Found $($dossiers.Count) submission(s) under $SourceStagingPath"
 
+# Sampling: keep a random subset of what was found. Applies to whatever this run does,
+# so MANIFEST, DRYRUN and IMPORT all describe the same sampled set. 100 is not treated
+# as sampling - it is the whole application, and saying so keeps the log honest.
+$TotalDiscovered = $dossiers.Count
+if ($SamplePercent -gt 0 -and $SamplePercent -lt 100) {
+    # Round up: 10% of 11 is 2, not 1, and a tiny percentage never selects nothing.
+    $take = [int][math]::Ceiling($TotalDiscovered * $SamplePercent / 100.0)
+    # Sort the picks back into name order - the sample is random, the log should not be.
+    $dossiers = @($dossiers | Get-Random -Count $take | Sort-Object { "$(Get-Field $_ 'name' '')" })
+    $picked   = (@($dossiers | ForEach-Object { Get-Field $_ 'name' '' }) -join ', ')
+    Write-Log "SAMPLE $SamplePercent% - processing $($dossiers.Count) of $TotalDiscovered submission(s): $picked" 'WARN'
+}
+
 # export_results.csv, if the export left one anywhere under the path. Optional:
 # with the /SubmissionsArchive/<app>/<submission> layout there usually isn't one,
 # and submissions resolve by folder name + application via VQL instead.
@@ -672,15 +797,45 @@ function Get-ImportResult {
 # Main loop
 # --------------------------------------------------------------------------------------
 
-$done = @{}
+$done  = @{}
+$prior = [ordered]@{}   # FileName -> the row an earlier run recorded, carried forward on save
 if (Test-Path -LiteralPath $ResultsCsv) {
     foreach ($row in (Import-Csv -LiteralPath $ResultsCsv)) {
-        if ((Get-Field $row 'Status') -eq 'SUCCESS') { $done[(Get-Field $row 'FileName')] = $true }
+        $fn = "$(Get-Field $row 'FileName' '')"
+        if (-not $fn) { continue }
+        $prior[$fn] = $row
+        if ((Get-Field $row 'Status') -eq 'SUCCESS') { $done[$fn] = $true }
     }
     if ($done.Count) { Write-Log "$($done.Count) dossier(s) already SUCCESS in $ResultsCsv - skipping them" }
 }
 
 $results = New-Object System.Collections.ArrayList
+
+function Save-Results {
+    # Rewrite the results CSV after every dossier, so an interrupted run still leaves a
+    # usable file. Rows an earlier run recorded for dossiers this run did not touch are
+    # carried through instead of being dropped - otherwise a sampled run (or any re-run,
+    # which skips the ones already SUCCESS) would truncate the file to just what it
+    # processed, losing the record of everything that had already imported.
+    $current = @{}
+    foreach ($r in $results) { $current["$($r.FileName)"] = $r }
+
+    # Prior rows hold their position - a dossier re-processed this run is replaced where
+    # it already sat, so the file stays in staging order instead of reshuffling each run.
+    $out     = New-Object System.Collections.ArrayList
+    $written = @{}
+    foreach ($k in $prior.Keys) {
+        $key = "$k"
+        if ($current.ContainsKey($key)) { [void]$out.Add($current[$key]) } else { [void]$out.Add($prior[$key]) }
+        $written[$key] = $true
+    }
+    # Then dossiers seen for the first time, in the order this run processed them.
+    foreach ($r in $results) {
+        if (-not $written.ContainsKey("$($r.FileName)")) { [void]$out.Add($r) }
+    }
+    $out | Export-Csv -LiteralPath $ResultsCsv -NoTypeInformation -Encoding UTF8
+}
+
 $script:AppIdResolved = $false   # Get-ApplicationId caches into $script:AppId after first call
 $i = 0
 
@@ -756,7 +911,7 @@ foreach ($d in $dossiers) {
 
     $record.FinishedUtc = (Get-Date).ToUniversalTime().ToString('s')
     [void]$results.Add([pscustomobject]$record)
-    $results | Export-Csv -LiteralPath $ResultsCsv -NoTypeInformation -Encoding UTF8
+    Save-Results
 }
 
 # --------------------------------------------------------------------------------------
@@ -769,6 +924,9 @@ $what = @($results | Where-Object Status -eq 'WHATIF').Count
 
 Write-Log '----------------------------------------------------------------'
 Write-Log "Processed $($results.Count) dossier(s): $ok succeeded, $bad failed, $what dry-run" $(if ($bad) { 'WARN' } else { 'OK' })
+if ($SamplePercent -gt 0 -and $SamplePercent -lt 100) {
+    Write-Log "SAMPLE $SamplePercent% - this covered $($dossiers.Count) of $TotalDiscovered submission(s), NOT the whole application" 'WARN'
+}
 Write-Log "Results CSV : $ResultsCsv"
 Write-Log "Log         : $TranscriptLog"
 

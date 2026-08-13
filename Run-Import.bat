@@ -14,7 +14,15 @@ REM     DRYRUN   = resolve everything, upload and import nothing
 REM     IMPORT   = do it for real
 REM
 REM  Anything you type after the .bat is passed through to the script, so
-REM  Run-Import.bat -WhatIf  works for a one-off dry run.
+REM     Run-Import.bat -WhatIf              one-off dry run
+REM     Run-Import.bat -SamplePercent 10    process a random 10% of the submissions
+REM     Run-Import.bat -ExistingResults Restart   rotate old reports, start fresh
+REM  all work without editing anything. For a setting you want to keep, put it in
+REM  config.ini instead - there is no second copy here to fall out of sync.
+REM
+REM  If reports from an earlier run are already in OutputRoot, the script shows
+REM  what they are and asks whether to continue or start fresh before it does
+REM  anything. Starting fresh renames the old file, it never deletes it.
 REM ============================================================================
 
 set "PS1=%~dp0Import-VaultSubmissions.ps1"
