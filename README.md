@@ -1,6 +1,6 @@
 # Veeva Vault RIM tooling
 
-*Updated 2026-08-27 19:08 EDT*
+*Updated 2026-08-27 19:14 EDT*
 
 Moves documents and their attachments between Vault instances over the API. Everything
 streams one file at a time, so a 120 GB set needs a few GB of disk. Every run is
@@ -14,6 +14,7 @@ Three tools, one config file each, all driven by `.bat` wrappers.
 
 | I want to... | Run |
 | --- | --- |
+| Get to the folder everything lives in | `cd /d %USERPROFILE%` |
 | Update the scripts | `refresh.bat` |
 | Clear out old files first | `starting-cleanup.bat`, then `refresh.bat` |
 | Log in once, stop the prompts | `login.bat` |
@@ -27,6 +28,9 @@ Three tools, one config file each, all driven by `.bat` wrappers.
 | Cap a run | add `-MaxDocuments 10` |
 | Start reports clean | add `-ExistingResults Restart` |
 | Import submission dossiers | `submissions-import\Run-Import.bat` |
+
+Scripts, configs and `map.csv` all live in your home folder — `cd /d %USERPROFILE%`
+gets there from anywhere, and `/d` is what makes it work across a drive change.
 
 Anything after a `.bat` passes through to the script. Settings you want to keep go in
 the `.ini`. `refresh.bat` never overwrites an `.ini`, and refuses to run at all while a
