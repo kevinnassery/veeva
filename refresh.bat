@@ -1,5 +1,5 @@
 @echo off
-REM VERSION 2026.08.27-10
+REM VERSION 2026.08.27-12
 setlocal
 
 REM ============================================================================
@@ -82,6 +82,7 @@ call :get document-transfer/transfer.bat                  transfer.bat
 call :get document-transfer/Transfer-VaultDocuments.ps1   Transfer-VaultDocuments.ps1
 call :get attachments/attachments.bat                     attachments.bat
 call :get attachments/Sync-VaultAttachments.ps1           Sync-VaultAttachments.ps1
+call :get starting-cleanup.bat                            starting-cleanup.bat
 call :get refresh.bat                                     refresh.bat
 call :get README.md                                       README.md
 

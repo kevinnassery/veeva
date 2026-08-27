@@ -15,6 +15,7 @@ Three tools, one config file each, all driven by `.bat` wrappers.
 | I want to... | Run |
 | --- | --- |
 | Update the scripts | `refresh.bat` |
+| Clear out old files first | `starting-cleanup.bat`, then `refresh.bat` |
 | Log in once, stop the prompts | `login.bat` |
 | Check a vault, change nothing | `probe.bat` |
 | See what a document set contains | `MODE = REPORT`, `Run-Documents.bat` |
