@@ -1,4 +1,5 @@
 @echo off
+REM VERSION 2026.08.26-1
 setlocal
 
 REM ============================================================================
@@ -45,7 +46,11 @@ goto :end
 
 :get
 curl.exe -sfLo "%D%%~1" "%B%/%~1"
-if errorlevel 1 (echo   FAILED    %~1) else (echo   updated   %~1)
+if errorlevel 1 (echo   FAILED    %~1 & exit /b)
+set "VER=?"
+for /f "tokens=2 delims='" %%V in ('findstr /b /c:"$ScriptVersion = " "%D%%~1" 2^>nul') do set "VER=%%V"
+for /f "tokens=3" %%V in ('findstr /b /c:"REM VERSION " "%D%%~1" 2^>nul') do set "VER=%%V"
+echo   updated   %~1  [%VER%]
 exit /b
 
 :end

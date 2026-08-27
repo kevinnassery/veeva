@@ -1,4 +1,5 @@
 @echo off
+REM VERSION 2026.08.26-1
 setlocal
 
 REM ============================================================================
@@ -49,6 +50,9 @@ set "MODE="
 for /f "usebackq tokens=2 delims==" %%A in (`findstr /i /r /c:"^ *MODE *=" "%CFG%"`) do set "MODE=%%A"
 if defined MODE set "MODE=%MODE: =%"
 
+set "VER="
+for /f "tokens=3" %%V in ('findstr /b /c:"REM VERSION " "%~f0"') do set "VER=%%V"
+echo Version: %VER%
 echo Config : %CFG%
 if defined MODE echo Mode   : %MODE%
 echo.

@@ -159,6 +159,8 @@ param(
     [int]        $MaxRetries       = 4
 )
 
+$ScriptVersion = '2026.08.26-1'
+
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 $ProgressPreference    = 'SilentlyContinue'
@@ -277,17 +279,25 @@ $IdFileExplicit = $PSBoundParameters.ContainsKey('IdFile')
 if ($cfg -and $cfg.Contains('IdFile') -and -not [string]::IsNullOrWhiteSpace($cfg['IdFile'])) { $IdFileExplicit = $true }
 
 if ($IdFile) {
+    # Say WHERE it looked. "Not found" on its own sends you hunting; the two absolute
+    # paths tell you immediately whether the file is missing or merely somewhere else.
+    $looked = New-Object System.Collections.ArrayList
     if (-not (Test-Path -LiteralPath $IdFile)) {
+        [void]$looked.Add([IO.Path]::GetFullPath([IO.Path]::Combine((Get-Location).ProviderPath, $IdFile)))
         $here2 = $PSScriptRoot
         if (-not $here2) { $here2 = (Get-Location).ProviderPath }
         $beside = Join-Path $here2 $IdFile
         if (Test-Path -LiteralPath $beside) { $IdFile = $beside }
+        elseif ($beside -ne $looked[0]) { [void]$looked.Add($beside) }
     }
     if (-not (Test-Path -LiteralPath $IdFile)) {
+        $where = ($looked | ForEach-Object { "    $_" }) -join "`n"
         if ($IdFileExplicit) {
-            throw "IdFile not found: $IdFile"
+            throw "IdFile not found. Looked in:`n$where"
         }
-        Write-Warning "No $IdFile found - falling back to the filter settings. Put your document ids in that file to work from a list instead."
+        Write-Warning "No $IdFile found. Looked in:"
+        foreach ($l in $looked) { Write-Warning "    $l" }
+        Write-Warning 'Falling back to the filter settings. Put the file at one of those paths to work from a list instead.'
         $IdFile = ''
     }
 }
@@ -998,6 +1008,7 @@ if (-not $script:SessionId) { Connect-Vault }
 elseif ($script:SessionFile) { Write-Log 'Using the cached session from session.txt' }
 else { Write-Log 'Using the session id from configuration' }
 
+Write-Log "Invoke-VaultDocumentAction.ps1 $ScriptVersion"
 Write-Log "MODE $ConfigMode"
 
 $allDocs = @()   # the whole set, kept for sizing - MaxDocuments must not shrink a projection

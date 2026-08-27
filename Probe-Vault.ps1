@@ -48,6 +48,8 @@ param(
     [int] $ListLimit = 40
 )
 
+$ScriptVersion = '2026.08.26-1'
+
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 $ProgressPreference    = 'SilentlyContinue'
@@ -176,6 +178,7 @@ Say "===========================================================================
 Say " VEEVA VAULT PROBE - read only"
 Say " Vault : $VaultDNS"
 Say " API   : $ApiVersion"
+Say " Script: Probe-Vault.ps1 $ScriptVersion"
 Say " When  : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') local"
 Say "=============================================================================="
 Say ''

@@ -1,4 +1,5 @@
 @echo off
+REM VERSION 2026.08.26-1
 setlocal
 
 REM ============================================================================
@@ -33,6 +34,9 @@ if not exist "%CFG%" (
   goto :end
 )
 
+set "VER="
+for /f "tokens=3" %%V in ('findstr /b /c:"REM VERSION " "%~f0"') do set "VER=%%V"
+echo Version: %VER%
 echo Config : %CFG%
 echo.
 echo This is READ ONLY. Nothing in Vault is changed.

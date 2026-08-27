@@ -27,6 +27,8 @@ param(
     [switch] $Clear
 )
 
+$ScriptVersion = '2026.08.26-1'
+
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -66,6 +68,7 @@ if ($r.responseStatus -ne 'SUCCESS') { throw "Authentication failed: $($r | Conv
 Set-Content -LiteralPath $SessionFile -Value $r.sessionId -Encoding ASCII -NoNewline -WhatIf:$false
 
 Write-Host ''
+Write-Host "Get-VaultSession.ps1 $ScriptVersion" -ForegroundColor DarkGray
 Write-Host "Logged in to $VaultDNS  (vaultId $($r.vaultId), userId $($r.userId))" -ForegroundColor Green
 Write-Host "Session cached in $SessionFile" -ForegroundColor Green
 Write-Host 'probe.bat and Run-Documents.bat will use it - no more password prompts.' -ForegroundColor Green
