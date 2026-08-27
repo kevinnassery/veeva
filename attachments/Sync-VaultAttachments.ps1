@@ -144,7 +144,7 @@ param(
     [int]    $MaxRetries = 4
 )
 
-$ScriptVersion = '2026.08.27-21'
+$ScriptVersion = '2026.08.27-22'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -1442,16 +1442,28 @@ if ($leftovers.Count) {
     Write-Log "$($leftovers.Count) file(s) left in $WorkDir taking $(Format-Bytes $bytes) - safe to delete" 'WARN'
 }
 
-$ok     = @($results | Where-Object { $_.Status -eq 'SUCCESS' }).Count
-$listed = @($results | Where-Object { $_.Status -eq 'LISTED' })
-$bad    = @($results | Where-Object { $_.Status -notin @('SUCCESS','WHATIF','LISTED') }).Count
+# These must match the statuses the loop actually writes: PRESENT, MISSING, DIFFERS,
+# STAGED, ATTACHED, ERROR, WHATIF. They were still looking for SUCCESS and LISTED, left
+# over from before this became a reconcile - so every compared attachment counted as a
+# failure, and a REPORT that worked perfectly ended "361 failed" and exited 1.
+$ok     = @($results | Where-Object { $_.Status -eq 'ATTACHED' }).Count
+$staged = @($results | Where-Object { $_.Status -eq 'STAGED' }).Count
+$bad    = @($results | Where-Object { $_.Status -eq 'ERROR' }).Count
+
 Write-Log '----------------------------------------------------------------'
-if ($listed.Count) {
-    $bytes = ($listed | Measure-Object -Property SizeBytes -Sum).Sum
-    Write-Log "REPORT: $($listed.Count) attachment(s) totalling $(Format-Bytes $bytes)" 'OK'
-    Write-Log 'Nothing was moved. Set Mode = TRANSFER when the numbers look right.'
+if ($Mode -eq 'REPORT') {
+    $missing = @($results | Where-Object { $_.Status -eq 'MISSING' })
+    $bytes   = 0
+    if ($missing.Count) { $bytes = ($missing | Measure-Object -Property SizeBytes -Sum).Sum }
+    Write-Log "REPORT only - nothing was moved." 'OK'
+    Write-Log "$($missing.Count) attachment(s) to deliver, $(Format-Bytes $bytes)"
+    if ($bad) { Write-Log "$bad error(s) - see the rows marked ERROR" 'WARN' }
+    Write-Log 'Set Mode = SYNC and run with -Test when the numbers look right.'
 }
-Write-Log "Moved $ok attachment(s), $bad failed, $(Format-Bytes $moved) transferred" $(if ($bad) { 'WARN' } else { 'OK' })
+else {
+    Write-Log "Attached $ok attachment(s), $bad failed, $(Format-Bytes $moved) transferred" $(if ($bad) { 'WARN' } else { 'OK' })
+    if ($staged) { Write-Log "$staged staged but not attached - re-run with Mode = ATTACH to finish them" 'WARN' }
+}
 Write-Log "Results : $ResultsCsv"
 Write-Log "Log     : $TranscriptLog"
 
