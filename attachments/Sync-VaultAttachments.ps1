@@ -79,7 +79,7 @@ param(
 
     # CSV mapping source document id to target document id, with a header row. Column
     # names are detected from the usual spellings; set them explicitly if yours differ.
-    [string] $IdMap            = 'map.txt',
+    [string] $IdMap            = 'map.csv',
     [string] $MapSourceColumn  = '',
     [string] $MapTargetColumn  = '',
 
@@ -144,7 +144,7 @@ param(
     [int]    $MaxRetries = 4
 )
 
-$ScriptVersion = '2026.08.27-8'
+$ScriptVersion = '2026.08.27-10'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -679,14 +679,50 @@ function Import-IdMap {
     # choose. An unguessable header is an error naming what was found, not a silent
     # mis-read of the first two columns.
     param([Parameter(Mandatory)][string]$Path)
-    if (-not (Test-Path -LiteralPath $Path)) { throw "IdMap not found: $Path" }
+
+    # Relative names resolve against the WORKING directory - where the .bat was run
+    # from - which is where the map is expected to be dropped. Falling back to the
+    # script's own folder covers a double-click from elsewhere. Either way the absolute
+    # path is logged, so there is never a question of which file was read.
+    $resolved = $Path
+    if (-not (Test-Path -LiteralPath $resolved)) {
+        $resolved = [IO.Path]::GetFullPath([IO.Path]::Combine((Get-Location).ProviderPath, $Path))
+    }
+    if (-not (Test-Path -LiteralPath $resolved)) {
+        $mapHere = $PSScriptRoot
+        if (-not $mapHere) { $mapHere = (Get-Location).ProviderPath }
+        $beside = Join-Path $mapHere $Path
+        if (Test-Path -LiteralPath $beside) { $resolved = $beside }
+    }
+    if (-not (Test-Path -LiteralPath $resolved)) {
+        $tried = @(
+            [IO.Path]::GetFullPath([IO.Path]::Combine((Get-Location).ProviderPath, $Path))
+        )
+        if ($PSScriptRoot) { $tried += (Join-Path $PSScriptRoot $Path) }
+        throw ("IdMap not found. Looked in:`n" + (($tried | ForEach-Object { "    $_" }) -join "`n"))
+    }
+    $Path = (Resolve-Path -LiteralPath $resolved).ProviderPath
+    $script:IdMapPath = $Path
 
     # The file is named .txt, so the delimiter is not implied by the extension. Sniff
     # the header for whichever separator actually appears most - a tab-separated export
     # read as comma-separated yields one column and a confusing "could not work out
     # which columns" error rather than an obvious one.
+    # Excel's "CSV UTF-8" writes a byte order mark, which Windows PowerShell 5.1 reads
+    # as literal characters glued to the first column name - so a header of source_id
+    # arrives as something no name match would ever find. Detect it and read as UTF-8.
+    $bom = $false
+    try {
+        $head3 = New-Object byte[] 3
+        $fsb = [IO.File]::OpenRead($Path)
+        try { [void]$fsb.Read($head3, 0, 3) } finally { $fsb.Dispose() }
+        if ($head3[0] -eq 0xEF -and $head3[1] -eq 0xBB -and $head3[2] -eq 0xBF) { $bom = $true }
+    }
+    catch { }
+
     $header = @(Get-Content -LiteralPath $Path -TotalCount 1)
     if (-not $header.Count) { throw "IdMap $Path is empty" }
+    $header[0] = $header[0].TrimStart([char]0xFEFF).Replace([char]0xEF + [string][char]0xBB + [string][char]0xBF, '')
     $delims = @{ ',' = ([regex]::Matches($header[0], ',')).Count
                  "`t" = ([regex]::Matches($header[0], "`t")).Count
                  ';' = ([regex]::Matches($header[0], ';')).Count
@@ -697,23 +733,36 @@ function Import-IdMap {
     if ($best -eq 0) { throw "IdMap $Path has no delimiter in its header row: '$($header[0])'. It needs a header and at least two columns." }
     $shown = if ($delim -eq "`t") { 'tab' } else { $delim }
 
-    $rows = @(Import-Csv -LiteralPath $Path -Delimiter $delim)
+    $rows = if ($bom) { @(Import-Csv -LiteralPath $Path -Delimiter $delim -Encoding UTF8) }
+            else       { @(Import-Csv -LiteralPath $Path -Delimiter $delim) }
     if ($rows.Count -eq 0) { throw "IdMap $Path has a header but no rows" }
     $headers = @($rows[0].PSObject.Properties.Name)
+    if ($headers.Count) { Write-Log "IdMap columns: $($headers -join ', ')" }
+
+    # Match on what a header MEANS rather than on a list of exact spellings. Real
+    # headers are written for people - "Source (old) Document ID" and "Destination
+    # (new) Document ID" are perfectly clear and match no fixed name at all. A column
+    # is a candidate if it mentions an id and a side.
+    function Test-HeaderIs {
+        param([string]$Header, [string[]]$Words)
+        $n = ($Header -replace '[^a-zA-Z0-9]', '').ToLowerInvariant()
+        if ($n -notmatch 'id$|id[^a-z]|^id') { return $false }
+        foreach ($w in $Words) { if ($n -like "*$w*") { return $true } }
+        return $false
+    }
 
     $srcCol = $MapSourceColumn
     $tgtCol = $MapTargetColumn
+
     if (-not $srcCol) {
-        foreach ($c in @('source_id','sourceid','old_id','oldid','source_document_id','from_id','SourceDocId','source','old')) {
-            $hit = @($headers | Where-Object { $_ -replace '[^a-z0-9]', '' -ieq ($c -replace '[^a-z0-9]', '') })
-            if ($hit.Count) { $srcCol = $hit[0]; break }
-        }
+        $cand = @($headers | Where-Object { Test-HeaderIs -Header $_ -Words @('source','old','from','legacy') })
+        if ($cand.Count -eq 1) { $srcCol = $cand[0] }
+        elseif ($cand.Count -gt 1) { throw "More than one column could be the source id in $Path : $($cand -join ', '). Set MapSourceColumn." }
     }
     if (-not $tgtCol) {
-        foreach ($c in @('target_id','targetid','new_id','newid','target_document_id','to_id','TargetDocId','target','new')) {
-            $hit = @($headers | Where-Object { $_ -replace '[^a-z0-9]', '' -ieq ($c -replace '[^a-z0-9]', '') })
-            if ($hit.Count) { $tgtCol = $hit[0]; break }
-        }
+        $cand = @($headers | Where-Object { Test-HeaderIs -Header $_ -Words @('destination','target','new','to') })
+        if ($cand.Count -eq 1) { $tgtCol = $cand[0] }
+        elseif ($cand.Count -gt 1) { throw "More than one column could be the target id in $Path : $($cand -join ', '). Set MapTargetColumn." }
     }
     if (-not $srcCol -or -not $tgtCol) {
         throw "Could not work out which columns hold the ids in $Path. Headers found: $($headers -join ', '). Set MapSourceColumn and MapTargetColumn."
@@ -721,14 +770,47 @@ function Import-IdMap {
 
     $map = @{}
     $bad = 0
+    $sci = 0
+    $dupes = 0
+    $conflict = New-Object System.Collections.ArrayList
     foreach ($row in $rows) {
         $a = "$(Get-Field $row $srcCol '')".Trim()
         $b = "$(Get-Field $row $tgtCol '')".Trim()
+        if ($a -match '^\d+(\.\d+)?[eE][+-]?\d+$' -or $b -match '^\d+(\.\d+)?[eE][+-]?\d+$') {
+            $sci++
+            $bad++
+            continue
+        }
         if ($a -notmatch '^\d+$' -or $b -notmatch '^\d+$') { $bad++; continue }
+        if ($map.ContainsKey($a)) {
+            # The sheet has a row per FILE, so one document appears on many rows.
+            # Repeats are expected; a repeat pointing somewhere ELSE is not.
+            if ($map[$a] -ne $b) { [void]$conflict.Add("$a -> $($map[$a]) and $b") } else { $dupes++ }
+            continue
+        }
         $map[$a] = $b
+    }
+    if ($conflict.Count) {
+        $show = ($conflict | Select-Object -First 5) -join '; '
+        throw "The map sends the same source document to two different targets: $show$(if ($conflict.Count -gt 5) { " (and $($conflict.Count - 5) more)" }). Fix the map - guessing which is right is not something this can do."
+    }
+    if ($sci) {
+        # Refuse rather than carry on with the rows that survived. A mangled id is a
+        # document that silently never gets reconciled, and the run would still report
+        # success - the worst possible combination.
+        throw @"
+$sci row(s) in $Path hold ids in scientific notation, e.g. 5.5283E+04.
+
+Excel does that to long numbers on export, and the original digits are gone - they
+cannot be recovered from the file. Continuing would quietly skip those documents while
+the run still reported success.
+
+Re-export with both id columns formatted as Text before running again.
+"@
     }
     if ($bad) { Write-Log "$bad row(s) in $Path had no usable id pair and were skipped" 'WARN' }
     if ($map.Count -eq 0) { throw "No usable id pairs in $Path (columns '$srcCol' -> '$tgtCol')" }
+    if ($dupes) { Write-Log "$dupes repeated row(s) for documents already mapped - expected when the sheet has a row per file" }
     Write-Log "$($map.Count) id pair(s) from $Path ($shown-separated, column '$srcCol' -> '$tgtCol')" 'OK'
     return $map
 }
@@ -856,6 +938,7 @@ Write-Log "$($ids.Count) document id(s) from $IdFile" 'OK'
 # compare against and nowhere to deliver. It defines the set of work; IdFile, if there
 # is one, only narrows it.
 $idMap = Import-IdMap -Path $IdMap
+$resolvedIdMap = $script:IdMapPath
 
 if (-not $haveIdFile) { $ids = @($idMap.Keys) }
 $mapped   = @($ids | Where-Object { $idMap.ContainsKey($_) })
@@ -980,6 +1063,7 @@ Blank SourceSessionId and TargetSessionId in attachments.ini and run again.
                 '-OutputRoot',      "`"$wDir`"",
                 '-WorkDir',         "`"$(Join-Path $wDir 'work')`"",
                 '-CredentialFile',  "`"$credPath`"",
+                '-IdMap',           "`"$resolvedIdMap`"",
                 '-Workers', '1', '-MaxDocuments', '0', '-ExistingResults', 'Restart', '-Mode', 'SYNC'
             )
             $procs += Start-Process -FilePath 'powershell.exe' -ArgumentList $argList `

@@ -66,8 +66,9 @@ source vault's staging. `Workers = 8` runs eight at once; results merge into one
 Compares both vaults and delivers only what the target is missing, so it is safe to
 re-run.
 
-1. Put the id map in `map.txt` — a header row plus old and new document id columns.
-   Comma, tab, semicolon or pipe; the delimiter and column names are both detected.
+1. Put the id map in `map.csv`, in the folder you run from — a header row plus old and
+   new document id columns. Comma, tab, semicolon or pipe; the delimiter and the column
+   names are both detected.
 2. Fetch the config once, then copy the shared values across from `transfer.ini`:
 
 ```
