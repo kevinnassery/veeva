@@ -27,11 +27,20 @@ param(
     [switch] $Clear
 )
 
-$ScriptVersion = '2026.08.26-7'
+$ScriptVersion = '2026.08.26-9'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+function Get-Field {
+    param($Object, [Parameter(Mandatory)][string]$Name, $Default = '')
+    if ($null -eq $Object) { return $Default }
+    $p = $Object.PSObject.Properties[$Name]
+    if ($null -eq $p -or $null -eq $p.Value) { return $Default }
+    if ($p.Value -is [string] -and [string]::IsNullOrWhiteSpace($p.Value)) { return $Default }
+    return $p.Value
+}
 
 $here = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).ProviderPath }
 $SessionFile = Join-Path $here 'session.txt'
@@ -63,7 +72,8 @@ if (-not $Credential) { $Credential = Get-Credential -Message "Vault credentials
 $r = Invoke-RestMethod -Method Post -Uri "https://$VaultDNS/api/$ApiVersion/auth" `
         -Body @{ username = $Credential.UserName; password = $Credential.GetNetworkCredential().Password } `
         -ContentType 'application/x-www-form-urlencoded' -Headers @{ Accept = 'application/json' }
-if ($r.responseStatus -ne 'SUCCESS') { throw "Authentication failed: $($r | ConvertTo-Json -Depth 5 -Compress)" }
+if ((Get-Field $r 'responseStatus') -ne 'SUCCESS') { throw "Authentication failed: $($r | ConvertTo-Json -Depth 5 -Compress)" }
+if (-not "$(Get-Field $r 'sessionId' '')") { throw "Authentication returned no sessionId. Vault said: $($r | ConvertTo-Json -Depth 5 -Compress)" }
 
 Set-Content -LiteralPath $SessionFile -Value $r.sessionId -Encoding ASCII -NoNewline -WhatIf:$false
 

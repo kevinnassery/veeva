@@ -93,7 +93,7 @@ param(
     [int]    $MaxRetries = 4
 )
 
-$ScriptVersion = '2026.08.26-7'
+$ScriptVersion = '2026.08.26-9'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -239,9 +239,20 @@ function Connect-Vault {
     $r = Invoke-RestMethod -Method Post -Uri "https://$dns/api/$ApiVersion/auth" `
             -Body @{ username = $c.UserName; password = $c.GetNetworkCredential().Password } `
             -ContentType 'application/x-www-form-urlencoded' -Headers @{ Accept = 'application/json' }
-    if ($r.responseStatus -ne 'SUCCESS') { throw "$Side authentication failed: $($r | ConvertTo-Json -Depth 5 -Compress)" }
-    $script:Session[$Side] = $r.sessionId
-    Write-Log "$Side vault $dns - authenticated (vaultId $($r.vaultId), userId $($r.userId))" 'OK'
+    if ((Get-Field $r 'responseStatus') -ne 'SUCCESS') { throw "$Side authentication failed: $($r | ConvertTo-Json -Depth 5 -Compress)" }
+
+    # Read every field defensively. StrictMode turns a missing property into a
+    # terminating error, so reaching straight for $r.vaultId let a LOG LINE kill the run
+    # after the login had already succeeded - and crashing there hid the response that
+    # would have explained it.
+    $sid = "$(Get-Field $r 'sessionId' '')"
+    if (-not $sid) {
+        throw "$Side authentication returned no sessionId. Vault said: $($r | ConvertTo-Json -Depth 5 -Compress)"
+    }
+    $script:Session[$Side] = $sid
+    $vid = "$(Get-Field $r 'vaultId' '?')"
+    $uid = "$(Get-Field $r 'userId'  '?')"
+    Write-Log "$Side vault $dns - authenticated (vaultId $vid, userId $uid)" 'OK'
 }
 
 function Invoke-VaultApi {

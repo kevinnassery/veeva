@@ -48,7 +48,7 @@ param(
     [int] $ListLimit = 40
 )
 
-$ScriptVersion = '2026.08.26-7'
+$ScriptVersion = '2026.08.26-9'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -192,9 +192,11 @@ if (-not $script:SessionId) {
         $auth = Invoke-RestMethod -Method Post -Uri "$script:BaseUrl/auth" `
                     -Body @{ username = $Credential.UserName; password = $Credential.GetNetworkCredential().Password } `
                     -ContentType 'application/x-www-form-urlencoded' -Headers @{ Accept = 'application/json' }
-        if ($auth.responseStatus -ne 'SUCCESS') { throw ($auth | ConvertTo-Json -Depth 5 -Compress) }
-        $script:SessionId = $auth.sessionId
-        Say "      logged in OK   vaultId=$($auth.vaultId)  userId=$($auth.userId)"
+        if ((Get-Field $auth 'responseStatus') -ne 'SUCCESS') { throw ($auth | ConvertTo-Json -Depth 5 -Compress) }
+        $sid = "$(Get-Field $auth 'sessionId' '')"
+        if (-not $sid) { throw "no sessionId returned. Vault said: $($auth | ConvertTo-Json -Depth 5 -Compress)" }
+        $script:SessionId = $sid
+        Say "      logged in OK   vaultId=$(Get-Field $auth 'vaultId' '?')  userId=$(Get-Field $auth 'userId' '?')"
         Say '      tip: run login.bat once to cache the session and stop the prompts'
     }
     catch { Say "      LOGIN FAILED: $_"; Save-Report; exit 1 }

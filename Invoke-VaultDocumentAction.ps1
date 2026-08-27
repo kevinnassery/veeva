@@ -159,7 +159,7 @@ param(
     [int]        $MaxRetries       = 4
 )
 
-$ScriptVersion = '2026.08.26-7'
+$ScriptVersion = '2026.08.26-9'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -467,9 +467,11 @@ function Connect-Vault {
     $body = @{ username = $script:Cred.UserName; password = $script:Cred.GetNetworkCredential().Password }
     $r = Invoke-RestMethod -Method Post -Uri "$script:BaseUrl/auth" -Body $body `
             -ContentType 'application/x-www-form-urlencoded' -Headers @{ Accept = 'application/json' }
-    if ($r.responseStatus -ne 'SUCCESS') { throw "Authentication failed: $($r | ConvertTo-Json -Depth 5 -Compress)" }
-    $script:SessionId = $r.sessionId
-    Write-Log "Authenticated to $VaultDNS (vaultId $($r.vaultId), userId $($r.userId))" 'OK'
+    if ((Get-Field $r 'responseStatus') -ne 'SUCCESS') { throw "Authentication failed: $($r | ConvertTo-Json -Depth 5 -Compress)" }
+    $sid = "$(Get-Field $r 'sessionId' '')"
+    if (-not $sid) { throw "Authentication returned no sessionId. Vault said: $($r | ConvertTo-Json -Depth 5 -Compress)" }
+    $script:SessionId = $sid
+    Write-Log "Authenticated to $VaultDNS (vaultId $(Get-Field $r 'vaultId' '?'), userId $(Get-Field $r 'userId' '?'))" 'OK'
     # Refresh the cache so the NEXT run does not prompt either, and so a mid-run
     # re-auth leaves a working session behind rather than a stale one.
     if ($script:SessionFile) {
