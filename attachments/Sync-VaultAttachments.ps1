@@ -144,7 +144,7 @@ param(
     [int]    $MaxRetries = 4
 )
 
-$ScriptVersion = '2026.08.27-15'
+$ScriptVersion = '2026.08.27-16'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -671,6 +671,44 @@ function Get-DocumentAttachment {
     return $out
 }
 
+function Test-TargetStaging {
+    # What probe.bat was for, asked at the moment it matters instead of as a separate
+    # errand: who this account is on the TARGET vault, and whether TargetPath is real.
+    #
+    # A wrong TargetPath does not fail loudly - it can succeed into a folder nobody
+    # looks in. Checking it before the first download is the difference between an
+    # error now and a discovery later.
+    $me = $null
+    try { $me = Invoke-VaultApi -Side Target -Method GET -Path '/objects/users/me' } catch {
+        Write-Log "Could not read the target user: $_" 'WARN'
+        return
+    }
+    $u       = Get-Field (@(Get-Field $me 'users' @()) | Select-Object -First 1) 'user' $null
+    $uid     = "$(Get-Field $u 'id' '')"
+    $profile = "$(Get-Field $u 'security_profile__v' '')"
+    $isAdmin = ($profile -match 'vault_owner|system_admin')
+    Write-Log "Target user $(Get-Field $u 'user_name__v' '') id=$uid profile=$profile"
+
+    if ($Mode -eq 'REPORT') { return }
+
+    # Admin paths are absolute from the staging root; everyone else is relative to
+    # their own folder. Getting this backwards is the most likely reason a path is wrong.
+    if ($isAdmin -and $TargetPath -notmatch '^/u\d+') {
+        Write-Log "This account is an admin on the target, so TargetPath should start /u$uid - it is '$TargetPath'" 'WARN'
+    }
+    if (-not $isAdmin -and $TargetPath -match '^/u\d+') {
+        Write-Log "This account is NOT an admin on the target, so staging paths are relative to its own folder - drop the /u$uid from TargetPath" 'WARN'
+    }
+
+    try {
+        $null = Invoke-VaultApi -Side Target -Method GET -Path ("/services/file_staging/items/" + (ConvertTo-StagingUrlPath $TargetPath) + "?recursive=false&limit=1")
+        Write-Log "TargetPath $TargetPath is reachable on the target vault" 'OK'
+    }
+    catch {
+        throw "TargetPath '$TargetPath' could not be listed on the target vault: $_`n`nThe user folder there is /u$uid. Fix TargetPath before running again - a wrong one can succeed into a folder nobody looks in."
+    }
+}
+
 function Import-IdMap {
     # source document id -> target document id, from a CSV with a header row.
     #
@@ -1011,6 +1049,8 @@ if ($Test) {
 
 # REPORT still needs the target: the whole point is comparing against what is there.
 if (-not $script:Session['Target']) { Connect-Vault -Side Target } else { Write-Log 'Target: using the configured session id' }
+
+Test-TargetStaging
 
 # --------------------------------------------------------------------------------------
 # Parallel mode

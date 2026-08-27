@@ -58,7 +58,6 @@ with `Mode = SYNC` — delivers the rest.
 | `cd /d %USERPROFILE%` | get to the folder |
 | `refresh.bat` | update the scripts |
 | `starting-cleanup.bat` | set old files aside, then `refresh.bat` |
-| `probe.bat` | check a vault, change nothing |
 | `attachments.bat` | run whatever `Mode` says |
 | `-Test` | stop after 5 are reconciled |
 | `-WhatIf` | rehearse, write nothing |

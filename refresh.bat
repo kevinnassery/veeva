@@ -1,5 +1,5 @@
 @echo off
-REM VERSION 2026.08.27-15
+REM VERSION 2026.08.27-16
 setlocal
 
 REM ============================================================================
@@ -72,8 +72,6 @@ call :retire Transfer-VaultAttachments.ps1
 echo Refreshing from %B%
 echo.
 
-call :get document-transfer/probe.bat                     probe.bat
-call :get document-transfer/Probe-Vault.ps1               Probe-Vault.ps1
 call :get attachments/attachments.bat                     attachments.bat
 call :get attachments/Sync-VaultAttachments.ps1           Sync-VaultAttachments.ps1
 call :get starting-cleanup.bat                            starting-cleanup.bat
