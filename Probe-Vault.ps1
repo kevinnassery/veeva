@@ -117,8 +117,21 @@ function Save-Report { Set-Content -LiteralPath $OutFile -Value ($report -join "
 
 # ---- session ------------------------------------------------------------------------
 
-$script:BaseUrl   = "https://$VaultDNS/api/$ApiVersion"
-$script:SessionId = $SessionId
+$script:BaseUrl     = "https://$VaultDNS/api/$ApiVersion"
+$script:SessionId   = $SessionId
+$script:SessionFile = ''
+
+# session.txt: written by login.bat / Get-VaultSession.ps1 so a run does not have to
+# prompt again. Only consulted when SessionId is blank; an explicit SessionId wins.
+if ([string]::IsNullOrWhiteSpace($script:SessionId)) {
+    $sessionHere = $PSScriptRoot
+    if (-not $sessionHere) { $sessionHere = (Get-Location).ProviderPath }
+    $sessionFile = Join-Path $sessionHere 'session.txt'
+    if (Test-Path -LiteralPath $sessionFile) {
+        $cached = ("$(Get-Content -LiteralPath $sessionFile -Raw)").Trim()
+        if ($cached) { $script:SessionId = $cached; $script:SessionFile = $sessionFile }
+    }
+}
 
 function Invoke-Api {
     # Deliberately simpler than the main script's helper: no retry, no re-auth. A probe
@@ -176,9 +189,11 @@ if (-not $script:SessionId) {
         if ($auth.responseStatus -ne 'SUCCESS') { throw ($auth | ConvertTo-Json -Depth 5 -Compress) }
         $script:SessionId = $auth.sessionId
         Say "      logged in OK   vaultId=$($auth.vaultId)  userId=$($auth.userId)"
+        Say '      tip: run login.bat once to cache the session and stop the prompts'
     }
     catch { Say "      LOGIN FAILED: $_"; Save-Report; exit 1 }
 }
+elseif ($script:SessionFile) { Say '      using the cached session from session.txt' }
 else { Say '      using the session id from documents.ini' }
 
 $userId = ''; $isAdmin = $null

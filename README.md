@@ -1,6 +1,6 @@
 # Veeva Vault RIM tooling
 
-*Updated 2026-08-26 22:26 EDT*
+*Updated 2026-08-26 22:27 EDT*
 
 ## Get the scripts
 
@@ -44,6 +44,7 @@ Re-downloading `documents.ini` overwrites your settings. Skip that line after th
 
 | I want to... | Run |
 | --- | --- |
+| Log in once, stop the password prompts | `login.bat` |
 | Probe the vault, change nothing | `probe.bat` |
 | See what a view matches | `MODE = REPORT`, `Run-Documents.bat` |
 | Rehearse an update | `Run-Documents.bat -WhatIf` |
@@ -101,8 +102,10 @@ Written to `OutputRoot`: `probe-output.txt`, `document-fields.csv`, `document-ty
 ## Export source documents
 
 1. In `documents.ini` set `VaultDNS` and `OutputRoot`. Leave `SessionId` blank.
-2. Run `probe.bat` once to confirm you can log in.
-3. Put the document ids in a `.txt`, one per line, next to the scripts:
+2. Run `login.bat` once. It caches the session in `session.txt`, so the runs below do
+   not each ask for a password. `login.bat -Clear` deletes it.
+3. Run `probe.bat` to confirm the vault answers.
+4. Put the document ids in a `.txt`, one per line, next to the scripts:
 
 ```
 id
@@ -111,7 +114,7 @@ id
 773
 ```
 
-4. Point at it and check the list is read correctly:
+5. Point at it and check the list is read correctly:
 
 ```
 IdFile = sourcedocids.txt
@@ -120,9 +123,9 @@ MODE   = REPORT
 
 Run `Run-Documents.bat`. Confirm the `documents.csv` count.
 
-5. `MODE = EXPORT`, `MaxDocuments = 10`. Run. Check the staged paths in
+6. `MODE = EXPORT`, `MaxDocuments = 2`. Run. Check the staged paths in
    `document-results.csv`.
-6. Clear `MaxDocuments`. Run.
+7. Clear `MaxDocuments`. Run.
 
 Source files only is the default:
 

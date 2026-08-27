@@ -369,9 +369,22 @@ if ($existing.Count) {
 # safe - the header is rebuilt from this variable on every attempt.
 # --------------------------------------------------------------------------------------
 
-$script:BaseUrl   = "https://$VaultDNS/api/$ApiVersion"
-$script:SessionId = $SessionId
-$script:Cred      = $Credential
+$script:BaseUrl     = "https://$VaultDNS/api/$ApiVersion"
+$script:SessionId   = $SessionId
+$script:Cred        = $Credential
+$script:SessionFile = ''
+
+# session.txt: written by login.bat / Get-VaultSession.ps1 so a run does not have to
+# prompt again. Only consulted when SessionId is blank; an explicit SessionId wins.
+if ([string]::IsNullOrWhiteSpace($script:SessionId)) {
+    $sessionHere = $PSScriptRoot
+    if (-not $sessionHere) { $sessionHere = (Get-Location).ProviderPath }
+    $sessionFile = Join-Path $sessionHere 'session.txt'
+    if (Test-Path -LiteralPath $sessionFile) {
+        $cached = ("$(Get-Content -LiteralPath $sessionFile -Raw)").Trim()
+        if ($cached) { $script:SessionId = $cached; $script:SessionFile = $sessionFile }
+    }
+}
 
 function Connect-Vault {
     if (-not $script:Cred) { $script:Cred = Get-Credential -Message "Vault credentials for $VaultDNS" }
@@ -381,6 +394,11 @@ function Connect-Vault {
     if ($r.responseStatus -ne 'SUCCESS') { throw "Authentication failed: $($r | ConvertTo-Json -Depth 5 -Compress)" }
     $script:SessionId = $r.sessionId
     Write-Log "Authenticated to $VaultDNS (vaultId $($r.vaultId), userId $($r.userId))" 'OK'
+    # Refresh the cache so the NEXT run does not prompt either, and so a mid-run
+    # re-auth leaves a working session behind rather than a stale one.
+    if ($script:SessionFile) {
+        try { Set-Content -LiteralPath $script:SessionFile -Value $r.sessionId -Encoding ASCII -NoNewline } catch { }
+    }
 }
 
 # --------------------------------------------------------------------------------------
@@ -796,6 +814,7 @@ function Export-DocumentBatch {
 # --------------------------------------------------------------------------------------
 
 if (-not $script:SessionId) { Connect-Vault }
+elseif ($script:SessionFile) { Write-Log 'Using the cached session from session.txt' }
 else { Write-Log 'Using the session id from configuration' }
 
 Write-Log "MODE $ConfigMode"

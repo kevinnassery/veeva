@@ -19,3 +19,4 @@ documents-*.log
 probe-output.txt
 products.csv
 sourcedocids.txt
+session.txt

@@ -10,7 +10,7 @@ REM  curl.exe -sLo refresh.bat https://raw.githubusercontent.com/kevinnassery/ve
 REM
 REM  Overwritten every time:   the .ps1 and .bat scripts, README.md
 REM  Downloaded only if absent: documents.ini  (your settings are never clobbered)
-REM  Never touched:            sourcedocids.txt, and anything in OutputRoot
+REM  Never touched:            sourcedocids.txt, session.txt, anything in OutputRoot
 REM ============================================================================
 
 set "B=https://raw.githubusercontent.com/kevinnassery/veeva/main"
@@ -19,6 +19,8 @@ set "D=%~dp0"
 echo Refreshing from %B%
 echo.
 
+call :get login.bat
+call :get Get-VaultSession.ps1
 call :get probe.bat
 call :get Probe-Vault.ps1
 call :get Run-Documents.bat
