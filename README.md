@@ -1,6 +1,6 @@
 # Veeva Vault RIM tooling
 
-*Updated 2026-08-26 23:26 EDT*
+*Updated 2026-08-26 23:27 EDT*
 
 ## Get the scripts
 
@@ -179,21 +179,9 @@ into memory. Re-runs skip anything already `SUCCESS`.
 `TargetVaultDNS` is the vault host, not the sandbox's display name — the part of the
 browser URL before `/ui/` when you are logged into that vault.
 
- own folder named for its
-source id:
-
-```
-<TargetPath>/<source doc id>/<original filename>
-```
-
-so two files called `Cover Letter.pdf` cannot overwrite each other.
-
-`ReserveMB` (default 2048) stops the run rather than filling the volume. Uploads always
-use a resumable session, so a 2 GB file streams from disk in parts instead of loading
-into memory. Re-runs skip anything already `SUCCESS`.
-
-`TargetVaultDNS` is the vault host, not the sandbox's display name — the part of the
-browser URL before `/ui/` when you are logged into that vault.
+`TargetPath` ships blank on purpose. The user folder id is per-vault, so a path that is
+right on one vault is wrong on another. Run `probe.bat` against the target once for the
+real user id, whether that account is Admin there, and which staging folders exist.
 
 ## curl
 
