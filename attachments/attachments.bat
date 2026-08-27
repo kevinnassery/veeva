@@ -1,5 +1,5 @@
 @echo off
-REM VERSION 2026.08.27-5
+REM VERSION 2026.08.27-6
 setlocal
 
 REM ============================================================================
@@ -11,8 +11,13 @@ REM  Set Mode in attachments.ini:
 REM     REPORT   = list every attachment and total the size. Moves nothing.
 REM     TRANSFER = download each one and upload it to the target staging.
 REM
+REM     attachments.bat -Test               stop once 5 are reconciled
+REM     attachments.bat -Test -TestCount 20 stop once 20 are
 REM     attachments.bat -WhatIf             list what would move, move nothing
 REM     attachments.bat -MaxDocuments 50    examine 50 documents, then stop
+REM
+REM  -Test is the one to use first. Most documents have no attachments, so a cap
+REM  of 5 DOCUMENTS can reconcile nothing; -Test counts what was reconciled.
 REM
 REM  Re-running skips any attachment already recorded SUCCESS.
 REM ============================================================================

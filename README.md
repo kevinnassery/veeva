@@ -1,6 +1,6 @@
 # Veeva Vault RIM tooling
 
-*Updated 2026-08-27 19:02 EDT*
+*Updated 2026-08-27 19:05 EDT*
 
 ## Get the scripts
 
@@ -200,9 +200,14 @@ run again after any interruption.
 3. `Mode = REPORT`, `MaxDocuments = 200`, run `attachments.bat`. Nothing changes.
 4. Read the summary: source attachments, already present, missing, and same-name-
    different-MD5. Multiply the missing count out against the full map.
-5. `Mode = SYNC`, `MaxDocuments = 5`. Run. Confirm the attachments appear on the target
-   documents.
-6. Clear `MaxDocuments`. Run.
+5. `Mode = SYNC`, run `attachments.bat -Test`. It keeps going until 5 attachments are
+   actually reconciled — staged *and* attached — however many documents that takes, then
+   stops. Confirm those 5 on the target documents.
+6. Clear `MaxDocuments` and run without `-Test`.
+
+Use `-Test` rather than `MaxDocuments` for the first run: most documents carry no
+attachments, so a cap of five *documents* can reconcile nothing and prove nothing.
+`Workers` starts at 1 — raise it once a sequential run is known good.
 
 Each file is staged at `<TargetPath>/<target doc id>/attachments/<source attachment id>/`
 then attached with `POST /objects/documents/attachments/batch`, 500 per call.

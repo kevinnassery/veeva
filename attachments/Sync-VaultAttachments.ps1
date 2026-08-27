@@ -92,6 +92,18 @@ param(
     [ValidateRange(1, 500)]
     [int]    $AttachBatchSize  = 500,
 
+    # Stop once TestCount attachments have actually been reconciled, however many
+    # documents that took. MaxDocuments is the wrong tool for a first look here: most
+    # documents carry no attachments at all, so a cap of five documents can easily
+    # reconcile nothing and tell you nothing.
+    #
+    # Reconciled means ATTACHED in SYNC - staged AND attached, confirmed end to end.
+    # In REPORT it means five missing attachments found, since that is what SYNC would
+    # have delivered.
+    [switch] $Test,
+    [ValidateRange(1, 10000)]
+    [int]    $TestCount        = 5,
+
     # ---- What to move ----
     [string] $IdFile     = 'sourcedocids.txt',
     [string] $OutputRoot = '',
@@ -132,7 +144,7 @@ param(
     [int]    $MaxRetries = 4
 )
 
-$ScriptVersion = '2026.08.27-5'
+$ScriptVersion = '2026.08.27-6'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -167,8 +179,8 @@ function ConvertTo-StagingUrlPath {
 # Configuration
 # --------------------------------------------------------------------------------------
 
-$IntKeys    = @('MaxDocuments', 'ReserveMB', 'PartSizeMB', 'MaxRetries', 'Workers', 'AttachBatchSize')
-$SwitchKeys = @('SeparateCredentials', 'ReplaceDiffering')
+$IntKeys    = @('MaxDocuments', 'ReserveMB', 'PartSizeMB', 'MaxRetries', 'Workers', 'AttachBatchSize', 'TestCount')
+$SwitchKeys = @('SeparateCredentials', 'ReplaceDiffering', 'Test')
 
 if ([string]::IsNullOrWhiteSpace($ConfigFile)) {
     $here = $PSScriptRoot
@@ -872,6 +884,16 @@ if ($MaxDocuments -gt 0 -and $pending.Count -gt $MaxDocuments) {
 Write-Log "$($pending.Count) document(s) to move"
 
 if (-not $script:Session['Source']) { Connect-Vault -Side Source } else { Write-Log 'Source: using the configured session id' }
+if ($Test) {
+    # Attach one at a time, so each reconciled attachment is confirmed on the target
+    # before it is counted. Batching 500 would leave the run finished with nothing
+    # actually attached.
+    $AttachBatchSize = 1
+    # Workers would each count their own five.
+    if ($Workers -gt 1) { Write-Log 'TEST: running single-threaded so the count is the whole run' 'WARN'; $Workers = 1 }
+    Write-Log "TEST: stopping after $TestCount attachment(s) are reconciled, however many documents that takes" 'WARN'
+}
+
 # REPORT still needs the target: the whole point is comparing against what is there.
 if (-not $script:Session['Target']) { Connect-Vault -Side Target } else { Write-Log 'Target: using the configured session id' }
 
@@ -1022,6 +1044,7 @@ $i = 0
 $moved     = [long]0
 $stat      = @{ Src = 0; Present = 0; Missing = 0; Differs = 0; Staged = 0; Attached = 0; NoMap = 0; NoAtt = 0 }
 $attachQ   = New-Object System.Collections.ArrayList
+$script:TestStopped = $false
 
 function Send-AttachQueue {
     # Attach whatever is queued and write the outcome back onto the rows already in the
@@ -1078,7 +1101,7 @@ if ($Mode -eq 'ATTACH') {
 }
 else {
 
-foreach ($srcId in $pending) {
+:documents foreach ($srcId in $pending) {
     $i++
     $tgtId     = $idMap[$srcId]
     $docPrefix = "[$i/$($pending.Count)] $srcId -> $tgtId"
@@ -1199,6 +1222,16 @@ foreach ($srcId in $pending) {
         [void]$results.Add($record)
         Save-Results
         Send-AttachQueue
+
+        if ($Test) {
+            $reconciled = if ($Mode -eq 'REPORT') { $stat.Missing } else { $stat.Attached }
+            if ($reconciled -ge $TestCount) {
+                $what = if ($Mode -eq 'REPORT') { 'missing attachment(s) found' } else { 'attachment(s) reconciled' }
+                Write-Log "TEST: $reconciled $what after $i document(s) - stopping" 'OK'
+                $script:TestStopped = $true
+                break documents
+            }
+        }
     }
 }
 
@@ -1209,6 +1242,9 @@ Write-Log '----------------------------------------------------------------'
 Write-Log ("source attachments {0}   already present {1}   missing {2}   same name different MD5 {3}" -f `
             $stat.Src, $stat.Present, $stat.Missing, $stat.Differs)
 Write-Log ("documents with no attachments {0}" -f $stat.NoAtt)
+if ($script:TestStopped) {
+    Write-Log "TEST run - stopped early after $i of $($pending.Count) document(s). These totals are NOT the whole set." 'WARN'
+}
 if ($Mode -ne 'REPORT') { Write-Log ("staged {0}   attached {1}" -f $stat.Staged, $stat.Attached) }
 
 # Scratch should be empty. Anything still here is a file a crash or a kill left
