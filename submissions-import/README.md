@@ -378,6 +378,10 @@ live vault.** Do the `DRYRUN` pass on two or three dossiers before turning it lo
 
 ## References
 
+An offline markdown mirror of the v26.2 developer-portal pages this script depends on
+(RIM Submissions Archive, authentication, file staging, jobs, VQL, vault objects, errors)
+lives in [`../docs/api/`](../docs/api/INDEX.md). Regenerate it with `../docs/api/fetch-docs.sh`.
+
 - [Importing Submissions (RIM)](https://regulatory.veevavault.help/en/gr/28082/)
 - [Using Bulk Submission Export (RIM)](https://regulatory.veevavault.help/en/gr/42262/)
 - [Import Submission — API v26.1](https://general.veevavault.dev/regulatory/vault-api/api-reference/26.1/rim-submissions-archive/import-submission/)
