@@ -1,5 +1,5 @@
 @echo off
-REM VERSION 2026.08.27-17
+REM VERSION 2026.08.27-19
 setlocal
 
 REM ============================================================================
@@ -47,21 +47,15 @@ REM  supervisor launches each worker from it - so replacing files mid-run means 
 REM  workers running different code from the process that started them. The scripts
 REM  drop a .run-*.lock here while they work.
 set "BUSY="
-for %%L in ("%D%.run-*.lock") do set "BUSY=1"
+for %%L in ("%D%.run-*.lock") do call :checklock "%%L"
 if defined BUSY (
   if /i not "%~1"=="-force" (
-    echo   REFUSING TO REFRESH - a run looks active:
     echo.
-    for %%L in ("%D%.run-*.lock") do (
-      echo     %%~nxL
-      type "%%L" 2^>nul
-      echo.
-    )
-    echo   Let it finish, or if that run is already over the lock is stale -
-    echo   delete the .run-*.lock file, or re-run: refresh.bat -force
+    echo   REFUSING TO REFRESH - a run is still going. Let it finish, or use:
+    echo         refresh.bat -force
     goto :end
   )
-  echo   -force given: refreshing over an apparently active run.
+  echo   -force given: refreshing over a running job.
   echo.
 )
 
@@ -114,6 +108,23 @@ REM  has run - so the first file would always look like a mismatch.
 if "%VER%"=="?" exit /b
 if not defined FIRSTVER set "FIRSTVER=%VER%"
 if not "%VER%"=="%FIRSTVER%" set "SKEW=1"
+exit /b
+
+:checklock
+REM  A lock only means something if its process is still alive. A crash leaves the file
+REM  behind, and making someone delete it by hand to get on with their day is a bad
+REM  trade for a guard that is supposed to protect them.
+set "LPID="
+for /f "tokens=2 delims==" %%P in ('findstr /b /c:"pid=" "%~1"') do set "LPID=%%P"
+if not defined LPID goto :stalelock
+tasklist /FI "PID eq %LPID%" | findstr /i "powershell.exe" >nul
+if errorlevel 1 goto :stalelock
+set "BUSY=1"
+echo     %~nx1  - pid %LPID% is still running
+exit /b
+:stalelock
+echo   cleared stale lock %~nx1 ^(pid %LPID% is not running^)
+del /q "%~1"
 exit /b
 
 :retire

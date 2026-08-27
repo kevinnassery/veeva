@@ -144,7 +144,7 @@ param(
     [int]    $MaxRetries = 4
 )
 
-$ScriptVersion = '2026.08.27-17'
+$ScriptVersion = '2026.08.27-19'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -1430,4 +1430,9 @@ if ($listed.Count) {
 Write-Log "Moved $ok attachment(s), $bad failed, $(Format-Bytes $moved) transferred" $(if ($bad) { 'WARN' } else { 'OK' })
 Write-Log "Results : $ResultsCsv"
 Write-Log "Log     : $TranscriptLog"
+
+# Clear the lock explicitly as well as on the exit event - a run that ends badly may
+# never reach the event, and a lock left behind blocks the next refresh.
+if ($script:LockFile) { Remove-Item -LiteralPath $script:LockFile -Force -ErrorAction SilentlyContinue -WhatIf:$false }
+
 if ($bad -gt 0) { exit 1 }

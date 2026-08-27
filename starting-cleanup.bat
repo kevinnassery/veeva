@@ -1,5 +1,5 @@
 @echo off
-REM VERSION 2026.08.27-17
+REM VERSION 2026.08.27-19
 setlocal
 
 REM ============================================================================
@@ -27,17 +27,10 @@ set "D=%~dp0"
 
 REM  A run in progress is reading these files right now.
 set "BUSY="
-for %%L in ("%D%.run-*.lock") do set "BUSY=1"
+for %%L in ("%D%.run-*.lock") do call :checklock "%%L"
 if defined BUSY (
-  echo   REFUSING - a run looks active:
   echo.
-  for %%L in ("%D%.run-*.lock") do (
-    echo     %%~nxL
-    type "%%L" 2^>nul
-    echo.
-  )
-  echo   Let it finish first. If that run is already over the lock is stale and
-  echo   the file can be deleted.
+  echo   REFUSING - a run is still going. Let it finish first.
   goto :end
 )
 
@@ -65,6 +58,23 @@ if "%MOVED%"=="0" (
   echo   Anything that does not come back was not part of the current set.
 )
 goto :end
+
+:checklock
+REM  A lock only means something if its process is still alive. A crash leaves the file
+REM  behind, and making someone delete it by hand to get on with their day is a bad
+REM  trade for a guard that is supposed to protect them.
+set "LPID="
+for /f "tokens=2 delims==" %%P in ('findstr /b /c:"pid=" "%~1"') do set "LPID=%%P"
+if not defined LPID goto :stalelock
+tasklist /FI "PID eq %LPID%" | findstr /i "powershell.exe" >nul
+if errorlevel 1 goto :stalelock
+set "BUSY=1"
+echo     %~nx1  - pid %LPID% is still running
+exit /b
+:stalelock
+echo   cleared stale lock %~nx1 ^(pid %LPID% is not running^)
+del /q "%~1"
+exit /b
 
 :consider
 echo %KEEP% | findstr /i /c:"%~1" >nul
