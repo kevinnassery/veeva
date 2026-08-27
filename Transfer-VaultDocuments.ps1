@@ -93,7 +93,7 @@ param(
     [int]    $MaxRetries = 4
 )
 
-$ScriptVersion = '2026.08.26-3'
+$ScriptVersion = '2026.08.26-4'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -349,8 +349,14 @@ function Save-DocumentFile {
 # --------------------------------------------------------------------------------------
 
 function New-StagingFolder {
-    # Create the per-document folder. Vault errors if it already exists, which on a
-    # re-run is the normal case, so that specific failure is not an error here.
+    # Create the per-document folder. On a re-run it is already there and Vault objects,
+    # which is fine and expected.
+    #
+    # Deliberately NOT matched on the error text: I have not seen what Vault actually
+    # returns for "folder exists", and a guessed string match that misses would break
+    # every re-run. Any failure here is a warning, because the upload on the very next
+    # line is the real test - if the folder genuinely could not be created, that fails
+    # loudly and with Vault's own message.
     param([Parameter(Mandatory)][string]$Path)
     try {
         Invoke-VaultApi -Side Target -Method POST -Path '/services/file_staging/items' `
@@ -358,8 +364,7 @@ function New-StagingFolder {
             -Body @{ kind = 'folder'; path = $Path; overwrite = 'false' } | Out-Null
     }
     catch {
-        if ("$_" -match 'exist|ALREADY|duplicate') { return }
-        throw
+        Write-Log "Folder $Path was not created (it may already exist): $_" 'WARN'
     }
 }
 
