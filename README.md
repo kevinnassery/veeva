@@ -1,6 +1,6 @@
 # Veeva Vault RIM tooling
 
-*Updated 2026-08-26 22:30 EDT*
+*Updated 2026-08-26 22:33 EDT*
 
 ## Get the scripts
 
@@ -47,7 +47,8 @@ Re-downloading `documents.ini` overwrites your settings. Skip that line after th
 | Log in once, stop the password prompts | `login.bat` |
 | Probe the vault, change nothing | `probe.bat` |
 | See what a view matches | `MODE = REPORT`, `Run-Documents.bat` |
-| Rehearse an update | `Run-Documents.bat -WhatIf` |
+| Rehearse without writing | `Run-Documents.bat -WhatIf`, or `DryRun = true` |
+| Size the export before running it | `MODE = REPORT`, or any `-WhatIf` run |
 | Update 10 documents | `Run-Documents.bat -MaxDocuments 10` |
 | Update everything matched | `MODE = UPDATE`, `Run-Documents.bat` |
 | Export to File Staging | `MODE = EXPORT`, `Run-Documents.bat` |

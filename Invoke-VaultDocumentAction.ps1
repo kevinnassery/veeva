@@ -65,6 +65,10 @@ param(
 
     [pscredential] $Credential,
 
+    # Withhold every write, whatever MODE says. Same as -WhatIf, but settable in the
+    # ini so it survives a double-click. Works for EXPORT as well as UPDATE.
+    [switch]     $DryRun,
+
     # ---- Which documents ----
     #
     # A local .txt of document ids, one per line. When set, nothing is queried: this
@@ -77,7 +81,7 @@ param(
     [string]     $Vql              = '',
 
     # Fields to pull back. id is always included whether it is listed or not.
-    [string[]]   $SelectFields     = @('id', 'name__v', 'type__v', 'major_version_number__v', 'minor_version_number__v'),
+    [string[]]   $SelectFields     = @('id', 'name__v', 'type__v', 'size__v', 'major_version_number__v', 'minor_version_number__v'),
 
     # Product filter. A product record id (00P...) is exact and always safe. A plain
     # name is matched against ProductNameField instead, which requires that field to
@@ -190,7 +194,7 @@ function ConvertTo-CsvValue {
 $IntKeys    = @('MaxDocuments', 'SamplePercent', 'BatchSize', 'PageSize',
                 'JobTimeoutMinutes', 'JobPollSeconds', 'MaxRetries')
 $BoolKeys   = @('ExportSource', 'ExportRenditions', 'ExportAllVersions', 'ExportText')
-$SwitchKeys = @('AllowRepeatingFields')
+$SwitchKeys = @('AllowRepeatingFields', 'DryRun')
 $ListKeys   = @('SelectFields', 'IncludeTypes', 'ExcludeTypes')
 
 function Import-ConfigFile {
@@ -241,15 +245,26 @@ elseif ($ConfigExplicit) { throw "Config file not found: $ConfigFile" }
 else { Write-Warning "No documents.ini found at $ConfigFile - relying on command-line arguments." }
 
 if (-not $ConfigMode) { $ConfigMode = 'REPORT' }
+$Updates_Pending = -not [string]::IsNullOrWhiteSpace($SetFields)
 switch ($ConfigMode) {
     'REPORT' { }   # query only: documents.csv plus the field/type reference CSVs
-    'DRYRUN' { if (-not $PSBoundParameters.ContainsKey('WhatIf')) { $WhatIfPreference = $true } }
+    'DRYRUN' { }
     'UPDATE' { }
     'EXPORT' { }
     default  { throw "documents.ini: MODE must be REPORT, DRYRUN, UPDATE or EXPORT (got '$ConfigMode')." }
 }
-# DRYRUN is UPDATE with the writes withheld, so everything downstream branches on the action.
-$Action = if ($ConfigMode -eq 'DRYRUN') { 'UPDATE' } else { $ConfigMode }
+
+# MODE names the action; DRYRUN names an intent but not an action, so infer which one
+# was meant. SetFields set means an update rehearsal, otherwise an export rehearsal.
+# Getting this wrong used to make MODE = DRYRUN demand SetFields even when the run was
+# only ever going to be an export.
+$Action = $ConfigMode
+if ($ConfigMode -eq 'DRYRUN') {
+    $Action = if ($Updates_Pending) { 'UPDATE' } else { 'EXPORT' }
+}
+if (($DryRun -or $ConfigMode -eq 'DRYRUN') -and -not $PSBoundParameters.ContainsKey('WhatIf')) {
+    $WhatIfPreference = $true
+}
 
 foreach ($name in @('VaultDNS', 'OutputRoot')) {
     if ([string]::IsNullOrWhiteSpace((Get-Variable -Name $name -ValueOnly))) {
@@ -625,6 +640,75 @@ function Invoke-VaultQuery {
     return [pscustomobject]@{ Rows = $rows; Total = $total }
 }
 
+function Format-Bytes {
+    param([double]$Bytes)
+    if ($Bytes -ge 1TB) { return ('{0:N2} TB' -f ($Bytes / 1TB)) }
+    if ($Bytes -ge 1GB) { return ('{0:N2} GB' -f ($Bytes / 1GB)) }
+    if ($Bytes -ge 1MB) { return ('{0:N1} MB' -f ($Bytes / 1MB)) }
+    if ($Bytes -ge 1KB) { return ('{0:N0} KB' -f ($Bytes / 1KB)) }
+    return ('{0:N0} B' -f $Bytes)
+}
+
+function Measure-DocumentSize {
+    # How much data an export would actually move. Worth knowing before asking Vault to
+    # stage several thousand files: it decides whether this is a coffee break or an
+    # overnight run, and whether File Staging has room.
+    #
+    # size__v is on the document, so when the run came from a query the value is already
+    # in hand. An IdFile run has nothing but ids, so the sizes are fetched in chunks -
+    # CONTAINS is VQL's OR-of-values. If the vault will not filter id that way, this
+    # gives up and says so rather than firing one request per document.
+    param([Parameter(Mandatory)][array]$Docs)
+
+    $known = @($Docs | Where-Object { "$(Get-Field $_ 'size__v' '')" -ne '' })
+    $sizes = New-Object System.Collections.ArrayList
+    foreach ($d in $known) { [void]$sizes.Add([double](Get-Field $d 'size__v' 0)) }
+
+    $unknown = @($Docs | Where-Object { "$(Get-Field $_ 'size__v' '')" -eq '' } |
+                 ForEach-Object { "$(Get-Field $_ 'id' '')" } | Where-Object { $_ })
+
+    if ($unknown.Count) {
+        Write-Log "Fetching sizes for $($unknown.Count) document(s)"
+        $chunk = 200
+        for ($i = 0; $i -lt $unknown.Count; $i += $chunk) {
+            $ids  = @($unknown[$i..([math]::Min($i + $chunk, $unknown.Count) - 1)])
+            $list = ($ids | ForEach-Object { "'$_'" }) -join ', '
+            try {
+                $r = Invoke-VaultApi -Method POST -Path '/query' -ContentType 'application/x-www-form-urlencoded' `
+                        -Body @{ q = "SELECT id, size__v FROM documents WHERE id CONTAINS ($list)"; pagesize = $chunk }
+                foreach ($row in @(Get-Field $r 'data' @())) {
+                    $v = "$(Get-Field $row 'size__v' '')"
+                    if ($v -ne '') { [void]$sizes.Add([double]$v) }
+                }
+            }
+            catch {
+                Write-Log "Could not size documents by id: $_" 'WARN'
+                Write-Log 'Skipping the size estimate - the export itself is unaffected.' 'WARN'
+                return
+            }
+        }
+    }
+
+    if ($sizes.Count -eq 0) {
+        Write-Log 'No size__v values came back - cannot estimate the export size.' 'WARN'
+        return
+    }
+
+    $total = ($sizes | Measure-Object -Sum).Sum
+    $max   = ($sizes | Measure-Object -Maximum).Maximum
+    $avg   = $total / $sizes.Count
+
+    Write-Log '----------------------------------------------------------------'
+    Write-Log ("SIZE   {0} document(s) sized of {1}" -f $sizes.Count, $Docs.Count)
+    Write-Log ("       total   {0}" -f (Format-Bytes $total))
+    Write-Log ("       average {0}" -f (Format-Bytes $avg))
+    Write-Log ("       largest {0}" -f (Format-Bytes $max))
+    if ($sizes.Count -lt $Docs.Count) {
+        Write-Log ("       {0} document(s) had no size and are not counted - the real total is higher" -f ($Docs.Count - $sizes.Count)) 'WARN'
+    }
+    Write-Log '----------------------------------------------------------------'
+}
+
 function Export-DocumentReference {
     # REPORT mode also dumps the two metadata endpoints, because the single most common
     # cause of a failed bulk update is writing a field that is not editable, or spelling
@@ -858,6 +942,8 @@ if ($SamplePercent -gt 0 -and $SamplePercent -lt 100) {
     $docs = @($docs | Get-Random -Count $take)
     Write-Log "SAMPLE $SamplePercent% - $($docs.Count) of $TotalDiscovered document(s) selected at random" 'WARN'
 }
+
+if ($Action -eq 'REPORT' -or $WhatIfPreference) { Measure-DocumentSize -Docs $docs }
 
 if ($Action -eq 'REPORT') {
     Write-Log '----------------------------------------------------------------'
