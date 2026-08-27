@@ -93,7 +93,7 @@ param(
     [int]    $MaxRetries = 4
 )
 
-$ScriptVersion = '2026.08.26-6'
+$ScriptVersion = '2026.08.26-7'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -379,6 +379,78 @@ function New-StagingFolder {
     }
 }
 
+function Send-StagingPart {
+    # One file part, over HttpWebRequest rather than Invoke-WebRequest.
+    #
+    # Invoke-WebRequest was sent $buf[0..($read-1)], which on a byte[] produces an
+    # Object[], not a byte[]. It then stringifies that - so 877KB of binary went up as a
+    # much larger text body and Vault rejected it with OPERATION_NOT_ALLOWED: "Unable to
+    # upload additional file parts/bytes". Writing an exact byte count straight to the
+    # request stream removes the conversion entirely, and matches how the download side
+    # already works.
+    param(
+        [Parameter(Mandatory)][string]$SessionId,
+        [Parameter(Mandatory)][byte[]]$Buffer,
+        [Parameter(Mandatory)][int]$Count,
+        [Parameter(Mandatory)][int]$PartNumber
+    )
+
+    for ($attempt = 1; $attempt -le $MaxRetries; $attempt++) {
+        $uri = "https://$($script:Dns['Target'])/api/$ApiVersion/services/file_staging/upload/$SessionId"
+        $req = [Net.HttpWebRequest]::Create($uri)
+        $req.Method            = 'PUT'
+        $req.ContentType       = 'application/octet-stream'
+        $req.ContentLength     = $Count
+        $req.Timeout           = 900000
+        $req.ReadWriteTimeout  = 900000
+        $req.Headers.Add('Authorization', $script:Session['Target'])
+        $req.Headers.Add('Accept', 'application/json')
+        $req.Headers.Add('X-VaultAPI-FilePartNumber', "$PartNumber")
+
+        try {
+            $rs = $req.GetRequestStream()
+            try { $rs.Write($Buffer, 0, $Count) } finally { $rs.Dispose() }
+
+            $resp = $req.GetResponse()
+            try {
+                $sr   = New-Object IO.StreamReader($resp.GetResponseStream())
+                $body = $sr.ReadToEnd(); $sr.Dispose()
+                $json = $null
+                try { $json = $body | ConvertFrom-Json } catch { }
+                if ($json -and (Get-Field $json 'responseStatus') -eq 'FAILURE') {
+                    $errs = @(Get-Field $json 'errors' @())
+                    throw 'part ' + $PartNumber + ' rejected -- ' + (($errs | ForEach-Object { "$(Get-Field $_ 'type'): $(Get-Field $_ 'message')" }) -join '; ')
+                }
+                return
+            }
+            finally { $resp.Dispose() }
+        }
+        catch [Net.WebException] {
+            $status = $null
+            try { if ($_.Exception.Response) { $status = [int]$_.Exception.Response.StatusCode } } catch { }
+            $detail = ''
+            try {
+                $er = New-Object IO.StreamReader($_.Exception.Response.GetResponseStream())
+                $detail = $er.ReadToEnd(); $er.Dispose()
+            } catch { }
+
+            if ($status -eq 429 -and $attempt -lt $MaxRetries) {
+                Write-Log "Target HTTP 429 on part $PartNumber - waiting 60s" 'WARN'
+                Start-Sleep -Seconds 60
+                continue
+            }
+            if (((-not $status) -or ($status -ge 500)) -and $attempt -lt $MaxRetries) {
+                $wait = [math]::Pow(2, $attempt) * 5
+                Write-Log "Target transient error on part $PartNumber (HTTP $status) - retry $attempt/$MaxRetries in ${wait}s" 'WARN'
+                Start-Sleep -Seconds $wait
+                continue
+            }
+            throw "part $PartNumber failed (HTTP $status): $($_.Exception.Message) $detail"
+        }
+    }
+    throw "part $PartNumber failed after $MaxRetries attempts"
+}
+
 function Send-StagingFile {
     param(
         [Parameter(Mandatory)][string]$LocalPath,
@@ -395,19 +467,18 @@ function Send-StagingFile {
     try {
         $part     = 0
         $partSize = $PartSizeMB * 1MB
+        $sent     = [long]0
         $fs = [IO.File]::OpenRead($LocalPath)
         try {
             $buf = New-Object byte[] $partSize
             while (($read = $fs.Read($buf, 0, $buf.Length)) -gt 0) {
                 $part++
-                $chunk = $buf
-                if ($read -lt $buf.Length) { $chunk = $buf[0..($read - 1)] }
-                Invoke-VaultApi -Side Target -Method PUT -Path "/services/file_staging/upload/$sid" `
-                    -ContentType 'application/octet-stream' -Body $chunk `
-                    -ExtraHeaders @{ 'X-VaultAPI-FilePartNumber' = "$part" } | Out-Null
+                Send-StagingPart -SessionId $sid -Buffer $buf -Count $read -PartNumber $part
+                $sent += $read
             }
         }
         finally { $fs.Dispose() }
+        if ($sent -ne $Size) { throw "uploaded $sent bytes but the session declared $Size" }
 
         $commit = Invoke-VaultApi -Side Target -Method POST -Path "/services/file_staging/upload/$sid"
         return [pscustomobject]@{ Parts = $part; Session = $sid; Response = $commit }
