@@ -1,6 +1,6 @@
 # Veeva Vault RIM tooling
 
-*Updated 2026-08-26 21:58 EDT*
+*Updated 2026-08-26 22:01 EDT*
 
 | I want to... | Run |
 | --- | --- |
@@ -14,6 +14,42 @@
 | Start reports clean | `Run-Documents.bat -ExistingResults Restart` |
 | Import submission dossiers | `submissions-import\Run-Import.bat` |
 | Import many applications | `submissions-import\Run-Apps.bat` |
+
+## Fetch things
+
+```bash
+V=mallinckrodt-rim.veevavault.com; A=v26.2
+S=$(curl.exe -s -X POST "https://$V/api/$A/auth" -d "username=USER&password=PASS" | jq -r .sessionId)
+G() { curl.exe -s -H "Authorization: $S" "https://$V/api/$A$1"; }
+Q() { curl.exe -s -X POST -H "Authorization: $S" --data-urlencode "q=$1" --data-urlencode "pagesize=1000" "https://$V/api/$A/query"; }
+```
+
+Windows: `curl.exe`, not `curl` — `curl` is an alias for `Invoke-WebRequest` in PowerShell 5.1.
+
+| Fetch | Command |
+| --- | --- |
+| Who am I, my user id | `G /objects/users/me` |
+| My permissions | `G /objects/users/me/permissions` |
+| API versions | `curl.exe -s -H "Authorization: $S" "https://$V/api/"` — not versioned, so `G` does not fit |
+| Document fields (`editable`, `queryable`) | `G /metadata/objects/documents/properties` |
+| Document types, by label and name | `G /metadata/objects/documents/types` |
+| Object fields | `G /metadata/vobjects/submission__v` |
+| One document | `G /objects/documents/123` |
+| A document version's text | `G /objects/documents/123/versions/1/0/text` |
+| Job status | `G /services/jobs/36203` |
+| Export results | `G /objects/documents/batch/actions/fileextract/36203/results` |
+| Staging folder listing | `G "/services/file_staging/items/u11280389?recursive=false&limit=50"` |
+| Staged file | `G /services/file_staging/items/content/u11280389/wave1/f.pdf` |
+| Documents matching a view | `Q "SELECT id, name__v, type__v FROM documents WHERE product__v = '00P1110'"` |
+| Product ids | `Q "SELECT id, name__v FROM product__v"` |
+| Application ids | `Q "SELECT id, name__v FROM application__v"` |
+| Submission ids | `Q "SELECT id, name__v FROM submission__v"` |
+| Just the match count | `Q "SELECT id FROM documents WHERE ..." \| jq .responseDetails.total` |
+
+Paging: follow `responseDetails.next_page`, which already carries `/api/v26.2` —
+fetch it as `https://$V{next_page}`.
+
+Writes (update, export, upload, import) are in [curl](#curl) below.
 
 Args after a `.bat` pass through to the script. Settings you want to keep go in `documents.ini`.
 
