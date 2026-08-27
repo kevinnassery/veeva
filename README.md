@@ -19,7 +19,6 @@ Three tools, one config file each, all driven by `.bat` wrappers.
 | Clear out old files first | `starting-cleanup.bat`, then `refresh.bat` |
 | Log in once, stop the prompts | `login.bat` |
 | Check a vault, change nothing | `probe.bat` |
-| See what a document set contains | `MODE = REPORT`, `Run-Documents.bat` |
 | Copy documents to another vault | `transfer.bat` |
 | See what attachments are missing | `Mode = REPORT`, `attachments.bat` |
 | Deliver missing attachments | `Mode = SYNC`, `attachments.bat` |
@@ -100,7 +99,8 @@ Start at `Workers = 1`. Raise it once a sequential run is known good.
 
 | | |
 | --- | --- |
-| Document tooling | [`document-transfer/`](document-transfer/) |
+| Document transfer | [`document-transfer/`](document-transfer/) |
+| Document extractor, superseded by `transfer.bat` | [`document-transfer/Invoke-VaultDocumentAction.ps1`](document-transfer/Invoke-VaultDocumentAction.ps1) |
 | Attachments | [`attachments/`](attachments/) |
 | Submissions importer | [`submissions-import/`](submissions-import/README.md) |
 | Vault API v26.2, offline | [`docs/api/`](docs/api/INDEX.md) |

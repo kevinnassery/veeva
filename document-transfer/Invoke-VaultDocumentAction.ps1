@@ -1,4 +1,13 @@
 <#
+.SUPERSEDED
+    Kept for reference, no longer shipped by refresh.bat.
+
+    MODE = EXPORT here writes to the SOURCE vault's File Staging, which is the approach
+    the migration moved away from - Transfer-VaultDocuments.ps1 downloads straight from
+    the document instead and never touches source staging. MODE = REPORT still gives a
+    size projection for an id list, and MODE = UPDATE still does bulk field edits, but
+    neither is part of the current path.
+
 .SYNOPSIS
     Runs a Library bulk action against Vault documents from a VQL query, instead of
     clicking through Refine Selection -> Choose Action -> Edit Details in the UI.
@@ -159,7 +168,7 @@ param(
     [int]        $MaxRetries       = 4
 )
 
-$ScriptVersion = '2026.08.27-12'
+$ScriptVersion = '2026.08.27-13'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
