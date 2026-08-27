@@ -1,0 +1,49 @@
+<!-- source: https://general.veevavault.dev/vault-api/api-reference/26.2/documents/document-renditions/replace-document-rendition/ -->
+<!-- title: Replace Document Rendition -->
+
+# Replace Document Rendition
+
+PUT`/api/{version}/objects/documents/{doc_id}/renditions/{rendition_type}`
+
+## Headers
+
+| Name | Description |
+| --- | --- |
+| `Content-Type` | `multipart/form-data` |
+| `Accept` | `application/json` (default) or `application/xml` |
+
+## URI Path Parameters
+
+| Name | Description |
+| --- | --- |
+| `{doc_id}` | The document `id` field value. |
+| `{rendition_type}` | The document rendition type. |
+
+#### File Upload
+
+To upload the file, use the multi-part attachment with the file component `"file={file_name}"`. The maximum allowed file size is 4GB.
+
+## Request
+
+Copy to clipboard
+
+```
+curl -X PUT -H "Authorization: {AUTH_VALUE}" \
+-H "Content-Type: multipart/form-data" \
+-F "file=CholeCap-Document.pdf" \
+https://myvault.veevavault.com/api/v26.2/objects/documents/534/renditions/imported_rendition__c
+```
+
+## Response
+
+Copy to clipboard
+
+```
+{
+    "responseStatus": "SUCCESS"
+}
+```
+
+## Response Details
+
+On `SUCCESS`, Vault replaces the rendition of the given type from the latest version of the document.
