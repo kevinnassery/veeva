@@ -1,5 +1,5 @@
 @echo off
-REM VERSION 2026.08.26-9
+REM VERSION 2026.08.26-10
 setlocal
 
 REM ============================================================================
@@ -10,6 +10,10 @@ REM
 REM  curl.exe -sLo refresh.bat https://raw.githubusercontent.com/kevinnassery/veeva/main/refresh.bat
 REM
 REM  Overwritten every time: the .ps1 and .bat scripts, README.md
+REM
+REM  Fetched with no-cache on purpose: raw.githubusercontent.com sends
+REM  cache-control max-age=300, so a plain download can hand back a file that is
+REM  up to five minutes stale. Check the [version] beside each name below.
 REM  Never touched:          documents.ini, transfer.ini, sourcedocids.txt, session.txt,
 REM                          anything in OutputRoot
 REM
@@ -52,7 +56,7 @@ echo Done.
 goto :end
 
 :get
-curl.exe -sfLo "%D%%~1" "%B%/%~1"
+curl.exe -sfL -H "Cache-Control: no-cache" -H "Pragma: no-cache" -o "%D%%~1" "%B%/%~1"
 if errorlevel 1 (echo   FAILED    %~1 & exit /b)
 set "VER=?"
 for /f "tokens=2 delims='" %%V in ('findstr /b /c:"$ScriptVersion = " "%D%%~1" 2^>nul') do set "VER=%%V"
