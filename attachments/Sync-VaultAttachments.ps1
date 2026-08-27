@@ -144,7 +144,7 @@ param(
     [int]    $MaxRetries = 4
 )
 
-$ScriptVersion = '2026.08.27-23'
+$ScriptVersion = '2026.08.27-24'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -880,6 +880,19 @@ Re-export with both id columns formatted as Text before running again.
         Write-Log "$bad row(s) in $Path had no usable id pair and were skipped - those documents are NOT reconciled" 'WARN'
         foreach ($br in ($badRows | Select-Object -First 10)) { Write-Log "  $br" 'WARN' }
         if ($badRows.Count -gt 10) { Write-Log "  ... and $($badRows.Count - 10) more" 'WARN' }
+
+        # #N/A and friends are a failed lookup in the spreadsheet, not a bad id. Saying
+        # so turns "10 rows skipped" into something actionable.
+        $excelErr = @($badRows | Where-Object { $_ -match '#(N/A|REF!|VALUE!|NAME\?|DIV/0!|NUM!|NULL!)' })
+        if ($excelErr.Count) {
+            Write-Log "  $($excelErr.Count) of those hold an Excel error such as #N/A - the lookup in the sheet found no match," 'WARN'
+            Write-Log '  so those documents have no target id. Either they were never migrated, or the formula missed them.' 'WARN'
+        }
+        $distinct = @($badRows | ForEach-Object { ($_ -split "source='")[1] -split "'" | Select-Object -First 1 } |
+                      Where-Object { $_ } | Select-Object -Unique)
+        if ($distinct.Count -and $distinct.Count -ne $badRows.Count) {
+            Write-Log "  $($distinct.Count) distinct source document(s) affected: $($distinct -join ', ')" 'WARN'
+        }
     }
     if ($map.Count -eq 0) { throw "No usable id pairs in $Path (columns '$srcCol' -> '$tgtCol')" }
     if ($dupes) { Write-Log "$dupes repeated row(s) for documents already mapped - expected when the sheet has a row per file" }
