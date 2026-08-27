@@ -93,7 +93,7 @@ param(
     [int]    $MaxRetries = 4
 )
 
-$ScriptVersion = '2026.08.26-4'
+$ScriptVersion = '2026.08.26-5'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -161,6 +161,17 @@ if (Test-Path -LiteralPath $ConfigFile) {
     }
 }
 else { Write-Warning "No transfer.ini found at $ConfigFile - relying on command-line arguments." }
+
+if ([string]::IsNullOrWhiteSpace($TargetPath)) {
+    throw @'
+TargetPath is not set.
+
+Uploading to the staging ROOT is almost never what is wanted, so this will not
+guess. Run probe.bat against the TARGET vault to get its user folder id and
+whether your account is Admin there, then set TargetPath - for example
+/u<target user id>/wave1 for an Admin, or /wave1 for a non-Admin.
+'@
+}
 
 foreach ($n in @('SourceVaultDNS', 'TargetVaultDNS', 'OutputRoot')) {
     if ([string]::IsNullOrWhiteSpace((Get-Variable -Name $n -ValueOnly))) {
