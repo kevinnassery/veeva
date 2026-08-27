@@ -144,7 +144,7 @@ param(
     [int]    $MaxRetries = 4
 )
 
-$ScriptVersion = '2026.08.27-16'
+$ScriptVersion = '2026.08.27-17'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -945,19 +945,22 @@ Write-Log "Source: $SourceVaultDNS"
 Write-Log "Target: $TargetVaultDNS  ->  $(if ($TargetPath) { $TargetPath } else { '(staging root)' })"
 Write-Log "Work  : $WorkDir"
 
-if (-not (Test-Path -LiteralPath $IdFile)) {
-    $here2 = $PSScriptRoot
-    if (-not $here2) { $here2 = (Get-Location).ProviderPath }
-    $beside = Join-Path $here2 $IdFile
-    if (Test-Path -LiteralPath $beside) { $IdFile = $beside }
-}
-# Blank is the normal case now: the map defines the work. Guarded because Test-Path
-# throws on an empty path rather than returning false.
+# IdFile is optional and normally blank - map.csv defines the scope. Every path test
+# below sits inside this guard: Test-Path THROWS on an empty string rather than
+# returning false, so an unguarded check turns the normal case into a crash.
 $haveIdFile = $false
-if (-not [string]::IsNullOrWhiteSpace($IdFile)) { $haveIdFile = Test-Path -LiteralPath $IdFile }
-if (-not $haveIdFile) {
-    if ([string]::IsNullOrWhiteSpace($IdFile)) { Write-Log 'No IdFile set - every document in the map is checked' }
-    else { Write-Log "No $IdFile found - every document in the map is checked" 'WARN' }
+if ([string]::IsNullOrWhiteSpace($IdFile)) {
+    Write-Log 'No IdFile set - every document in the map is checked'
+}
+else {
+    if (-not (Test-Path -LiteralPath $IdFile)) {
+        $here2 = $PSScriptRoot
+        if (-not $here2) { $here2 = (Get-Location).ProviderPath }
+        $beside = Join-Path $here2 $IdFile
+        if (Test-Path -LiteralPath $beside) { $IdFile = $beside }
+    }
+    $haveIdFile = Test-Path -LiteralPath $IdFile
+    if (-not $haveIdFile) { Write-Log "No $IdFile found - every document in the map is checked" 'WARN' }
 }
 
 $ids  = New-Object System.Collections.ArrayList
@@ -974,17 +977,21 @@ foreach ($raw in $(if ($haveIdFile) { Get-Content -LiteralPath $IdFile } else { 
     [void]$ids.Add($t)
 }
 if ($ids.Count -eq 0 -and $haveIdFile) { throw "No document ids found in $IdFile" }
-Write-Log "$($ids.Count) document id(s) from $IdFile" 'OK'
+if ($haveIdFile) { Write-Log "$($ids.Count) document id(s) from $IdFile" 'OK' }
 
 # The map is what makes this possible at all: without a target id there is nothing to
 # compare against and nowhere to deliver. It defines the set of work; IdFile, if there
 # is one, only narrows it.
-$idMap = Import-IdMap -Path $IdMap
+# Deliberately not called idMap: PowerShell variable names are case-insensitive, so
+# that would BE the [string] $IdMap parameter - and a typed variable coerces on every
+# assignment, so the hashtable was silently turned into the string
+# "System.Collections.Hashtable" with no error raised at all.
+$docMap = Import-IdMap -Path $IdMap
 $resolvedIdMap = $script:IdMapPath
 
-if (-not $haveIdFile) { $ids = @($idMap.Keys) }
-$mapped   = @($ids | Where-Object { $idMap.ContainsKey($_) })
-$unmapped = @($ids | Where-Object { -not $idMap.ContainsKey($_) })
+if (-not $haveIdFile) { $ids = @($docMap.Keys) }
+$mapped   = @($ids | Where-Object { $docMap.ContainsKey($_) })
+$unmapped = @($ids | Where-Object { -not $docMap.ContainsKey($_) })
 if ($unmapped.Count) {
     Write-Log "$($unmapped.Count) id(s) in $IdFile have no target in the map and are skipped" 'WARN'
     foreach ($u in ($unmapped | Select-Object -First 5)) { Write-Log "  unmapped: $u" 'WARN' }
@@ -1259,7 +1266,7 @@ else {
 
 :documents foreach ($srcId in $pending) {
     $i++
-    $tgtId     = $idMap[$srcId]
+    $tgtId     = $docMap[$srcId]
     $docPrefix = "[$i/$($pending.Count)] $srcId -> $tgtId"
 
     try { $srcAtt = @(Get-DocumentAttachment -Side Source -DocId $srcId) }
