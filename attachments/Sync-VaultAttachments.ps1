@@ -105,7 +105,7 @@ param(
     [int]    $TestCount        = 5,
 
     # ---- What to move ----
-    [string] $IdFile     = 'sourcedocids.txt',
+    [string] $IdFile     = '',
     [string] $OutputRoot = '',
 
     # Where the in-flight file lands. Defaults to a work folder under OutputRoot.
@@ -144,7 +144,7 @@ param(
     [int]    $MaxRetries = 4
 )
 
-$ScriptVersion = '2026.08.27-13'
+$ScriptVersion = '2026.08.27-14'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -913,9 +913,13 @@ if (-not (Test-Path -LiteralPath $IdFile)) {
     $beside = Join-Path $here2 $IdFile
     if (Test-Path -LiteralPath $beside) { $IdFile = $beside }
 }
-$haveIdFile = Test-Path -LiteralPath $IdFile
+# Blank is the normal case now: the map defines the work. Guarded because Test-Path
+# throws on an empty path rather than returning false.
+$haveIdFile = $false
+if (-not [string]::IsNullOrWhiteSpace($IdFile)) { $haveIdFile = Test-Path -LiteralPath $IdFile }
 if (-not $haveIdFile) {
-    Write-Log "No $IdFile - every document in the map will be checked" 'WARN'
+    if ([string]::IsNullOrWhiteSpace($IdFile)) { Write-Log 'No IdFile set - every document in the map is checked' }
+    else { Write-Log "No $IdFile found - every document in the map is checked" 'WARN' }
 }
 
 $ids  = New-Object System.Collections.ArrayList

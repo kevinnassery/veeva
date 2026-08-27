@@ -1,12 +1,12 @@
 # Veeva Vault RIM tooling
 
-*Updated 2026-08-27 19:14 EDT*
+*Updated 2026-08-27 19:21 EDT*
 
-Moves documents and their attachments between Vault instances over the API. Everything
-streams one file at a time, so a 120 GB set needs a few GB of disk. Every run is
-resumable, writes its results after each item, and can be re-run safely.
+Moves documents and their attachments between Vault instances over the API. Files stream
+one at a time, so a 120 GB set needs a few GB of disk. Every run is resumable, writes its
+results after each item, and is safe to re-run.
 
-Three tools, one config file each, all driven by `.bat` wrappers.
+The document transfer is complete — 15,754 documents. Current work is attachments.
 
 ---
 
@@ -19,7 +19,6 @@ Three tools, one config file each, all driven by `.bat` wrappers.
 | Clear out old files first | `starting-cleanup.bat`, then `refresh.bat` |
 | Log in once, stop the prompts | `login.bat` |
 | Check a vault, change nothing | `probe.bat` |
-| Copy documents to another vault | `transfer.bat` |
 | See what attachments are missing | `Mode = REPORT`, `attachments.bat` |
 | Deliver missing attachments | `Mode = SYNC`, `attachments.bat` |
 | Prove it works on 5 first | `attachments.bat -Test` |
@@ -37,42 +36,15 @@ transfer is active.
 
 ---
 
-## Process: copy documents
-
-1. Get the scripts:
-
-```
-curl.exe -sfL -o refresh.bat https://raw.githubusercontent.com/kevinnassery/veeva/main/refresh.bat
-```
-
-```
-refresh.bat
-```
-
-2. Fetch the config once, then fill in `TargetVaultDNS`, `TargetPath`, `OutputRoot`:
-
-```
-curl.exe -sLO https://raw.githubusercontent.com/kevinnassery/veeva/main/document-transfer/transfer.ini
-```
-
-3. Put the document ids in `sourcedocids.txt`, one per line.
-4. `login.bat` once.
-5. `transfer.bat -MaxDocuments 2` — confirm both files land at `<TargetPath>/<doc id>/`.
-6. Clear `MaxDocuments` and run `transfer.bat`.
-
-Files go source vault → workstation → target File Staging. Nothing is written to the
-source vault's staging. `Workers = 8` runs eight at once; results merge into one CSV.
-
----
-
 ## Process: reconcile attachments
 
 Compares both vaults and delivers only what the target is missing, so it is safe to
 re-run.
 
-1. Put the id map in `map.csv`, in the folder you run from — a header row plus old and
-   new document id columns. Comma, tab, semicolon or pipe; the delimiter and the column
-   names are both detected.
+1. Put the id map in `map.csv`, in the folder you run from — a header row plus the old
+   and new document id columns, and nothing else needed. It defines which documents are
+   in scope, so there is no separate id list. Comma, tab, semicolon or pipe; the
+   delimiter and the column names are both detected.
 2. Fetch the config once, then copy the shared values across from `transfer.ini`:
 
 ```
@@ -99,9 +71,8 @@ Start at `Workers = 1`. Raise it once a sequential run is known good.
 
 | | |
 | --- | --- |
-| Document transfer | [`document-transfer/`](document-transfer/) |
-| Document extractor, superseded by `transfer.bat` | [`document-transfer/Invoke-VaultDocumentAction.ps1`](document-transfer/Invoke-VaultDocumentAction.ps1) |
-| Attachments | [`attachments/`](attachments/) |
+| Attachments (current work) | [`attachments/`](attachments/) |
+| Document transfer, complete — no longer shipped by `refresh.bat` | [`document-transfer/`](document-transfer/) |
 | Submissions importer | [`submissions-import/`](submissions-import/README.md) |
 | Vault API v26.2, offline | [`docs/api/`](docs/api/INDEX.md) |
 | Why the VQL looks the way it does | [`docs/library-bulk-action-api-map.md`](docs/library-bulk-action-api-map.md) |

@@ -1,5 +1,5 @@
 @echo off
-REM VERSION 2026.08.27-13
+REM VERSION 2026.08.27-14
 setlocal
 
 REM ============================================================================
@@ -76,8 +76,6 @@ call :get document-transfer/login.bat                     login.bat
 call :get document-transfer/Get-VaultSession.ps1          Get-VaultSession.ps1
 call :get document-transfer/probe.bat                     probe.bat
 call :get document-transfer/Probe-Vault.ps1               Probe-Vault.ps1
-call :get document-transfer/transfer.bat                  transfer.bat
-call :get document-transfer/Transfer-VaultDocuments.ps1   Transfer-VaultDocuments.ps1
 call :get attachments/attachments.bat                     attachments.bat
 call :get attachments/Sync-VaultAttachments.ps1           Sync-VaultAttachments.ps1
 call :get starting-cleanup.bat                            starting-cleanup.bat
@@ -89,11 +87,8 @@ if not exist "%D%attachments.ini" (
   echo   NOTE: no attachments.ini here. Fetch one with:
   echo         curl.exe -sLO %B%/attachments/attachments.ini
 )
-if not exist "%D%transfer.ini" (
-  echo.
-  echo   NOTE: no transfer.ini here. Fetch one with:
-  echo         curl.exe -sLO %B%/document-transfer/transfer.ini
-)
+REM  The document transfer is complete - those scripts are no longer shipped. They
+REM  are still in the repo under document-transfer/ if they are ever needed again.
 
 echo.
 if defined SKEW (
