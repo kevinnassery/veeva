@@ -1,0 +1,119 @@
+# Veeva Vault RIM tooling
+
+*Updated 2026-08-26 21:58 EDT*
+
+| I want to... | Run |
+| --- | --- |
+| Probe the vault, change nothing | `probe.bat` |
+| See what a view matches | `MODE = REPORT`, `Run-Documents.bat` |
+| Rehearse an update | `Run-Documents.bat -WhatIf` |
+| Update 10 documents | `Run-Documents.bat -MaxDocuments 10` |
+| Update everything matched | `MODE = UPDATE`, `Run-Documents.bat` |
+| Export to File Staging | `MODE = EXPORT`, `Run-Documents.bat` |
+| Spot-check 10% | `Run-Documents.bat -SamplePercent 10` |
+| Start reports clean | `Run-Documents.bat -ExistingResults Restart` |
+| Import submission dossiers | `submissions-import\Run-Import.bat` |
+| Import many applications | `submissions-import\Run-Apps.bat` |
+
+Args after a `.bat` pass through to the script. Settings you want to keep go in `documents.ini`.
+
+Written to `OutputRoot`: `probe-output.txt`, `document-fields.csv`, `document-types.csv`,
+`products.csv`, `documents.csv`, `document-results.csv`, `documents-<timestamp>.log`.
+
+---
+
+## Bulk-update documents
+
+1. In `documents.ini` set `VaultDNS` and `OutputRoot`. Leave `SessionId` blank.
+2. Run `probe.bat`. Read `probe-output.txt`.
+3. From the probe, set `Product` (id from `products.csv`), `ExcludeTypes`, `Where`.
+4. Set `MODE = REPORT`, run `Run-Documents.bat`. Confirm `documents.csv` row count matches
+   the Library view. If it does not, go back to step 3.
+5. Set `MODE = DRYRUN` and `SetFields = product__v=00P1110`. Run. Check `document-results.csv`.
+6. Set `MODE = UPDATE`, `MaxDocuments = 10`. Run. Verify those 10 in the Library.
+7. Clear `MaxDocuments`. Run.
+
+Re-runs skip rows already `SUCCESS`. Old reports are renamed, never deleted.
+
+## Export documents
+
+1. Set `MODE = EXPORT`. Optionally `ExportText = true`, `ExportAllVersions = true`.
+2. Run `Run-Documents.bat`. Staged file paths land in `document-results.csv`.
+
+## Move files to another vault
+
+Not implemented — endpoints only. Export in the source vault, download, upload to the target.
+
+| Step | Endpoint |
+| --- | --- |
+| Download staged file | `GET /services/file_staging/items/content/{path}` |
+| Upload ≤50MB | `POST /services/file_staging/items` (multipart: `kind`, `path`, `overwrite`, `file`) |
+| Upload >50MB | `POST /services/file_staging/upload` → `PUT …/upload/{id}` per part → `POST …/upload/{id}` |
+| Ingest | `submissions-import\Run-Import.bat` |
+
+User folders are `/u{user_id}`. Admin paths start at the staging root, non-Admin at their own
+folder. `Inbox` creates *Staged* documents.
+
+---
+
+## curl
+
+Windows: `curl.exe`, not `curl`.
+
+```bash
+V=mallinckrodt-rim.veevavault.com
+A=v26.2
+
+# log in
+S=$(curl.exe -s -X POST "https://$V/api/$A/auth" \
+     -H "Content-Type: application/x-www-form-urlencoded" \
+     -d "username=USER&password=PASS" | jq -r .sessionId)
+
+# who am I (id = the /u{user_id} staging folder)
+curl.exe -s -H "Authorization: $S" "https://$V/api/$A/objects/users/me"
+
+# the view, as VQL. next_page already carries /api/v26.2
+curl.exe -s -X POST -H "Authorization: $S" \
+  --data-urlencode "q=SELECT id, name__v, type__v FROM documents WHERE product__v = '00P1110' AND type__v != 'Migrated Document'" \
+  --data-urlencode "pagesize=1000" "https://$V/api/$A/query"
+
+# metadata
+curl.exe -s -H "Authorization: $S" "https://$V/api/$A/metadata/objects/documents/properties"
+curl.exe -s -H "Authorization: $S" "https://$V/api/$A/metadata/objects/documents/types"
+curl.exe -s -X POST -H "Authorization: $S" \
+  --data-urlencode "q=SELECT id, name__v FROM product__v" "https://$V/api/$A/query"
+
+# bulk update, max 1000 per call. Check the per-row responseStatus, not just the top one
+curl.exe -s -X PUT -H "Authorization: $S" -H "Content-Type: text/csv" \
+  --data-binary $'id,product__v\n771,00P1110\n772,00P1110' \
+  "https://$V/api/$A/objects/documents/batch"
+
+# export, then poll, then results
+JOB=$(curl.exe -s -X POST -H "Authorization: $S" -H "Content-Type: application/json" \
+  --data-raw '[{"id":"58"},{"id":"134"}]' \
+  "https://$V/api/$A/objects/documents/batch/actions/fileextract?source=true&text=false" | jq -r .job_id)
+curl.exe -s -H "Authorization: $S" "https://$V/api/$A/services/jobs/$JOB"
+curl.exe -s -H "Authorization: $S" "https://$V/api/$A/objects/documents/batch/actions/fileextract/$JOB/results"
+
+# file staging
+curl.exe -s -H "Authorization: $S" "https://$V/api/$A/services/file_staging/items/u11280389?recursive=false&limit=50"
+curl.exe -s -H "Authorization: $S" -o out.pdf "https://$V/api/$A/services/file_staging/items/content/u11280389/wave1/file.pdf"
+curl.exe -s -X POST -H "Authorization: $S" -F "kind=file" -F "path=/u11280389/wave1/file.pdf" \
+  -F "overwrite=true" -F "file=@file.pdf" "https://$V/api/$A/services/file_staging/items"
+
+# end session
+curl.exe -s -X DELETE -H "Authorization: $S" "https://$V/api/$A/session"
+```
+
+---
+
+## Reference
+
+| | |
+| --- | --- |
+| Tools | `probe.bat`, `Run-Documents.bat` → `documents.ini` |
+| Submissions importer | [`submissions-import/`](submissions-import/README.md) |
+| Vault API v26.2, offline | [`docs/api/`](docs/api/INDEX.md) |
+| UI → endpoint mapping, and why the VQL looks the way it does | [`docs/library-bulk-action-api-map.md`](docs/library-bulk-action-api-map.md) |
+
+Windows PowerShell 5.1 or 7. No modules to install.
