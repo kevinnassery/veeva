@@ -1,5 +1,5 @@
 @echo off
-REM VERSION 2026.08.27-6
+REM VERSION 2026.08.27-8
 setlocal
 
 REM ============================================================================
@@ -42,6 +42,33 @@ if errorlevel 1 (
   echo Commit : %SHA%
 )
 
+REM  A run in progress reads its script file from this folder, and the parallel
+REM  supervisor launches each worker from it - so replacing files mid-run means new
+REM  workers running different code from the process that started them. The scripts
+REM  drop a .run-*.lock here while they work.
+set "BUSY="
+for %%L in ("%D%.run-*.lock") do set "BUSY=1"
+if defined BUSY (
+  if /i not "%~1"=="-force" (
+    echo   REFUSING TO REFRESH - a run looks active:
+    echo.
+    for %%L in ("%D%.run-*.lock") do (
+      echo     %%~nxL
+      type "%%L" 2^>nul
+      echo.
+    )
+    echo   Let it finish, or if that run is already over the lock is stale -
+    echo   delete the .run-*.lock file, or re-run: refresh.bat -force
+    goto :end
+  )
+  echo   -force given: refreshing over an apparently active run.
+  echo.
+)
+
+REM  Files from an earlier layout that nothing loads any more. Left in place they are
+REM  just confusing - two scripts that look like they do the same job, one of them dead.
+call :retire Transfer-VaultAttachments.ps1
+
 echo Refreshing from %B%
 echo.
 
@@ -75,6 +102,15 @@ if not exist "%D%transfer.ini" (
 )
 
 echo.
+if defined SKEW (
+  echo   WARNING: the files here are NOT all the same version. A download probably
+  echo   failed above. Run refresh.bat again before running anything else - a mixed
+  echo   set is worse than an old one.
+) else (
+  if defined FIRSTVER echo All files at version %FIRSTVER%.
+)
+
+echo.
 echo Done.
 goto :end
 
@@ -82,11 +118,24 @@ REM  %1 = path in the repo, %2 = file name to write here. The repo groups script
 REM  into folders; this folder stays flat.
 :get
 curl.exe -sfL -o "%D%%~2" "%B%/%~1"
-if errorlevel 1 (echo   FAILED    %~2 & exit /b)
+if errorlevel 1 (echo   FAILED    %~2 & set "SKEW=1" & exit /b)
 set "VER=?"
 for /f "tokens=2 delims='" %%V in ('findstr /b /c:"$ScriptVersion = " "%D%%~2" 2^>nul') do set "VER=%%V"
 for /f "tokens=3" %%V in ('findstr /b /c:"REM VERSION " "%D%%~2" 2^>nul') do set "VER=%%V"
 echo   updated   %~2  [%VER%]
+REM  Each test is its own statement, NOT wrapped in parentheses: inside a block cmd
+REM  expands %FIRSTVER% when it parses the whole block, which is before the set above
+REM  has run - so the first file would always look like a mismatch.
+if "%VER%"=="?" exit /b
+if not defined FIRSTVER set "FIRSTVER=%VER%"
+if not "%VER%"=="%FIRSTVER%" set "SKEW=1"
+exit /b
+
+:retire
+if exist "%D%%~1" (
+  del /q "%D%%~1"
+  echo   removed   %~1  ^(no longer used^)
+)
 exit /b
 
 :end

@@ -108,12 +108,40 @@ param(
     [int]    $MaxRetries = 4
 )
 
-$ScriptVersion = '2026.08.27-6'
+$ScriptVersion = '2026.08.27-8'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
 $ProgressPreference    = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+# --------------------------------------------------------------------------------------
+# Run lock
+#
+# refresh.bat replaces the scripts in this folder. Doing that mid-run is not harmless:
+# the supervisor launches each worker from the script file on disk, so a refresh part way
+# through a parallel run would have new workers running different code from the process
+# that started them.
+#
+# The lock is written next to the script, which is the folder refresh.bat manages, and
+# removed on exit. A kill -9 leaves it behind; refresh.bat says which pid it belonged to
+# so a stale one can be told apart from a live run.
+# --------------------------------------------------------------------------------------
+
+$lockHere = $PSScriptRoot
+if (-not $lockHere) { $lockHere = (Get-Location).ProviderPath }
+$script:LockFile = Join-Path $lockHere ('.run-' + [IO.Path]::GetFileNameWithoutExtension($PSCommandPath) + '.lock')
+try {
+    Set-Content -LiteralPath $script:LockFile -Encoding ASCII -WhatIf:$false -Value @(
+        "pid=$PID",
+        "script=$([IO.Path]::GetFileName($PSCommandPath))",
+        "started=$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+    )
+    $null = Register-EngineEvent -SourceIdentifier PowerShell.Exiting -SupportEvent -Action {
+        try { Remove-Item -LiteralPath $script:LockFile -Force -ErrorAction SilentlyContinue } catch { }
+    }
+}
+catch { Write-Warning "Could not write the run lock: $_" }
 
 function Get-Field {
     param($Object, [Parameter(Mandatory)][string]$Name, $Default = '')
