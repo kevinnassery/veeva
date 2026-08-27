@@ -1,5 +1,5 @@
 @echo off
-REM VERSION 2026.08.26-11
+REM VERSION 2026.08.26-12
 setlocal
 
 REM ============================================================================
@@ -11,9 +11,10 @@ REM  curl.exe -sLo refresh.bat https://raw.githubusercontent.com/kevinnassery/ve
 REM
 REM  Overwritten every time: the .ps1 and .bat scripts, README.md
 REM
-REM  Fetched with no-cache on purpose: raw.githubusercontent.com sends
-REM  cache-control max-age=300, so a plain download can hand back a file that is
-REM  up to five minutes stale. Check the [version] beside each name below.
+REM  Downloads are pinned to a commit SHA. raw.githubusercontent.com caches the
+REM  branch URL for five minutes and ignores no-cache, so pulling from /main can
+REM  hand back the PREVIOUS version of a file - which looks exactly like a fix
+REM  that did not work. A SHA-pinned URL is immutable and always current.
 REM  Never touched:          documents.ini, transfer.ini, sourcedocids.txt, session.txt,
 REM                          anything in OutputRoot
 REM
@@ -23,8 +24,23 @@ REM
 REM  curl.exe -sLO https://raw.githubusercontent.com/kevinnassery/veeva/main/documents.ini
 REM ============================================================================
 
-set "B=https://raw.githubusercontent.com/kevinnassery/veeva/main"
+set "REPO=kevinnassery/veeva"
 set "D=%~dp0"
+
+REM One API call for the head commit. This endpoint returns the bare SHA and is
+REM not behind the five-minute raw cache.
+set "SHA="
+for /f %%S in ('curl.exe -s -H "Accept: application/vnd.github.sha" https://api.github.com/repos/%REPO%/commits/main') do set "SHA=%%S"
+
+echo %SHA%| findstr /r /c:"^[0-9a-f][0-9a-f]*$" >nul
+if errorlevel 1 (
+  echo   WARNING: could not read the head commit - falling back to the main branch.
+  echo   Files may be up to five minutes out of date. Check the versions below.
+  set "B=https://raw.githubusercontent.com/%REPO%/main"
+) else (
+  set "B=https://raw.githubusercontent.com/%REPO%/%SHA%"
+  echo Commit : %SHA%
+)
 
 echo Refreshing from %B%
 echo.
