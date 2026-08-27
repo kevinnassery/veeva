@@ -6,10 +6,25 @@
 
 ```
 curl.exe -sLO https://raw.githubusercontent.com/kevinnassery/veeva/main/probe.bat
+```
+
+```
 curl.exe -sLO https://raw.githubusercontent.com/kevinnassery/veeva/main/Probe-Vault.ps1
+```
+
+```
 curl.exe -sLO https://raw.githubusercontent.com/kevinnassery/veeva/main/Run-Documents.bat
+```
+
+```
 curl.exe -sLO https://raw.githubusercontent.com/kevinnassery/veeva/main/Invoke-VaultDocumentAction.ps1
+```
+
+```
 curl.exe -sLO https://raw.githubusercontent.com/kevinnassery/veeva/main/documents.ini
+```
+
+```
 curl.exe -sLO https://raw.githubusercontent.com/kevinnassery/veeva/main/README.md
 ```
 
