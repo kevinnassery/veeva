@@ -108,7 +108,7 @@ param(
     [int]    $MaxRetries = 4
 )
 
-$ScriptVersion = '2026.08.26-15'
+$ScriptVersion = '2026.08.27-1'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -533,6 +533,53 @@ function Send-StagingFile {
 # Disk
 # --------------------------------------------------------------------------------------
 
+function Read-WorkerLog {
+    # Forward a worker's new WARN/ERROR lines into the parent log.
+    #
+    # Workers run hidden and write their own logs, so without this a worker failing
+    # every document looks - from the parent - like progress that simply stopped. The
+    # error text would be sitting in a file nobody is watching.
+    #
+    # Opened with FileShare.ReadWrite because the worker still has it open for writing.
+    # The read offset is kept per worker so each line is forwarded once.
+    param(
+        [Parameter(Mandatory)][string]$Dir,
+        [Parameter(Mandatory)][string]$Label,
+        [Parameter(Mandatory)][hashtable]$Offsets,
+        [int]$MaxLines = 20
+    )
+    $log = @(Get-ChildItem -LiteralPath $Dir -Filter 'transfer-*.log' -ErrorAction SilentlyContinue |
+             Sort-Object LastWriteTime | Select-Object -Last 1)
+    if (-not $log.Count) { return }
+    $path = $log[0].FullName
+
+    try {
+        $fs = New-Object IO.FileStream($path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
+    }
+    catch { return }
+    try {
+        $start = 0
+        if ($Offsets.ContainsKey($Label)) { $start = [long]$Offsets[$Label] }
+        if ($start -gt $fs.Length) { $start = 0 }   # rotated or truncated
+        [void]$fs.Seek($start, [IO.SeekOrigin]::Begin)
+        $sr   = New-Object IO.StreamReader($fs)
+        $text = $sr.ReadToEnd()
+        $Offsets[$Label] = $start + [Text.Encoding]::UTF8.GetByteCount($text)
+        $sr.Dispose()
+    }
+    finally { $fs.Dispose() }
+
+    $bad = @($text -split "`r?`n" | Where-Object { $_ -match '\[(WARN|ERROR)\]' })
+    if (-not $bad.Count) { return }
+    foreach ($line in ($bad | Select-Object -First $MaxLines)) {
+        $level = if ($line -match '\[ERROR\]') { 'ERROR' } else { 'WARN' }
+        Write-Log ("{0} | {1}" -f $Label, ($line -replace '^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} \[(WARN|ERROR)\] ', '')) $level
+    }
+    if ($bad.Count -gt $MaxLines) {
+        Write-Log ("{0} | ... {1} more line(s) this interval, full detail in {2}" -f $Label, ($bad.Count - $MaxLines), $path) 'WARN'
+    }
+}
+
 function Get-FreeSpace {
     param([Parameter(Mandatory)][string]$Path)
     $root = [IO.Path]::GetPathRoot([IO.Path]::GetFullPath($Path))
@@ -654,6 +701,7 @@ Blank SourceSessionId and TargetSessionId in transfer.ini and run again.
         for ($w = 1; $w -le $workerCount; $w++) { $shards[$w] = New-Object System.Collections.ArrayList }
         for ($n = 0; $n -lt $pending.Count; $n++) { [void]$shards[($n % $workerCount) + 1].Add($pending[$n]) }
 
+        $logOffsets = @{}
         $procs = @()
         for ($w = 1; $w -le $workerCount; $w++) {
             $wDir   = Join-Path $parallelDir "w$w"
@@ -683,7 +731,9 @@ Blank SourceSessionId and TargetSessionId in transfer.ini and run again.
             Start-Sleep -Seconds 30
             $moved = 0
             for ($w = 1; $w -le $workerCount; $w++) {
-                $f = Join-Path (Join-Path $parallelDir "w$w") 'transfer-results.csv'
+                $wd = Join-Path $parallelDir "w$w"
+                Read-WorkerLog -Dir $wd -Label "w$w" -Offsets $logOffsets
+                $f = Join-Path $wd 'transfer-results.csv'
                 if (Test-Path -LiteralPath $f) {
                     try { $moved += @(Import-Csv -LiteralPath $f | Where-Object { $_.Status -eq 'SUCCESS' }).Count } catch { }
                 }
@@ -700,6 +750,10 @@ Blank SourceSessionId and TargetSessionId in transfer.ini and run again.
             else { Write-Log "progress 0/$($pending.Count), $alive worker(s) alive" }
         }
 
+        # Drain whatever each worker wrote between the last poll and exiting.
+        for ($w = 1; $w -le $workerCount; $w++) {
+            Read-WorkerLog -Dir (Join-Path $parallelDir "w$w") -Label "w$w" -Offsets $logOffsets -MaxLines 50
+        }
         foreach ($proc in $procs) {
             if ($proc.ExitCode -ne 0) { Write-Log "worker pid $($proc.Id) exited $($proc.ExitCode) - some documents failed" 'WARN' }
         }
