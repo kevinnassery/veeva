@@ -1,5 +1,5 @@
 @echo off
-REM VERSION 2026.08.27-2
+REM VERSION 2026.08.27-3
 setlocal
 
 REM ============================================================================
@@ -53,6 +53,8 @@ call :get document-transfer/Run-Documents.bat             Run-Documents.bat
 call :get document-transfer/Invoke-VaultDocumentAction.ps1 Invoke-VaultDocumentAction.ps1
 call :get document-transfer/transfer.bat                  transfer.bat
 call :get document-transfer/Transfer-VaultDocuments.ps1   Transfer-VaultDocuments.ps1
+call :get attachments/attachments.bat                     attachments.bat
+call :get attachments/Transfer-VaultAttachments.ps1       Transfer-VaultAttachments.ps1
 call :get refresh.bat                                     refresh.bat
 call :get README.md                                       README.md
 
@@ -60,6 +62,11 @@ if not exist "%D%documents.ini" (
   echo.
   echo   NOTE: no documents.ini here. Fetch one with:
   echo         curl.exe -sLO %B%/document-transfer/documents.ini
+)
+if not exist "%D%attachments.ini" (
+  echo.
+  echo   NOTE: no attachments.ini here. Fetch one with:
+  echo         curl.exe -sLO %B%/attachments/attachments.ini
 )
 if not exist "%D%transfer.ini" (
   echo.

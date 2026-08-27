@@ -1,6 +1,6 @@
 # Veeva Vault RIM tooling
 
-*Updated 2026-08-27 18:44 EDT*
+*Updated 2026-08-27 18:48 EDT*
 
 ## Get the scripts
 
@@ -46,6 +46,8 @@ Re-downloading `documents.ini` overwrites your settings. Skip that line after th
 | --- | --- |
 | Log in once, stop the password prompts | `login.bat` |
 | Copy documents to another vault | `transfer.bat` |
+| List a document set's attachments | `Mode = REPORT`, `attachments.bat` |
+| Copy attachments to another vault | `Mode = TRANSFER`, `attachments.bat` |
 | Probe the vault, change nothing | `probe.bat` |
 | See what a view matches | `MODE = REPORT`, `Run-Documents.bat` |
 | Rehearse without writing | `Run-Documents.bat -WhatIf`, or `DryRun = true` |
@@ -183,6 +185,41 @@ browser URL before `/ui/` when you are logged into that vault.
 right on one vault is wrong on another. Run `probe.bat` against the target once for the
 real user id, whether that account is Admin there, and which staging folders exist.
 
+## Attachments
+
+The unit of work is the attachment, not the document. Most documents carry none, some
+carry many, and the document count says nothing about the volume — so this always starts
+with a report.
+
+1. In `attachments.ini` set `SourceVaultDNS` and `OutputRoot`. Leave `SessionId` blank.
+2. `Mode = REPORT`, `MaxDocuments = 200`, run `attachments.bat`. Nothing is moved and the
+   target vault is not contacted.
+3. Read the summary: how many attachments across those documents, and their total size.
+   Multiply out against your full id list before going further.
+4. Set `TargetVaultDNS` and `TargetPath`, then `Mode = TRANSFER`, `MaxDocuments = 5`. Run.
+   Confirm the files arrive.
+5. Clear `MaxDocuments`. Run.
+
+Each attachment lands at:
+
+```
+<TargetPath>/<source doc id>/attachments/<attachment id>/<filename>
+```
+
+The attachment id is in the path because one document can carry two attachments with the
+same filename, which the document folder alone would not keep apart.
+
+`Workers` applies to `TRANSFER` only and shards by document, so one document's
+attachments stay on one worker. Everything else behaves like the document transfer:
+bounded local disk, resumable, re-runs skip anything already `SUCCESS`.
+
+**Getting the files onto target documents is a separate step and is not built.**
+`POST /objects/documents/attachments/batch` takes a CSV of `document_id__v`,
+`filename__v`, `file` (a staging path), 500 per batch — but it needs the *target*
+document id for each source document, and nothing here builds that mapping yet.
+`attachment-results.csv` records the source document id and staged path for every file,
+which is the half of the mapping that can be produced without it.
+
 ## curl
 
 Windows: `curl.exe`, not `curl`.
@@ -239,6 +276,7 @@ curl.exe -s -X DELETE -H "Authorization: $S" "https://$V/api/$A/session"
 | | |
 | --- | --- |
 | Document tooling | [`document-transfer/`](document-transfer/) — probe, extractor, cross-vault transfer |
+| Attachments | [`attachments/`](attachments/) |
 | Submissions importer | [`submissions-import/`](submissions-import/README.md) |
 | Vault API v26.2, offline | [`docs/api/`](docs/api/INDEX.md) |
 | UI → endpoint mapping, and why the VQL looks the way it does | [`docs/library-bulk-action-api-map.md`](docs/library-bulk-action-api-map.md) |

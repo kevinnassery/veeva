@@ -1,40 +1,35 @@
 <#
 .SYNOPSIS
-    Copy document source files from one Vault to another Vault's File Staging, one file
-    at a time, without needing disk for the whole set.
+    Copy document ATTACHMENTS from one Vault to another, one file at a time.
 
 .DESCRIPTION
-    Reads document ids from a .txt, and for each one:
+    Same shape as Transfer-VaultDocuments.ps1, one level down: for every document id in
+    the list it enumerates that document's attachments, then for each attachment
+    downloads it from the SOURCE vault, uploads it to the TARGET vault's File Staging,
+    and deletes the local copy.
 
-      1. Downloads the source file straight from the SOURCE vault
-         (GET /objects/documents/{id}/file). Nothing is written to the source vault's
-         File Staging, so nothing has to be cleaned up there afterwards.
-      2. Uploads it to the TARGET vault's File Staging.
-      3. Deletes the local copy.
+    A document has zero or many attachments, so the unit of work here is the attachment,
+    not the document. The results file has one row per attachment and resume is keyed on
+    document id plus attachment id.
 
-    Only one file is on local disk at a time, so the disk needed is the size of the
-    largest single document, not the size of the set. Free space is checked before
-    every download and the run stops rather than filling the volume.
-
-    Uploads always go through a resumable upload session, whatever the file size. One
-    code path handles a 2KB email and a 2GB video, parts stream from disk rather than
-    being held in memory, and an interrupted upload can be retried without restarting
-    from the beginning.
-
-    Re-runnable: ids already recorded SUCCESS are skipped.
+    MODE = REPORT lists what is there and projects the total size without moving
+    anything. Start there - attachment volume is not knowable from the document count.
 
 .NOTES
     Windows PowerShell 5.1 compatible.
     SOURCE, relative to https://<SourceVaultDNS>/api/<ApiVersion>:
       POST /auth
-      GET  /objects/documents/{id}                      name and size
-      GET  /objects/documents/{id}/file                 the source file itself
-    TARGET, relative to https://<TargetVaultDNS>/api/<ApiVersion>:
+      GET  /objects/documents/{id}/attachments                  list, with size and name
+      GET  /objects/documents/{id}/attachments/{aid}/file        the attachment itself
+    TARGET:
       POST /auth
-      POST /services/file_staging/upload                open a resumable session
-      PUT  /services/file_staging/upload/{id}           one part
-      POST /services/file_staging/upload/{id}           commit
-      DELETE /services/file_staging/upload/{id}         abort a failed session
+      POST /services/file_staging/upload                         resumable session
+      PUT  /services/file_staging/upload/{id}                    one part
+      POST /services/file_staging/upload/{id}                    commit
+
+    Attaching the staged files to documents in the TARGET vault is a separate step and
+    is NOT done here - see the note at the end of attachments.ini. It needs a source
+    document id to target document id mapping, which nothing in this repo has yet.
 #>
 
 [CmdletBinding(SupportsShouldProcess = $true)]
@@ -67,6 +62,15 @@ param(
 
     [ValidatePattern('^v\d+\.\d+$')]
     [string] $ApiVersion = 'v26.2',
+
+    # ---- What to do ----
+    # REPORT   = list every attachment and project the total size. Moves nothing.
+    # TRANSFER = download each attachment and upload it to the target vault's staging.
+    #
+    # Always start at REPORT. A document count says nothing about attachment volume -
+    # one document can carry dozens, most carry none.
+    [ValidateSet('REPORT', 'TRANSFER')]
+    [string] $Mode       = 'REPORT',
 
     # ---- What to move ----
     [string] $IdFile     = 'sourcedocids.txt',
@@ -149,7 +153,7 @@ $SwitchKeys = @('SeparateCredentials')
 if ([string]::IsNullOrWhiteSpace($ConfigFile)) {
     $here = $PSScriptRoot
     if (-not $here) { $here = (Get-Location).ProviderPath }
-    $ConfigFile = Join-Path $here 'transfer.ini'
+    $ConfigFile = Join-Path $here 'attachments.ini'
 }
 $cfg = $null
 if (Test-Path -LiteralPath $ConfigFile) {
@@ -166,7 +170,7 @@ if (Test-Path -LiteralPath $ConfigFile) {
         $value = $cfg[$key]
         if ($PSBoundParameters.ContainsKey($key)) { continue }
         if (-not (Get-Variable -Name $key -Scope Script -ErrorAction SilentlyContinue)) {
-            Write-Warning "transfer.ini: ignoring unknown setting '$key'"
+            Write-Warning "attachments.ini: ignoring unknown setting '$key'"
             continue
         }
         if ([string]::IsNullOrWhiteSpace($value)) { continue }
@@ -175,9 +179,9 @@ if (Test-Path -LiteralPath $ConfigFile) {
         else                         { Set-Variable -Name $key -Value $value -WhatIf:$false }
     }
 }
-else { Write-Warning "No transfer.ini found at $ConfigFile - relying on command-line arguments." }
+else { Write-Warning "No attachments.ini found at $ConfigFile - relying on command-line arguments." }
 
-if ([string]::IsNullOrWhiteSpace($TargetPath)) {
+if ($Mode -eq 'TRANSFER' -and [string]::IsNullOrWhiteSpace($TargetPath)) {
     throw @'
 TargetPath is not set.
 
@@ -188,7 +192,9 @@ whether your account is Admin there, then set TargetPath - for example
 '@
 }
 
-foreach ($n in @('SourceVaultDNS', 'TargetVaultDNS', 'OutputRoot')) {
+$needTarget = @('SourceVaultDNS', 'OutputRoot')
+if ($Mode -eq 'TRANSFER') { $needTarget = @('SourceVaultDNS', 'TargetVaultDNS', 'OutputRoot') }
+foreach ($n in $needTarget) {
     if ([string]::IsNullOrWhiteSpace((Get-Variable -Name $n -ValueOnly))) {
         throw "$n is not set. Add it to $ConfigFile, or pass -$n on the command line."
     }
@@ -203,12 +209,12 @@ $OutputRoot = [IO.Path]::GetFullPath([IO.Path]::Combine((Get-Location).ProviderP
 if ($OutputRoot.Length -gt 3) { $OutputRoot = $OutputRoot.TrimEnd('\') }
 if (-not (Test-Path -LiteralPath $OutputRoot)) { New-Item -ItemType Directory -Path $OutputRoot -Force -WhatIf:$false | Out-Null }
 
-if ([string]::IsNullOrWhiteSpace($WorkDir)) { $WorkDir = Join-Path $OutputRoot 'transfer-work' }
+if ([string]::IsNullOrWhiteSpace($WorkDir)) { $WorkDir = Join-Path $OutputRoot 'attachment-work' }
 if (-not (Test-Path -LiteralPath $WorkDir)) { New-Item -ItemType Directory -Path $WorkDir -Force -WhatIf:$false | Out-Null }
 
 $stamp         = Get-Date -Format 'yyyyMMdd-HHmmss'
-$ResultsCsv    = Join-Path $OutputRoot 'transfer-results.csv'
-$TranscriptLog = Join-Path $OutputRoot "transfer-$stamp.log"
+$ResultsCsv    = Join-Path $OutputRoot 'attachment-results.csv'
+$TranscriptLog = Join-Path $OutputRoot "attachments-$stamp.log"
 
 function Write-Log {
     param([string]$Message, [ValidateSet('INFO','WARN','ERROR','OK')][string]$Level = 'INFO')
@@ -548,7 +554,7 @@ function Read-WorkerLog {
         [Parameter(Mandatory)][hashtable]$Offsets,
         [int]$MaxLines = 20
     )
-    $log = @(Get-ChildItem -LiteralPath $Dir -Filter 'transfer-*.log' -ErrorAction SilentlyContinue |
+    $log = @(Get-ChildItem -LiteralPath $Dir -Filter 'attachments-*.log' -ErrorAction SilentlyContinue |
              Sort-Object LastWriteTime | Select-Object -Last 1)
     if (-not $log.Count) { return }
     $path = $log[0].FullName
@@ -580,6 +586,63 @@ function Read-WorkerLog {
     }
 }
 
+function Get-DocumentAttachment {
+    # Every attachment on the latest version of a document. The listing carries name and
+    # size, so the size projection costs nothing extra and no file has to be fetched to
+    # find out how big it is.
+    param([Parameter(Mandatory)][string]$DocId)
+    $r = Invoke-VaultApi -Side Source -Method GET -Path "/objects/documents/$DocId/attachments"
+    $out = New-Object System.Collections.ArrayList
+    foreach ($a in @(Get-Field $r 'data' @())) {
+        $aid = "$(Get-Field $a 'id' '')"
+        if (-not $aid) { continue }
+        [void]$out.Add([pscustomobject]@{
+            Id       = $aid
+            Name     = "$(Get-Field $a 'filename__v' "attachment-$aid")"
+            Size     = [long]"$(Get-Field $a 'size__v' 0)"
+            Version  = "$(Get-Field $a 'version__v' '')"
+            Format   = "$(Get-Field $a 'format__v' '')"
+            Checksum = "$(Get-Field $a 'md5checksum__v' '')"
+        })
+    }
+    return $out
+}
+
+function Save-AttachmentFile {
+    # Streamed to disk, for the same reason the document download is: a 2GB attachment
+    # would not survive Invoke-WebRequest buffering the whole response on 5.1.
+    param(
+        [Parameter(Mandatory)][string]$DocId,
+        [Parameter(Mandatory)][string]$AttachmentId,
+        [Parameter(Mandatory)][string]$FileName,
+        [Parameter(Mandatory)][string]$Destination
+    )
+    $uri = "https://$($script:Dns['Source'])/api/$ApiVersion/objects/documents/$DocId/attachments/$AttachmentId/file"
+    $req = [Net.HttpWebRequest]::Create($uri)
+    $req.Method = 'GET'
+    $req.Timeout = 900000
+    $req.ReadWriteTimeout = 900000
+    $req.Headers.Add('Authorization', $script:Session['Source'])
+
+    $name = $FileName
+    foreach ($bad in [IO.Path]::GetInvalidFileNameChars()) { $name = $name.Replace($bad, '_') }
+    if (-not $name) { $name = "attachment-$AttachmentId" }
+    $path = Join-Path $Destination $name
+
+    $resp = $req.GetResponse()
+    try {
+        $in  = $resp.GetResponseStream()
+        $out = [IO.File]::Create($path)
+        try {
+            $buf = New-Object byte[] 1048576
+            while (($read = $in.Read($buf, 0, $buf.Length)) -gt 0) { $out.Write($buf, 0, $read) }
+        }
+        finally { $out.Dispose(); $in.Dispose() }
+    }
+    finally { $resp.Dispose() }
+    return [pscustomobject]@{ Path = $path; Name = $name; Size = (Get-Item -LiteralPath $path).Length }
+}
+
 function Get-FreeSpace {
     param([Parameter(Mandatory)][string]$Path)
     $root = [IO.Path]::GetPathRoot([IO.Path]::GetFullPath($Path))
@@ -591,7 +654,7 @@ function Get-FreeSpace {
 # Main
 # --------------------------------------------------------------------------------------
 
-Write-Log "Transfer-VaultDocuments.ps1 $ScriptVersion"
+Write-Log "Transfer-VaultAttachments.ps1 $ScriptVersion"
 Write-Log "Source: $SourceVaultDNS"
 Write-Log "Target: $TargetVaultDNS  ->  $(if ($TargetPath) { $TargetPath } else { '(staging root)' })"
 Write-Log "Work  : $WorkDir"
@@ -637,21 +700,24 @@ if (Test-Path -LiteralPath $ResultsCsv) {
     }
     if ($choice -eq 'Restart') {
         $when = (Get-Item -LiteralPath $ResultsCsv).LastWriteTime.ToString('yyyyMMdd-HHmmss')
-        Move-Item -LiteralPath $ResultsCsv -Destination (Join-Path $OutputRoot "transfer-results-$when.csv") -Force -WhatIf:$false
+        Move-Item -LiteralPath $ResultsCsv -Destination (Join-Path $OutputRoot "attachment-results-$when.csv") -Force -WhatIf:$false
         Write-Log 'Rotated the previous results aside.'
     }
     else {
         foreach ($row in (Import-Csv -LiteralPath $ResultsCsv)) {
-            $rid = "$(Get-Field $row 'Id' '')"
-            if (-not $rid) { continue }
-            $prior[$rid] = $row
-            if ((Get-Field $row 'Status') -eq 'SUCCESS') { $done[$rid] = $true }
+            $rk = "$(Get-Field $row 'Key' '')"
+            if (-not $rk) { continue }
+            $prior[$rk] = $row
+            if ((Get-Field $row 'Status') -eq 'SUCCESS') { $done[$rk] = $true }
         }
         if ($done.Count) { Write-Log "$($done.Count) already transferred - skipping them" }
     }
 }
 
-$pending = @($ids | Where-Object { -not $done.ContainsKey($_) })
+# Every document is still visited - its attachment list is what says whether there is
+# anything left to do, and that is only knowable from the source vault. Attachments
+# already moved are skipped individually, inside the loop.
+$pending = @($ids)
 if ($MaxDocuments -gt 0 -and $pending.Count -gt $MaxDocuments) {
     Write-Log "MaxDocuments $MaxDocuments - this run moves the first $MaxDocuments of $($pending.Count) outstanding" 'WARN'
     $pending = @($pending | Select-Object -First $MaxDocuments)
@@ -659,7 +725,10 @@ if ($MaxDocuments -gt 0 -and $pending.Count -gt $MaxDocuments) {
 Write-Log "$($pending.Count) document(s) to move"
 
 if (-not $script:Session['Source']) { Connect-Vault -Side Source } else { Write-Log 'Source: using the configured session id' }
-if (-not $script:Session['Target']) { Connect-Vault -Side Target } else { Write-Log 'Target: using the configured session id' }
+if ($Mode -eq 'TRANSFER') {
+    if (-not $script:Session['Target']) { Connect-Vault -Side Target } else { Write-Log 'Target: using the configured session id' }
+}
+else { Write-Log 'REPORT mode - the target vault is not contacted' }
 
 # --------------------------------------------------------------------------------------
 # Parallel mode
@@ -675,19 +744,19 @@ if (-not $script:Session['Target']) { Connect-Vault -Side Target } else { Write-
 # sequential path stays the single implementation, with nothing duplicated to drift.
 # --------------------------------------------------------------------------------------
 
-if ($Workers -gt 1 -and $pending.Count -gt 1) {
+if ($Mode -eq 'TRANSFER' -and $Workers -gt 1 -and $pending.Count -gt 1) {
 
     if (-not $script:Cred['Source'] -or -not $script:Cred['Target']) {
         throw @'
 Parallel mode needs a username and password, not a pasted session id: each worker
 authenticates for itself so it can re-authenticate when its session expires.
 
-Blank SourceSessionId and TargetSessionId in transfer.ini and run again.
+Blank SourceSessionId and TargetSessionId in attachments.ini and run again.
 '@
     }
 
     $workerCount = [math]::Min($Workers, $pending.Count)
-    $parallelDir = Join-Path $OutputRoot 'transfer-workers'
+    $parallelDir = Join-Path $OutputRoot 'attachment-workers'
     if (Test-Path -LiteralPath $parallelDir) { Remove-Item -LiteralPath $parallelDir -Recurse -Force -WhatIf:$false }
     New-Item -ItemType Directory -Path $parallelDir -Force -WhatIf:$false | Out-Null
 
@@ -716,7 +785,7 @@ Blank SourceSessionId and TargetSessionId in transfer.ini and run again.
                 '-OutputRoot',      "`"$wDir`"",
                 '-WorkDir',         "`"$(Join-Path $wDir 'work')`"",
                 '-CredentialFile',  "`"$credPath`"",
-                '-Workers', '1', '-MaxDocuments', '0', '-ExistingResults', 'Restart'
+                '-Workers', '1', '-MaxDocuments', '0', '-ExistingResults', 'Restart', '-Mode', 'TRANSFER'
             )
             $procs += Start-Process -FilePath 'powershell.exe' -ArgumentList $argList `
                         -WindowStyle Hidden -PassThru
@@ -733,7 +802,7 @@ Blank SourceSessionId and TargetSessionId in transfer.ini and run again.
             for ($w = 1; $w -le $workerCount; $w++) {
                 $wd = Join-Path $parallelDir "w$w"
                 Read-WorkerLog -Dir $wd -Label "w$w" -Offsets $logOffsets
-                $f = Join-Path $wd 'transfer-results.csv'
+                $f = Join-Path $wd 'attachment-results.csv'
                 if (Test-Path -LiteralPath $f) {
                     try { $moved += @(Import-Csv -LiteralPath $f | Where-Object { $_.Status -eq 'SUCCESS' }).Count } catch { }
                 }
@@ -765,7 +834,7 @@ Blank SourceSessionId and TargetSessionId in transfer.ini and run again.
         foreach ($k in $prior.Keys) { $seenIds["$k"] = $true }
         $wOk = 0; $wBad = 0
         for ($w = 1; $w -le $workerCount; $w++) {
-            $f = Join-Path (Join-Path $parallelDir "w$w") 'transfer-results.csv'
+            $f = Join-Path (Join-Path $parallelDir "w$w") 'attachment-results.csv'
             if (-not (Test-Path -LiteralPath $f)) { Write-Log "worker $w produced no results file" 'WARN'; continue }
             foreach ($row in (Import-Csv -LiteralPath $f)) {
                 if ((Get-Field $row 'Status') -eq 'SUCCESS') { $wOk++ } else { $wBad++ }
@@ -793,91 +862,120 @@ Blank SourceSessionId and TargetSessionId in transfer.ini and run again.
 $results = New-Object System.Collections.ArrayList
 function Save-Results {
     $current = @{}
-    foreach ($r in $results) { $current["$($r.Id)"] = $r }
+    foreach ($r in $results) { $current["$($r.Key)"] = $r }
     $out = New-Object System.Collections.ArrayList
     $written = @{}
     foreach ($k in $prior.Keys) {
         if ($current.ContainsKey("$k")) { [void]$out.Add($current["$k"]) } else { [void]$out.Add($prior[$k]) }
         $written["$k"] = $true
     }
-    foreach ($r in $results) { if (-not $written.ContainsKey("$($r.Id)")) { [void]$out.Add($r) } }
+    foreach ($r in $results) { if (-not $written.ContainsKey("$($r.Key)")) { [void]$out.Add($r) } }
     $out | Export-Csv -LiteralPath $ResultsCsv -NoTypeInformation -Encoding UTF8 -WhatIf:$false
 }
 
 $i = 0
 $moved = [long]0
+$seenAttachments = 0
+
 foreach ($id in $pending) {
     $i++
-    $prefix = "[$i/$($pending.Count)] doc $id"
-    $record = [ordered]@{
-        Id = $id; Name = ''; SizeBytes = 0; TargetPath = ''; Parts = 0
-        Status = ''; Message = ''
-        StartedUtc = (Get-Date).ToUniversalTime().ToString('s'); FinishedUtc = ''
-    }
-    $local = $null
-    try {
-        # Size first, so the disk check happens before anything is downloaded.
-        $meta = Invoke-VaultApi -Side Source -Method GET -Path "/objects/documents/$id"
-        $doc  = Get-Field $meta 'document' $null
-        $size = [long]"$(Get-Field $doc 'size__v' 0)"
-        $record.Name = "$(Get-Field $doc 'name__v' '')"
+    $docPrefix = "[$i/$($pending.Count)] doc $id"
 
-        $free = Get-FreeSpace -Path $WorkDir
-        if ($free -ge 0 -and $size -gt 0 -and ($free - $size) -lt ($ReserveMB * 1MB)) {
-            throw "not enough disk: $(Format-Bytes $size) needed, $(Format-Bytes $free) free, ${ReserveMB}MB reserve"
-        }
-
-        if ($PSCmdlet.ShouldProcess("document $id -> $TargetVaultDNS", 'Transfer')) {
-            Write-Log "$prefix - downloading $(Format-Bytes $size)"
-            $local = Save-DocumentFile -DocId $id -Destination $WorkDir
-            $record.SizeBytes = $local.Size
-            $record.Name      = $local.Name
-
-            # Every document gets its own folder named for its SOURCE id. Two documents
-            # called "Cover Letter.pdf" are common; one overwriting the other after a
-            # 12-hour transfer is not something you want to discover afterwards.
-            $folder = if ($TargetPath) { $TargetPath.TrimEnd('/') + '/' + $id } else { '/' + $id }
-            $remote = $folder + '/' + $local.Name
-            $record.TargetPath = $remote
-            New-StagingFolder -Path $folder
-
-            Write-Log "$prefix - uploading to $remote"
-            $up = Send-StagingFile -LocalPath $local.Path -RemotePath $remote -Size $local.Size
-            $record.Parts  = $up.Parts
-            $record.Status = 'SUCCESS'
-            $moved += $local.Size
-            Write-Log "$prefix - OK ($($local.Name), $(Format-Bytes $local.Size), $($up.Parts) part(s))" 'OK'
-        }
-        else {
-            $record.Status  = 'WHATIF'
-            $record.Message = "would move $(Format-Bytes $size)"
-            Write-Log "$prefix - WhatIf: would move $(Format-Bytes $size)"
-        }
-    }
+    # A document with no attachments is the common case, so it must be cheap and quiet.
+    try { $attachments = @(Get-DocumentAttachment -DocId $id) }
     catch {
-        $record.Status  = 'ERROR'
-        $record.Message = "$_"
-        Write-Log "$prefix - ERROR: $_" 'ERROR'
+        Write-Log "$docPrefix - ERROR listing attachments: $_" 'ERROR'
+        [void]$results.Add([pscustomobject][ordered]@{
+            Key = "$id`:LIST"; DocId = $id; AttachmentId = ''; Name = ''; SizeBytes = 0
+            Version = ''; TargetPath = ''; Parts = 0; Status = 'ERROR'; Message = "$_"
+            StartedUtc = (Get-Date).ToUniversalTime().ToString('s')
+            FinishedUtc = (Get-Date).ToUniversalTime().ToString('s')
+        })
+        Save-Results
+        continue
     }
-    finally {
-        # The local copy goes as soon as it is no longer needed - success or failure.
-        # This is the whole reason the run fits in a few GB, so it is logged every time
-        # rather than only when it fails. A silent delete that quietly stopped working
-        # would show up as a full volume hours later instead of a line in the log.
-        if ($local -and (Test-Path -LiteralPath $local.Path)) {
-            try {
-                Remove-Item -LiteralPath $local.Path -Force -WhatIf:$false
-                $freeNow = Get-FreeSpace -Path $WorkDir
-                $freeTxt = if ($freeNow -ge 0) { ", $(Format-Bytes $freeNow) free" } else { '' }
-                Write-Log "$prefix - scratch file deleted ($(Format-Bytes $local.Size)$freeTxt)"
-            }
-            catch { Write-Log "Could not delete $($local.Path): $_" 'WARN' }
+
+    if ($attachments.Count -eq 0) { continue }
+    $seenAttachments += $attachments.Count
+    $totalBytes = ($attachments | Measure-Object -Property Size -Sum).Sum
+    Write-Log "$docPrefix - $($attachments.Count) attachment(s), $(Format-Bytes $totalBytes)"
+
+    $n = 0
+    foreach ($att in $attachments) {
+        $n++
+        $key    = "$id`:$($att.Id)"
+        $prefix = "$docPrefix att $n/$($attachments.Count) [$($att.Id)]"
+
+        if ($done.ContainsKey($key)) { Write-Log "$prefix - skipped (already transferred)"; continue }
+
+        $record = [ordered]@{
+            Key = $key; DocId = $id; AttachmentId = $att.Id; Name = $att.Name
+            SizeBytes = $att.Size; Version = $att.Version; TargetPath = ''; Parts = 0
+            Status = ''; Message = ''
+            StartedUtc = (Get-Date).ToUniversalTime().ToString('s'); FinishedUtc = ''
         }
+        $local = $null
+        try {
+            if ($Mode -eq 'REPORT') {
+                $record.Status  = 'LISTED'
+                $record.Message = 'REPORT only'
+                Write-Log "$prefix - $($att.Name), $(Format-Bytes $att.Size)"
+            }
+            elseif ($PSCmdlet.ShouldProcess("attachment $($att.Id) of document $id", 'Transfer')) {
+                $free = Get-FreeSpace -Path $WorkDir
+                if ($free -ge 0 -and $att.Size -gt 0 -and ($free - $att.Size) -lt ($ReserveMB * 1MB)) {
+                    throw "not enough disk: $(Format-Bytes $att.Size) needed, $(Format-Bytes $free) free, ${ReserveMB}MB reserve"
+                }
+
+                Write-Log "$prefix - downloading $($att.Name) ($(Format-Bytes $att.Size))"
+                $local = Save-AttachmentFile -DocId $id -AttachmentId $att.Id -FileName $att.Name -Destination $WorkDir
+                $record.SizeBytes = $local.Size
+
+                # One folder per source document id, then per attachment id, so two
+                # attachments sharing a filename on the same document cannot collide
+                # either - which the document-level layout alone would not prevent.
+                $folder = if ($TargetPath) { $TargetPath.TrimEnd('/') + "/$id/attachments/$($att.Id)" }
+                          else { "/$id/attachments/$($att.Id)" }
+                $remote = $folder + '/' + $local.Name
+                $record.TargetPath = $remote
+                New-StagingFolder -Path $folder
+
+                Write-Log "$prefix - uploading to $remote"
+                $up = Send-StagingFile -LocalPath $local.Path -RemotePath $remote -Size $local.Size
+                $record.Parts  = $up.Parts
+                $record.Status = 'SUCCESS'
+                $moved += $local.Size
+                Write-Log "$prefix - OK ($($local.Name), $(Format-Bytes $local.Size), $($up.Parts) part(s))" 'OK'
+            }
+            else {
+                $record.Status  = 'WHATIF'
+                $record.Message = "would move $(Format-Bytes $att.Size)"
+                Write-Log "$prefix - WhatIf: would move $($att.Name) ($(Format-Bytes $att.Size))"
+            }
+        }
+        catch {
+            $record.Status  = 'ERROR'
+            $record.Message = "$_"
+            Write-Log "$prefix - ERROR: $_" 'ERROR'
+        }
+        finally {
+            if ($local -and (Test-Path -LiteralPath $local.Path)) {
+                try {
+                    Remove-Item -LiteralPath $local.Path -Force -WhatIf:$false
+                    $freeNow = Get-FreeSpace -Path $WorkDir
+                    $freeTxt = if ($freeNow -ge 0) { ", $(Format-Bytes $freeNow) free" } else { '' }
+                    Write-Log "$prefix - scratch file deleted ($(Format-Bytes $local.Size)$freeTxt)"
+                }
+                catch { Write-Log "Could not delete $($local.Path): $_" 'WARN' }
+            }
+        }
+        $record.FinishedUtc = (Get-Date).ToUniversalTime().ToString('s')
+        [void]$results.Add([pscustomobject]$record)
+        Save-Results
     }
-    $record.FinishedUtc = (Get-Date).ToUniversalTime().ToString('s')
-    [void]$results.Add([pscustomobject]$record)
-    Save-Results
 }
+
+Write-Log "$seenAttachments attachment(s) found across $($pending.Count) document(s)"
 
 # Scratch should be empty. Anything still here is a file a crash or a kill left
 # behind, and it will sit there consuming disk until someone notices.
@@ -887,10 +985,16 @@ if ($leftovers.Count) {
     Write-Log "$($leftovers.Count) file(s) left in $WorkDir taking $(Format-Bytes $bytes) - safe to delete" 'WARN'
 }
 
-$ok  = @($results | Where-Object { $_.Status -eq 'SUCCESS' }).Count
-$bad = @($results | Where-Object { $_.Status -notin @('SUCCESS','WHATIF') }).Count
+$ok     = @($results | Where-Object { $_.Status -eq 'SUCCESS' }).Count
+$listed = @($results | Where-Object { $_.Status -eq 'LISTED' })
+$bad    = @($results | Where-Object { $_.Status -notin @('SUCCESS','WHATIF','LISTED') }).Count
 Write-Log '----------------------------------------------------------------'
-Write-Log "Moved $ok of $($results.Count) document(s), $bad failed, $(Format-Bytes $moved) transferred" $(if ($bad) { 'WARN' } else { 'OK' })
+if ($listed.Count) {
+    $bytes = ($listed | Measure-Object -Property SizeBytes -Sum).Sum
+    Write-Log "REPORT: $($listed.Count) attachment(s) totalling $(Format-Bytes $bytes)" 'OK'
+    Write-Log 'Nothing was moved. Set Mode = TRANSFER when the numbers look right.'
+}
+Write-Log "Moved $ok attachment(s), $bad failed, $(Format-Bytes $moved) transferred" $(if ($bad) { 'WARN' } else { 'OK' })
 Write-Log "Results : $ResultsCsv"
 Write-Log "Log     : $TranscriptLog"
 if ($bad -gt 0) { exit 1 }
