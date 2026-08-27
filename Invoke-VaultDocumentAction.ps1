@@ -244,6 +244,28 @@ if (Test-Path -LiteralPath $ConfigFile) {
 elseif ($ConfigExplicit) { throw "Config file not found: $ConfigFile" }
 else { Write-Warning "No documents.ini found at $ConfigFile - relying on command-line arguments." }
 
+# refresh.bat deliberately never overwrites documents.ini, which means an ini written
+# against an older version silently lacks any setting added since. Say so rather than
+# letting a missing key look like a setting that did not work.
+if ($cfg) {
+    $known = @($MyInvocation.MyCommand.Parameters.Keys)
+    $newer = @($known | Where-Object {
+        $_ -notin @('ConfigFile','Credential','Verbose','Debug','ErrorAction','WarningAction',
+                    'InformationAction','ErrorVariable','WarningVariable','InformationVariable',
+                    'OutVariable','OutBuffer','PipelineVariable','WhatIf','Confirm','ProgressAction') -and
+        -not $cfg.Contains($_)
+    })
+    if ($newer.Count) {
+        $shown = @($newer | Sort-Object)
+        $tail  = ''
+        if ($shown.Count -gt 10) { $tail = " (+$($shown.Count - 10) more)"; $shown = @($shown | Select-Object -First 10) }
+        Write-Warning "documents.ini does not mention $($newer.Count) setting(s), all running on defaults:"
+        Write-Warning "  $($shown -join ', ')$tail"
+        Write-Warning '  If you expected one of those to apply, add the line - refresh.bat never'
+        Write-Warning '  overwrites documents.ini, so an older ini lacks anything added since.'
+    }
+}
+
 if (-not $ConfigMode) { $ConfigMode = 'REPORT' }
 $Updates_Pending = -not [string]::IsNullOrWhiteSpace($SetFields)
 switch ($ConfigMode) {
@@ -649,6 +671,69 @@ function Format-Bytes {
     return ('{0:N0} B' -f $Bytes)
 }
 
+function Write-SizeReport {
+    param([Parameter(Mandatory)][array]$Sizes, [int]$Expected, [string]$Label, [int]$ThisRun)
+    if ($Sizes.Count -eq 0) {
+        Write-Log 'No size__v values came back - cannot project the export size.' 'WARN'
+        return
+    }
+    $total = ($Sizes | Measure-Object -Sum).Sum
+    $max   = ($Sizes | Measure-Object -Maximum).Maximum
+    $avg   = $total / $Sizes.Count
+
+    Write-Log '----------------------------------------------------------------'
+    Write-Log "SIZE   projection for $Label"
+    Write-Log ("       documents  {0:N0}" -f $Sizes.Count)
+    Write-Log ("       TOTAL      {0}" -f (Format-Bytes $total))
+    Write-Log ("       average    {0}" -f (Format-Bytes $avg))
+    Write-Log ("       largest    {0}" -f (Format-Bytes $max))
+    if ($Expected -gt 0 -and $Sizes.Count -lt $Expected) {
+        Write-Log ("       {0:N0} document(s) had no size and are NOT counted - the real total is higher" -f ($Expected - $Sizes.Count)) 'WARN'
+    }
+    if ($ThisRun -gt 0 -and $ThisRun -lt $Sizes.Count) {
+        $share = $total * $ThisRun / $Sizes.Count
+        Write-Log ("       this run covers only {0:N0} of them, roughly {1}" -f $ThisRun, (Format-Bytes $share)) 'WARN'
+    }
+    Write-Log '----------------------------------------------------------------'
+}
+
+function Measure-QuerySize {
+    # Project the WHOLE extract, not just the slice this run would touch. MaxDocuments
+    # caps the action, never the projection - a 10-document cap sizing 10 documents is
+    # not a projection, it is a sample presented as a total.
+    #
+    # Pages a minimal id + size__v query so the cost is a couple of fields per row
+    # rather than the full SelectFields.
+    param([Parameter(Mandatory)][string]$Query, [int]$ThisRun)
+
+    Write-Log 'Sizing the full matched set (this ignores MaxDocuments)'
+    $sizes = New-Object System.Collections.ArrayList
+    $rows  = 0
+    $next  = ''
+    while ($true) {
+        try {
+            $r =
+                if ($next) { Invoke-VaultApi -Method GET -Path $next }
+                else {
+                    Invoke-VaultApi -Method POST -Path '/query' -ContentType 'application/x-www-form-urlencoded' `
+                        -Body @{ q = $Query; pagesize = $PageSize }
+                }
+        }
+        catch {
+            Write-Log "Could not size the full set: $_" 'WARN'
+            return
+        }
+        foreach ($row in @(Get-Field $r 'data' @())) {
+            $rows++
+            $v = "$(Get-Field $row 'size__v' '')"
+            if ($v -ne '') { [void]$sizes.Add([double]$v) }
+        }
+        $next = "$(Get-Field (Get-Field $r 'responseDetails' $null) 'next_page' '')"
+        if (-not $next) { break }
+    }
+    Write-SizeReport -Sizes @($sizes) -Expected $rows -Label 'the FULL matched set' -ThisRun $ThisRun
+}
+
 function Measure-DocumentSize {
     # How much data an export would actually move. Worth knowing before asking Vault to
     # stage several thousand files: it decides whether this is a coffee break or an
@@ -658,7 +743,7 @@ function Measure-DocumentSize {
     # in hand. An IdFile run has nothing but ids, so the sizes are fetched in chunks -
     # CONTAINS is VQL's OR-of-values. If the vault will not filter id that way, this
     # gives up and says so rather than firing one request per document.
-    param([Parameter(Mandatory)][array]$Docs)
+    param([Parameter(Mandatory)][array]$Docs, [string]$Label = 'the documents in this run', [int]$ThisRun = 0)
 
     $known = @($Docs | Where-Object { "$(Get-Field $_ 'size__v' '')" -ne '' })
     $sizes = New-Object System.Collections.ArrayList
@@ -689,24 +774,7 @@ function Measure-DocumentSize {
         }
     }
 
-    if ($sizes.Count -eq 0) {
-        Write-Log 'No size__v values came back - cannot estimate the export size.' 'WARN'
-        return
-    }
-
-    $total = ($sizes | Measure-Object -Sum).Sum
-    $max   = ($sizes | Measure-Object -Maximum).Maximum
-    $avg   = $total / $sizes.Count
-
-    Write-Log '----------------------------------------------------------------'
-    Write-Log ("SIZE   {0} document(s) sized of {1}" -f $sizes.Count, $Docs.Count)
-    Write-Log ("       total   {0}" -f (Format-Bytes $total))
-    Write-Log ("       average {0}" -f (Format-Bytes $avg))
-    Write-Log ("       largest {0}" -f (Format-Bytes $max))
-    if ($sizes.Count -lt $Docs.Count) {
-        Write-Log ("       {0} document(s) had no size and are not counted - the real total is higher" -f ($Docs.Count - $sizes.Count)) 'WARN'
-    }
-    Write-Log '----------------------------------------------------------------'
+    Write-SizeReport -Sizes @($sizes) -Expected $Docs.Count -Label $Label -ThisRun $ThisRun
 }
 
 function Export-DocumentReference {
@@ -906,11 +974,26 @@ else { Write-Log 'Using the session id from configuration' }
 
 Write-Log "MODE $ConfigMode"
 
+$allDocs = @()   # the whole set, kept for sizing - MaxDocuments must not shrink a projection
+
 if ($IdFile) {
     Write-Log "Document list: $IdFile (no query)"
-    $docs = @(Import-IdFile -Path $IdFile)
+    # Say out loud which filters are being ignored. Leaving them populated in the ini is
+    # harmless but reads as though they still apply, which is worse than a warning.
+    $ignored = New-Object System.Collections.ArrayList
+    if ($Product)             { [void]$ignored.Add('Product') }
+    if ($IncludeTypes.Count)  { [void]$ignored.Add('IncludeTypes') }
+    if ($ExcludeTypes.Count)  { [void]$ignored.Add('ExcludeTypes') }
+    if ($Where)               { [void]$ignored.Add('Where') }
+    if ($Vql)                 { [void]$ignored.Add('Vql') }
+    if ($ignored.Count) {
+        Write-Log "IdFile is set, so these are IGNORED: $($ignored -join ', ')" 'WARN'
+        Write-Log 'Nothing is filtered - every id in the file is acted on.' 'WARN'
+    }
+    $allDocs = @(Import-IdFile -Path $IdFile)
+    $docs    = $allDocs
     if ($MaxDocuments -gt 0 -and $docs.Count -gt $MaxDocuments) {
-        Write-Log "MaxDocuments $MaxDocuments - taking the first $MaxDocuments of $($docs.Count)" 'WARN'
+        Write-Log "MaxDocuments $MaxDocuments - this run touches the first $MaxDocuments of $($allDocs.Count)" 'WARN'
         $docs = @($docs | Select-Object -First $MaxDocuments)
     }
     $TotalDiscovered = $docs.Count
@@ -943,7 +1026,25 @@ if ($SamplePercent -gt 0 -and $SamplePercent -lt 100) {
     Write-Log "SAMPLE $SamplePercent% - $($docs.Count) of $TotalDiscovered document(s) selected at random" 'WARN'
 }
 
-if ($Action -eq 'REPORT' -or $WhatIfPreference) { Measure-DocumentSize -Docs $docs }
+if ($Action -eq 'REPORT' -or $WhatIfPreference) {
+    if ($IdFile) {
+        # Size every id in the file, not just the slice MaxDocuments allows through.
+        Measure-DocumentSize -Docs $allDocs -Label 'the FULL id list' -ThisRun $docs.Count
+    }
+    elseif ($Vql) {
+        Write-Log 'Vql is set, so the size projection covers only what this run fetched.' 'WARN'
+        Measure-DocumentSize -Docs $docs -Label 'the documents this run fetched'
+    }
+    else {
+        # Re-run the filters as a minimal id + size__v query, paged all the way, so the
+        # projection is the real total rather than the first MaxDocuments of it.
+        $sizeFields   = $SelectFields
+        $SelectFields = @('id', 'size__v')
+        $sizeQuery    = New-DocumentVql
+        $SelectFields = $sizeFields
+        Measure-QuerySize -Query $sizeQuery -ThisRun $docs.Count
+    }
+}
 
 if ($Action -eq 'REPORT') {
     Write-Log '----------------------------------------------------------------'
