@@ -192,8 +192,9 @@ it compares both sides and delivers only what the target is missing. A document 
 attachments are already there costs two listing calls and nothing else, so it is safe to
 run again after any interruption.
 
-1. Put the map in `docidmap.csv` — a header row plus old and new document id columns.
-   The usual spellings are detected; unusual ones stop the run and are named.
+1. Put the map in `map.txt` — a header row plus old and new document id columns.
+   Comma, tab, semicolon or pipe separated; the delimiter and the column names are both
+   detected, and anything unguessable stops the run and prints what it found.
 2. In `attachments.ini` set the two vault DNS values, `TargetPath` and `OutputRoot`.
    Everything shared with `transfer.ini` means the same thing — copy it across.
 3. `Mode = REPORT`, `MaxDocuments = 200`, run `attachments.bat`. Nothing changes.

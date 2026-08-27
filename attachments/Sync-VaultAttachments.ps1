@@ -79,7 +79,7 @@ param(
 
     # CSV mapping source document id to target document id, with a header row. Column
     # names are detected from the usual spellings; set them explicitly if yours differ.
-    [string] $IdMap            = 'docidmap.csv',
+    [string] $IdMap            = 'map.txt',
     [string] $MapSourceColumn  = '',
     [string] $MapTargetColumn  = '',
 
@@ -132,7 +132,7 @@ param(
     [int]    $MaxRetries = 4
 )
 
-$ScriptVersion = '2026.08.27-4'
+$ScriptVersion = '2026.08.27-5'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -641,8 +641,24 @@ function Import-IdMap {
     param([Parameter(Mandatory)][string]$Path)
     if (-not (Test-Path -LiteralPath $Path)) { throw "IdMap not found: $Path" }
 
-    $rows = @(Import-Csv -LiteralPath $Path)
-    if ($rows.Count -eq 0) { throw "IdMap $Path has no rows" }
+    # The file is named .txt, so the delimiter is not implied by the extension. Sniff
+    # the header for whichever separator actually appears most - a tab-separated export
+    # read as comma-separated yields one column and a confusing "could not work out
+    # which columns" error rather than an obvious one.
+    $header = @(Get-Content -LiteralPath $Path -TotalCount 1)
+    if (-not $header.Count) { throw "IdMap $Path is empty" }
+    $delims = @{ ',' = ([regex]::Matches($header[0], ',')).Count
+                 "`t" = ([regex]::Matches($header[0], "`t")).Count
+                 ';' = ([regex]::Matches($header[0], ';')).Count
+                 '|' = ([regex]::Matches($header[0], '\|')).Count }
+    $delim = ','
+    $best  = 0
+    foreach ($d in $delims.Keys) { if ($delims[$d] -gt $best) { $best = $delims[$d]; $delim = $d } }
+    if ($best -eq 0) { throw "IdMap $Path has no delimiter in its header row: '$($header[0])'. It needs a header and at least two columns." }
+    $shown = if ($delim -eq "`t") { 'tab' } else { $delim }
+
+    $rows = @(Import-Csv -LiteralPath $Path -Delimiter $delim)
+    if ($rows.Count -eq 0) { throw "IdMap $Path has a header but no rows" }
     $headers = @($rows[0].PSObject.Properties.Name)
 
     $srcCol = $MapSourceColumn
@@ -673,7 +689,7 @@ function Import-IdMap {
     }
     if ($bad) { Write-Log "$bad row(s) in $Path had no usable id pair and were skipped" 'WARN' }
     if ($map.Count -eq 0) { throw "No usable id pairs in $Path (columns '$srcCol' -> '$tgtCol')" }
-    Write-Log "$($map.Count) id pair(s) from $Path (column '$srcCol' -> '$tgtCol')" 'OK'
+    Write-Log "$($map.Count) id pair(s) from $Path ($shown-separated, column '$srcCol' -> '$tgtCol')" 'OK'
     return $map
 }
 
