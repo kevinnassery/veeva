@@ -144,7 +144,7 @@ param(
     [int]    $MaxRetries = 4
 )
 
-$ScriptVersion = '2026.08.27-24'
+$ScriptVersion = '2026.08.27-25'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -1072,11 +1072,20 @@ if (Test-Path -LiteralPath $ResultsCsv) {
             $rk = "$(Get-Field $row 'Key' '')"
             if (-not $rk) { continue }
             $prior[$rk] = $row
-            # STAGED is deliberately NOT done - the file is up but nothing points at it
-            # yet, and ATTACH mode exists to finish exactly those.
-            if ((Get-Field $row 'Status') -in @('ATTACHED', 'PRESENT')) { $done[$rk] = $true }
+            # ATTACHED only - work THIS tool completed.
+            #
+            # PRESENT used to count too, which was wrong twice over. It is not something
+            # we did, so calling it transferred was a lie; and an attachment later
+            # deleted from the target would stay skipped for ever on the strength of one
+            # old REPORT. The live state is recomputed from both vaults every run anyway
+            # - by the time this check runs, both listings have already been fetched -
+            # so skipping PRESENT saved nothing and could only go stale.
+            #
+            # STAGED is also not done: the file is up but nothing points at it yet, and
+            # ATTACH mode exists to finish exactly those.
+            if ((Get-Field $row 'Status') -eq 'ATTACHED') { $done[$rk] = $true }
         }
-        if ($done.Count) { Write-Log "$($done.Count) already transferred - skipping them" }
+        if ($done.Count) { Write-Log "$($done.Count) attachment(s) already delivered by an earlier run - not re-sent" }
     }
 }
 
