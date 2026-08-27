@@ -1,6 +1,26 @@
 # Veeva Vault RIM tooling
 
-*Updated 2026-08-26 22:01 EDT*
+*Updated 2026-08-26 22:03 EDT*
+
+## Get the scripts
+
+```bash
+B=https://raw.githubusercontent.com/kevinnassery/veeva/main
+curl.exe -sLO $B/probe.bat
+curl.exe -sLO $B/Probe-Vault.ps1
+curl.exe -sLO $B/Run-Documents.bat
+curl.exe -sLO $B/Invoke-VaultDocumentAction.ps1
+curl.exe -sLO $B/documents.ini
+curl.exe -sLO $B/README.md
+```
+
+Everything, including the submissions importer and the offline API reference:
+
+```bash
+curl.exe -sLO https://github.com/kevinnassery/veeva/archive/refs/heads/main.zip
+```
+
+Re-downloading `documents.ini` overwrites your settings. Skip that line after the first pull.
 
 | I want to... | Run |
 | --- | --- |
