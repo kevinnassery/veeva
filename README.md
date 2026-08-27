@@ -1,6 +1,6 @@
 # Veeva Vault RIM tooling
 
-*Updated 2026-08-26 22:29 EDT*
+*Updated 2026-08-26 22:30 EDT*
 
 ## Get the scripts
 
@@ -11,8 +11,8 @@ curl.exe -sLo refresh.bat https://raw.githubusercontent.com/kevinnassery/veeva/m
 ```
 
 Then `refresh.bat` pulls everything else, and pulls it again whenever you want the latest.
-It overwrites the scripts and README, downloads `documents.ini` only if it is missing, and
-never touches `sourcedocids.txt` or anything in `OutputRoot`.
+It overwrites the scripts and README. It never touches `documents.ini`,
+`sourcedocids.txt`, `session.txt`, or anything in `OutputRoot`.
 
 Individually, if you prefer:
 

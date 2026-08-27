@@ -8,9 +8,14 @@ REM  To get THIS file in the first place:
 REM
 REM  curl.exe -sLo refresh.bat https://raw.githubusercontent.com/kevinnassery/veeva/main/refresh.bat
 REM
-REM  Overwritten every time:   the .ps1 and .bat scripts, README.md
-REM  Downloaded only if absent: documents.ini  (your settings are never clobbered)
-REM  Never touched:            sourcedocids.txt, session.txt, anything in OutputRoot
+REM  Overwritten every time: the .ps1 and .bat scripts, README.md
+REM  Never touched:          documents.ini, sourcedocids.txt, session.txt,
+REM                          anything in OutputRoot
+REM
+REM  documents.ini is yours. If you ever want a fresh default copy, rename the one
+REM  you have out of the way and fetch it by hand:
+REM
+REM  curl.exe -sLO https://raw.githubusercontent.com/kevinnassery/veeva/main/documents.ini
 REM ============================================================================
 
 set "B=https://raw.githubusercontent.com/kevinnassery/veeva/main"
@@ -28,10 +33,10 @@ call :get Invoke-VaultDocumentAction.ps1
 call :get refresh.bat
 call :get README.md
 
-if exist "%D%documents.ini" (
-  echo   keep      documents.ini  ^(already here - your settings^)
-) else (
-  call :get documents.ini
+if not exist "%D%documents.ini" (
+  echo.
+  echo   NOTE: no documents.ini here. Fetch one with:
+  echo         curl.exe -sLO %B%/documents.ini
 )
 
 echo.
