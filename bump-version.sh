@@ -10,7 +10,7 @@ if [ $# -ge 1 ]; then
   V="$1"
 else
   today=$(date '+%Y.%m.%d')
-  cur=$(grep -ho "ScriptVersion = '$today-[0-9]*'" ./*.ps1 2>/dev/null | grep -o '[0-9]*$' | sort -n | tail -1 || true)
+  cur=$(grep -ho "ScriptVersion = '$today-[0-9]*'" ./*.ps1 2>/dev/null | tr -d "'" | sed 's/.*-//' | sort -n | tail -1 || true)
   V="$today-$(( ${cur:-0} + 1 ))"
 fi
 

@@ -1,6 +1,6 @@
 # Veeva Vault RIM tooling
 
-*Updated 2026-08-26 22:53 EDT*
+*Updated 2026-08-26 23:11 EDT*
 
 ## Get the scripts
 
@@ -45,6 +45,7 @@ Re-downloading `documents.ini` overwrites your settings. Skip that line after th
 | I want to... | Run |
 | --- | --- |
 | Log in once, stop the password prompts | `login.bat` |
+| Copy documents to another vault | `transfer.bat` |
 | Probe the vault, change nothing | `probe.bat` |
 | See what a view matches | `MODE = REPORT`, `Run-Documents.bat` |
 | Rehearse without writing | `Run-Documents.bat -WhatIf`, or `DryRun = true` |
@@ -152,19 +153,47 @@ field names are checked against the vault before the first batch, and repeating
 
 ## Move files to another vault
 
-Not implemented — endpoints only. Export in the source vault, download, upload to the target.
+Streams one file at a time: download from the source vault, upload to the target vault's
+File Staging, delete the local copy. Nothing is written to the source vault's staging, so
+there is nothing to clean up there, and the disk you need is the size of the largest
+single document rather than the whole set.
 
-| Step | Endpoint |
-| --- | --- |
-| Download staged file | `GET /services/file_staging/items/content/{path}` |
-| Upload ≤50MB | `POST /services/file_staging/items` (multipart: `kind`, `path`, `overwrite`, `file`) |
-| Upload >50MB | `POST /services/file_staging/upload` → `PUT …/upload/{id}` per part → `POST …/upload/{id}` |
-| Ingest | `submissions-import\Run-Import.bat` |
+1. In `transfer.ini` set `SourceVaultDNS`, `TargetVaultDNS`, `TargetPath`, `OutputRoot`.
+2. Put the ids in `sourcedocids.txt`.
+3. `MaxDocuments = 2`, run `transfer.bat`. Confirm the two arrive in the target vault.
+4. Clear `MaxDocuments`. Run.
 
-User folders are `/u{user_id}`. Admin paths start at the staging root, non-Admin at their own
-folder. `Inbox` creates *Staged* documents.
+One login is used for both vaults. Each document lands in its own folder named for its
+source id:
 
----
+```
+<TargetPath>/<source doc id>/<original filename>
+```
+
+so two files called `Cover Letter.pdf` cannot overwrite each other.
+
+`ReserveMB` (default 2048) stops the run rather than filling the volume. Uploads always
+use a resumable session, so a 2 GB file streams from disk in parts instead of loading
+into memory. Re-runs skip anything already `SUCCESS`.
+
+`TargetVaultDNS` is the vault host, not the sandbox's display name — the part of the
+browser URL before `/ui/` when you are logged into that vault.
+
+ own folder named for its
+source id:
+
+```
+<TargetPath>/<source doc id>/<original filename>
+```
+
+so two files called `Cover Letter.pdf` cannot overwrite each other.
+
+`ReserveMB` (default 2048) stops the run rather than filling the volume. Uploads always
+use a resumable session, so a 2 GB file streams from disk in parts instead of loading
+into memory. Re-runs skip anything already `SUCCESS`.
+
+`TargetVaultDNS` is the vault host, not the sandbox's display name — the part of the
+browser URL before `/ui/` when you are logged into that vault.
 
 ## curl
 
