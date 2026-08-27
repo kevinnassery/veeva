@@ -186,10 +186,10 @@ if (Test-Path -LiteralPath $ConfigFile) {
             continue
         }
         if ([string]::IsNullOrWhiteSpace($value)) { continue }
-        if     ($IntKeys    -contains $key) { Set-Variable -Name $key -Value ([int]$value) }
-        elseif ($SwitchKeys -contains $key) { Set-Variable -Name $key -Value ([bool]($value -match '^(1|true|yes|on)$')) }
-        elseif ($ListKeys   -contains $key) { Set-Variable -Name $key -Value ([string[]]($value -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })) }
-        else                                { Set-Variable -Name $key -Value $value }
+        if     ($IntKeys    -contains $key) { Set-Variable -Name $key -Value ([int]$value) -WhatIf:$false }
+        elseif ($SwitchKeys -contains $key) { Set-Variable -Name $key -Value ([bool]($value -match '^(1|true|yes|on)$')) -WhatIf:$false }
+        elseif ($ListKeys   -contains $key) { Set-Variable -Name $key -Value ([string[]]($value -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })) -WhatIf:$false }
+        else                                { Set-Variable -Name $key -Value $value -WhatIf:$false }
     }
     switch ($ConfigMode) {
         'MANIFEST' { if (-not $PSBoundParameters.ContainsKey('GenerateManifest')) { $GenerateManifest = $true } }
@@ -211,7 +211,7 @@ $VaultDNS          = $VaultDNS -replace '^https?://', '' -replace '/+$', ''
 $SourceStagingPath = '/' + $SourceStagingPath.Replace('\', '/').Trim('/')
 
 $OutputRoot = [IO.Path]::GetFullPath([IO.Path]::Combine((Get-Location).ProviderPath, $OutputRoot)).TrimEnd('\')
-if (-not (Test-Path -LiteralPath $OutputRoot)) { New-Item -ItemType Directory -Path $OutputRoot -Force | Out-Null }
+if (-not (Test-Path -LiteralPath $OutputRoot)) { New-Item -ItemType Directory -Path $OutputRoot -Force -WhatIf:$false | Out-Null }
 
 $stamp         = Get-Date -Format 'yyyyMMdd-HHmmss'
 $ResultsCsv    = Join-Path $OutputRoot 'import-results.csv'
@@ -227,7 +227,7 @@ function Write-Log {
         'OK'    { Write-Host $line -ForegroundColor Green }
         default { Write-Host $line }
     }
-    Add-Content -LiteralPath $TranscriptLog -Value $line -Encoding UTF8
+    Add-Content -LiteralPath $TranscriptLog -Value $line -Encoding UTF8 -WhatIf:$false
 }
 
 # --------------------------------------------------------------------------------------
@@ -277,7 +277,7 @@ function Move-ExistingReport {
     $dest = Join-Path $dir "$base-$when$ext"
     $n    = 1
     while (Test-Path -LiteralPath $dest) { $n++; $dest = Join-Path $dir "$base-$when-$n$ext" }
-    Move-Item -LiteralPath $Path -Destination $dest
+    Move-Item -LiteralPath $Path -Destination $dest -WhatIf:$false
     return $dest
 }
 
@@ -650,7 +650,7 @@ if ($GenerateManifest) {
             ActualSubmissionDate = ''
             DossierFormatId      = ''
         }
-    } | Export-Csv -LiteralPath $ManifestOut -NoTypeInformation -Encoding UTF8
+    } | Export-Csv -LiteralPath $ManifestOut -NoTypeInformation -Encoding UTF8 -WhatIf:$false
 
     Write-Log "Wrote manifest for $($dossiers.Count) dossier(s), $resolved with SubmissionId filled in: $ManifestOut" 'OK'
     return
@@ -833,7 +833,7 @@ function Save-Results {
     foreach ($r in $results) {
         if (-not $written.ContainsKey("$($r.FileName)")) { [void]$out.Add($r) }
     }
-    $out | Export-Csv -LiteralPath $ResultsCsv -NoTypeInformation -Encoding UTF8
+    $out | Export-Csv -LiteralPath $ResultsCsv -NoTypeInformation -Encoding UTF8 -WhatIf:$false
 }
 
 $script:AppIdResolved = $false   # Get-ApplicationId caches into $script:AppId after first call

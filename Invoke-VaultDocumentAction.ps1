@@ -234,11 +234,11 @@ if (Test-Path -LiteralPath $ConfigFile) {
             continue
         }
         if ([string]::IsNullOrWhiteSpace($value)) { continue }
-        if     ($IntKeys    -contains $key) { Set-Variable -Name $key -Value ([int]$value) }
-        elseif ($BoolKeys   -contains $key) { Set-Variable -Name $key -Value ([bool]($value -match '^(1|true|yes|on)$')) }
-        elseif ($SwitchKeys -contains $key) { Set-Variable -Name $key -Value ([bool]($value -match '^(1|true|yes|on)$')) }
-        elseif ($ListKeys -contains $key) { Set-Variable -Name $key -Value ([string[]]($value -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })) }
-        else                              { Set-Variable -Name $key -Value $value }
+        if     ($IntKeys    -contains $key) { Set-Variable -Name $key -Value ([int]$value) -WhatIf:$false }
+        elseif ($BoolKeys   -contains $key) { Set-Variable -Name $key -Value ([bool]($value -match '^(1|true|yes|on)$')) -WhatIf:$false }
+        elseif ($SwitchKeys -contains $key) { Set-Variable -Name $key -Value ([bool]($value -match '^(1|true|yes|on)$')) -WhatIf:$false }
+        elseif ($ListKeys -contains $key) { Set-Variable -Name $key -Value ([string[]]($value -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })) -WhatIf:$false }
+        else                              { Set-Variable -Name $key -Value $value -WhatIf:$false }
     }
 }
 elseif ($ConfigExplicit) { throw "Config file not found: $ConfigFile" }
@@ -277,7 +277,7 @@ $OutputRoot = [IO.Path]::GetFullPath([IO.Path]::Combine((Get-Location).ProviderP
 # Trim the trailing separator, except on a drive root - "C:\" trimmed to "C:" means
 # "the current directory on C:", which is not what anyone typing C:\ meant.
 if ($OutputRoot.Length -gt 3) { $OutputRoot = $OutputRoot.TrimEnd('\') }
-if (-not (Test-Path -LiteralPath $OutputRoot)) { New-Item -ItemType Directory -Path $OutputRoot -Force | Out-Null }
+if (-not (Test-Path -LiteralPath $OutputRoot)) { New-Item -ItemType Directory -Path $OutputRoot -Force -WhatIf:$false | Out-Null }
 
 $stamp         = Get-Date -Format 'yyyyMMdd-HHmmss'
 $DocumentsCsv  = Join-Path $OutputRoot 'documents.csv'
@@ -295,7 +295,7 @@ function Write-Log {
         'OK'    { Write-Host $line -ForegroundColor Green }
         default { Write-Host $line }
     }
-    Add-Content -LiteralPath $TranscriptLog -Value $line -Encoding UTF8
+    Add-Content -LiteralPath $TranscriptLog -Value $line -Encoding UTF8 -WhatIf:$false
 }
 
 # --------------------------------------------------------------------------------------
@@ -352,7 +352,7 @@ function Move-ExistingReport {
     $when = (Get-Item -LiteralPath $Path).LastWriteTime.ToString('yyyyMMdd-HHmmss')
     $moved = [IO.Path]::Combine([IO.Path]::GetDirectoryName($Path),
              ('{0}-{1}{2}' -f [IO.Path]::GetFileNameWithoutExtension($Path), $when, [IO.Path]::GetExtension($Path)))
-    Move-Item -LiteralPath $Path -Destination $moved -Force
+    Move-Item -LiteralPath $Path -Destination $moved -Force -WhatIf:$false
     Write-Log "Rotated $([IO.Path]::GetFileName($Path)) -> $([IO.Path]::GetFileName($moved))"
 }
 
@@ -415,7 +415,7 @@ function Connect-Vault {
     # Refresh the cache so the NEXT run does not prompt either, and so a mid-run
     # re-auth leaves a working session behind rather than a stale one.
     if ($script:SessionFile) {
-        try { Set-Content -LiteralPath $script:SessionFile -Value $r.sessionId -Encoding ASCII -NoNewline } catch { }
+        try { Set-Content -LiteralPath $script:SessionFile -Value $r.sessionId -Encoding ASCII -NoNewline -WhatIf:$false } catch { }
     }
 }
 
@@ -723,7 +723,7 @@ function Export-DocumentReference {
                           @{n='Editable';e={Get-Field $_ 'editable' $false}},
                           @{n='Required';e={Get-Field $_ 'required' $false}},
                           @{n='Repeating';e={Get-Field $_ 'repeating' $false}} |
-            Export-Csv -LiteralPath $FieldsCsv -NoTypeInformation -Encoding UTF8
+            Export-Csv -LiteralPath $FieldsCsv -NoTypeInformation -Encoding UTF8 -WhatIf:$false
         Write-Log "Document fields  : $FieldsCsv"
     }
     catch { Write-Log "Could not retrieve document fields: $_" 'WARN' }
@@ -736,7 +736,7 @@ function Export-DocumentReference {
             Select-Object @{n='Label';e={Get-Field $_ 'label'}},
                           @{n='Name';e={ ("$(Get-Field $_ 'value' '')" -split '/')[-1] }},
                           @{n='Value';e={Get-Field $_ 'value'}} |
-            Export-Csv -LiteralPath $TypesCsv -NoTypeInformation -Encoding UTF8
+            Export-Csv -LiteralPath $TypesCsv -NoTypeInformation -Encoding UTF8 -WhatIf:$false
         Write-Log "Document types   : $TypesCsv"
     }
     catch { Write-Log "Could not retrieve document types: $_" 'WARN' }
@@ -934,7 +934,7 @@ else {
     }
 }
 
-$docs | Export-Csv -LiteralPath $DocumentsCsv -NoTypeInformation -Encoding UTF8
+$docs | Export-Csv -LiteralPath $DocumentsCsv -NoTypeInformation -Encoding UTF8 -WhatIf:$false
 Write-Log "Documents CSV    : $DocumentsCsv"
 
 if ($SamplePercent -gt 0 -and $SamplePercent -lt 100) {
@@ -986,7 +986,7 @@ function Save-Results {
     foreach ($r in $results) {
         if (-not $written.ContainsKey("$($r.Id)")) { [void]$out.Add($r) }
     }
-    $out | Export-Csv -LiteralPath $ResultsCsv -NoTypeInformation -Encoding UTF8
+    $out | Export-Csv -LiteralPath $ResultsCsv -NoTypeInformation -Encoding UTF8 -WhatIf:$false
 }
 
 $pending = @($docs | Where-Object { -not $done.ContainsKey("$(Get-Field $_ 'id' '')") })

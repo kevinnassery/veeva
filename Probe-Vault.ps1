@@ -92,8 +92,8 @@ if (Test-Path -LiteralPath $ConfigFile) {
         if ([string]::IsNullOrWhiteSpace($v)) { continue }
         if ($PSBoundParameters.ContainsKey($k)) { continue }
         if (-not (Get-Variable -Name $k -Scope Script -ErrorAction SilentlyContinue)) { continue }
-        if ($ListKeys -contains $k) { Set-Variable -Name $k -Value ([string[]]($v -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })) }
-        else                        { Set-Variable -Name $k -Value $v }
+        if ($ListKeys -contains $k) { Set-Variable -Name $k -Value ([string[]]($v -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })) -WhatIf:$false }
+        else                        { Set-Variable -Name $k -Value $v -WhatIf:$false }
     }
 }
 if ([string]::IsNullOrWhiteSpace($VaultDNS))   { throw "VaultDNS is not set. Add it to $ConfigFile, or pass -VaultDNS." }
@@ -103,7 +103,7 @@ $OutputRoot = [IO.Path]::GetFullPath([IO.Path]::Combine((Get-Location).ProviderP
 # Trim the trailing separator, except on a drive root - "C:\" trimmed to "C:" means
 # "the current directory on C:", which is not what anyone typing C:\ meant.
 if ($OutputRoot.Length -gt 3) { $OutputRoot = $OutputRoot.TrimEnd('\') }
-if (-not (Test-Path -LiteralPath $OutputRoot)) { New-Item -ItemType Directory -Path $OutputRoot -Force | Out-Null }
+if (-not (Test-Path -LiteralPath $OutputRoot)) { New-Item -ItemType Directory -Path $OutputRoot -Force -WhatIf:$false | Out-Null }
 
 $OutFile     = Join-Path $OutputRoot 'probe-output.txt'
 $FieldsCsv   = Join-Path $OutputRoot 'document-fields.csv'
@@ -116,7 +116,7 @@ function Say {
     Write-Host $Text
     [void]$report.Add($Text)
 }
-function Save-Report { Set-Content -LiteralPath $OutFile -Value ($report -join "`r`n") -Encoding UTF8 }
+function Save-Report { Set-Content -LiteralPath $OutFile -Value ($report -join "`r`n") -Encoding UTF8 -WhatIf:$false }
 
 # ---- session ------------------------------------------------------------------------
 
@@ -251,7 +251,7 @@ if ($props) {
                       @{n='Required';e={Get-Field $_ 'required' $false}},
                       @{n='Repeating';e={Get-Field $_ 'repeating' $false}},
                       @{n='Queryable';e={Get-Field $_ 'queryable' $false}}
-    $fields | Export-Csv -LiteralPath $FieldsCsv -NoTypeInformation -Encoding UTF8
+    $fields | Export-Csv -LiteralPath $FieldsCsv -NoTypeInformation -Encoding UTF8 -WhatIf:$false
     $editable = @($fields | Where-Object { $_.Editable }).Count
     Say "      $($fields.Count) field(s), $editable editable   [full list: document-fields.csv]"
 }
@@ -263,7 +263,7 @@ if ($types) {
     $rows = @(Get-Field $types 'types' @()) |
         Select-Object @{n='Label';e={Get-Field $_ 'label'}},
                       @{n='Name';e={ ("$(Get-Field $_ 'value' '')" -split '/')[-1] }}
-    $rows | Export-Csv -LiteralPath $TypesCsv -NoTypeInformation -Encoding UTF8
+    $rows | Export-Csv -LiteralPath $TypesCsv -NoTypeInformation -Encoding UTF8 -WhatIf:$false
     Say "      $($rows.Count) top-level type(s)"
     Say ''
 
@@ -285,7 +285,7 @@ if ($types) {
             })
         }
     }
-    $all | Export-Csv -LiteralPath $TypesCsv -NoTypeInformation -Encoding UTF8
+    $all | Export-Csv -LiteralPath $TypesCsv -NoTypeInformation -Encoding UTF8 -WhatIf:$false
     $subCount = @($all | Where-Object { $_.Level -eq 'subtype' }).Count
     Say "      $($rows.Count) type(s) + $subCount subtype(s)   [full list: document-types.csv]"
     Say ''
@@ -323,7 +323,7 @@ $prod = Try-Api -Method POST -Path '/query' -ContentType 'application/x-www-form
             -Body @{ q = 'SELECT id, name__v FROM product__v'; pagesize = 1000 }
 if ($prod) {
     $rows = @(Get-Field $prod 'data' @()) | Select-Object @{n='Id';e={Get-Field $_ 'id'}}, @{n='Name';e={Get-Field $_ 'name__v'}}
-    $rows | Export-Csv -LiteralPath $ProductsCsv -NoTypeInformation -Encoding UTF8
+    $rows | Export-Csv -LiteralPath $ProductsCsv -NoTypeInformation -Encoding UTF8 -WhatIf:$false
     Say "      $($rows.Count) product record(s)   [full list: products.csv]"
     foreach ($r in ($rows | Select-Object -First $ListLimit)) { Say ('        {0,-22} {1}' -f $r.Id, $r.Name) }
     if ($rows.Count -gt $ListLimit) { Say "        ... $($rows.Count - $ListLimit) more in products.csv" }

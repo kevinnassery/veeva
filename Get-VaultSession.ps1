@@ -35,7 +35,7 @@ $here = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).ProviderPath 
 $SessionFile = Join-Path $here 'session.txt'
 
 if ($Clear) {
-    if (Test-Path -LiteralPath $SessionFile) { Remove-Item -LiteralPath $SessionFile -Force; Write-Host 'session.txt deleted.' -ForegroundColor Green }
+    if (Test-Path -LiteralPath $SessionFile) { Remove-Item -LiteralPath $SessionFile -Force -WhatIf:$false; Write-Host 'session.txt deleted.' -ForegroundColor Green }
     else { Write-Host 'No session.txt to delete.' }
     return
 }
@@ -63,7 +63,7 @@ $r = Invoke-RestMethod -Method Post -Uri "https://$VaultDNS/api/$ApiVersion/auth
         -ContentType 'application/x-www-form-urlencoded' -Headers @{ Accept = 'application/json' }
 if ($r.responseStatus -ne 'SUCCESS') { throw "Authentication failed: $($r | ConvertTo-Json -Depth 5 -Compress)" }
 
-Set-Content -LiteralPath $SessionFile -Value $r.sessionId -Encoding ASCII -NoNewline
+Set-Content -LiteralPath $SessionFile -Value $r.sessionId -Encoding ASCII -NoNewline -WhatIf:$false
 
 Write-Host ''
 Write-Host "Logged in to $VaultDNS  (vaultId $($r.vaultId), userId $($r.userId))" -ForegroundColor Green
