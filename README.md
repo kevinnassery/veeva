@@ -14,12 +14,6 @@ curl.exe -sLO $B/documents.ini
 curl.exe -sLO $B/README.md
 ```
 
-Everything, including the submissions importer and the offline API reference:
-
-```bash
-curl.exe -sLO https://github.com/kevinnassery/veeva/archive/refs/heads/main.zip
-```
-
 Re-downloading `documents.ini` overwrites your settings. Skip that line after the first pull.
 
 | I want to... | Run |
