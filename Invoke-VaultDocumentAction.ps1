@@ -1,0 +1,822 @@
+<#
+.SYNOPSIS
+    Runs a Library bulk action against Vault documents from a VQL query, instead of
+    clicking through Refine Selection -> Choose Action -> Edit Details in the UI.
+
+.DESCRIPTION
+    A saved Library view (e.g. "Insert Product for Document Extraction") is not
+    reachable over the API - saved views, their filters and the grid's Export to
+    Text/Excel are UI-only. What IS reachable is the query behind it. This script:
+
+      1. Rebuilds the view's filters as VQL and runs it, paging through every match.
+      2. Writes what it found to documents.csv - the API-side equivalent of the
+         grid's Export to Excel, and the thing to eyeball before changing anything.
+      3. Then, depending on MODE, either stops, bulk-updates field values on those
+         documents, or exports them to File Staging.
+
+    Bulk update goes through Update Multiple Documents, which caps at 1,000
+    documents per call - the same 1,000 the UI offers as "First 1000 Documents".
+    A view matching 5,200 documents is therefore six batches, not one.
+
+    Re-runnable: documents already recorded as SUCCESS are skipped.
+
+.PARAMETER ConfigFile
+    All settings live in documents.ini beside this script. Command line overrides it.
+
+.PARAMETER SamplePercent
+    Process a random percentage (1-100) of the documents found instead of all of
+    them. 0 = no sampling. Rounded up, so a small percentage still picks at least
+    one. A fresh sample is drawn every run.
+
+.NOTES
+    Windows PowerShell 5.1 compatible (also runs on PowerShell 7).
+    Endpoints, all relative to https://<VaultDNS>/api/<ApiVersion>:
+      POST /auth                                          log in
+      POST /query                                         the view's filters, as VQL
+      GET  /metadata/objects/documents/properties         document fields (editable:true)
+      GET  /metadata/objects/documents/types              document types
+      PUT  /objects/documents/batch                       bulk field update (max 1000)
+      POST /objects/documents/batch/actions/fileextract   export to File Staging
+      GET  /services/jobs/{job_id}                        poll the export job
+      GET  /objects/documents/batch/actions/fileextract/{job_id}/results
+#>
+
+[CmdletBinding(SupportsShouldProcess = $true)]
+param(
+    # ======================================================================================
+    #  All configuration lives in ONE file: documents.ini, next to this script.
+    #  Precedence:  command line  >  documents.ini  >  the defaults here
+    # ======================================================================================
+
+    [string]     $ConfigFile       = '',
+
+    # ---- Required ----
+    [string]     $VaultDNS         = '',
+
+    # Local folder for the CSV reports and log. Nothing else is written locally.
+    [string]     $OutputRoot       = '',
+
+    # ---- Vault ----
+    [ValidatePattern('^v\d+\.\d+$')]
+    [string]     $ApiVersion       = 'v26.2',
+
+    # The ONLY place a session id is configured. Blank = log in and manage it for me.
+    [string]     $SessionId        = '',
+
+    [pscredential] $Credential,
+
+    # ---- Which documents (the saved view, as VQL) ----
+    #
+    # Either hand the whole query over in Vql, or leave it blank and let the filter
+    # settings below build it. Vql wins if both are set.
+    [string]     $Vql              = '',
+
+    # Fields to pull back. id is always included whether it is listed or not.
+    [string[]]   $SelectFields     = @('id', 'name__v', 'type__v', 'major_version_number__v', 'minor_version_number__v'),
+
+    # Product filter. A product record id (00P...) is exact and always safe. A plain
+    # name is matched against ProductNameField instead, which requires that field to
+    # exist on documents in this vault.
+    [string]     $Product          = '',
+    [string]     $ProductField     = 'product__v',
+
+    # Document types to leave out - the UI's "Document Types not in (...)" filter.
+    # VQL has no NOT IN: this becomes a chain of type__v != '...' AND ...
+    # Document queries match on LABELS by default, so use what the UI shows
+    # ("Migrated Document"), not the field name.
+    [string[]]   $ExcludeTypes     = @(),
+
+    # Anything else, appended to the WHERE clause verbatim. Your escaping, your risk.
+    [string]     $Where            = '',
+
+    # Cap on how many documents to act on at all. 0 = no cap. Use it to prove the
+    # plumbing on ten documents before turning it loose on five thousand.
+    [int]        $MaxDocuments     = 0,
+
+    [ValidateRange(0, 100)]
+    [int]        $SamplePercent    = 0,
+
+    # ---- What to do with them ----
+    #
+    # Field values to write, as name=value pairs separated by | (a pipe, because
+    # documents.ini treats " ;" as the start of a comment).
+    #    SetFields = product__v=00P1110|country__v=00C0001
+    # A value of null clears the field. Only the latest version of each document is
+    # updated; past versions need Update Document Version, which this does not do.
+    [string]     $SetFields        = '',
+
+    # Export options, used in EXPORT mode. text=true is the one to use if what you
+    # want out is document text rather than the source files.
+    [bool]       $ExportSource     = $true,
+    [bool]       $ExportRenditions = $false,
+    [bool]       $ExportAllVersions = $false,
+    [bool]       $ExportText       = $false,
+
+    # ---- Existing output reports ----
+    # What to do when this run's CSV reports are already sitting in OutputRoot from
+    # an earlier run.
+    #   Prompt  = ask (default). Non-interactive hosts fall back to Resume.
+    #   Resume  = keep them: skip what already succeeded, carry the old rows forward.
+    #   Restart = rotate them aside to <name>-<when they were written>.csv, start clean.
+    [ValidateSet('Prompt', 'Resume', 'Restart')]
+    [string]     $ExistingResults  = 'Prompt',
+
+    # ---- Advanced ----
+    # Vault's own ceiling is 1,000 per call and the API rejects more. Lower it if you
+    # want smaller, more frequent checkpoints in the results CSV.
+    [ValidateRange(1, 1000)]
+    [int]        $BatchSize        = 1000,
+
+    [ValidateRange(1, 1000)]
+    [int]        $PageSize         = 1000,
+
+    [int]        $JobTimeoutMinutes = 120,
+    [int]        $JobPollSeconds   = 20,
+    [int]        $MaxRetries       = 4
+)
+
+Set-StrictMode -Version 2.0
+$ErrorActionPreference = 'Stop'
+$ProgressPreference    = 'SilentlyContinue'
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+# --------------------------------------------------------------------------------------
+# Small helpers
+# --------------------------------------------------------------------------------------
+
+function Get-Field {
+    # Strict-mode-safe property read: missing property or empty value yields $Default.
+    param($Object, [Parameter(Mandatory)][string]$Name, $Default = '')
+    if ($null -eq $Object) { return $Default }
+    $p = $Object.PSObject.Properties[$Name]
+    if ($null -eq $p -or $null -eq $p.Value) { return $Default }
+    if ($p.Value -is [string] -and [string]::IsNullOrWhiteSpace($p.Value)) { return $Default }
+    return $p.Value
+}
+
+function ConvertTo-VqlLiteral {
+    # Escape a value for a single-quoted VQL string literal.
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Value)
+    return $Value.Replace('\', '\\').Replace("'", "\'")
+}
+
+function ConvertTo-CsvValue {
+    # RFC 4180 field: quote when the value holds a comma, quote, CR or LF.
+    param([AllowNull()]$Value)
+    $s = "$Value"
+    if ($s -match '[",\r\n]') { return '"' + $s.Replace('"', '""') + '"' }
+    return $s
+}
+
+# --------------------------------------------------------------------------------------
+# Configuration: one file, one load
+# --------------------------------------------------------------------------------------
+
+$IntKeys    = @('MaxDocuments', 'SamplePercent', 'BatchSize', 'PageSize',
+                'JobTimeoutMinutes', 'JobPollSeconds', 'MaxRetries')
+$BoolKeys   = @('ExportSource', 'ExportRenditions', 'ExportAllVersions', 'ExportText')
+$ListKeys   = @('SelectFields', 'ExcludeTypes')
+
+function Import-ConfigFile {
+    param([Parameter(Mandatory)][string]$Path)
+    $cfg = [ordered]@{}
+    foreach ($line in (Get-Content -LiteralPath $Path)) {
+        $t = $line.Trim()
+        if (-not $t -or $t.StartsWith('#') -or $t.StartsWith(';') -or $t.StartsWith('[')) { continue }
+        $eq = $t.IndexOf('=')
+        if ($eq -lt 1) { continue }
+        $k = $t.Substring(0, $eq).Trim()
+        $v = $t.Substring($eq + 1).Trim()
+        # Strip an inline comment - whitespace followed by # or ; - unless the value is
+        # quoted. Without this, "field = name__v  # note" would keep the note as the value.
+        if ($v -notmatch '^["'']') { $v = ($v -split '\s+[#;]', 2)[0].TrimEnd() }
+        $v = $v.Trim('"', "'")
+        $cfg[$k] = [Environment]::ExpandEnvironmentVariables($v)
+    }
+    return $cfg
+}
+
+$ConfigExplicit = $PSBoundParameters.ContainsKey('ConfigFile')
+if ([string]::IsNullOrWhiteSpace($ConfigFile)) {
+    $here = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).ProviderPath }
+    $ConfigFile = Join-Path $here 'documents.ini'
+}
+
+$ConfigMode = ''
+if (Test-Path -LiteralPath $ConfigFile) {
+    $cfg = Import-ConfigFile -Path $ConfigFile
+    foreach ($key in $cfg.Keys) {
+        $value = $cfg[$key]
+        if ($key -eq 'MODE') { $ConfigMode = $value.ToUpperInvariant(); continue }
+        if ($PSBoundParameters.ContainsKey($key)) { continue }
+        if (-not (Get-Variable -Name $key -Scope Script -ErrorAction SilentlyContinue)) {
+            Write-Warning "documents.ini: ignoring unknown setting '$key'"
+            continue
+        }
+        if ([string]::IsNullOrWhiteSpace($value)) { continue }
+        if     ($IntKeys  -contains $key) { Set-Variable -Name $key -Value ([int]$value) }
+        elseif ($BoolKeys -contains $key) { Set-Variable -Name $key -Value ([bool]($value -match '^(1|true|yes|on)$')) }
+        elseif ($ListKeys -contains $key) { Set-Variable -Name $key -Value ([string[]]($value -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })) }
+        else                              { Set-Variable -Name $key -Value $value }
+    }
+}
+elseif ($ConfigExplicit) { throw "Config file not found: $ConfigFile" }
+else { Write-Warning "No documents.ini found at $ConfigFile - relying on command-line arguments." }
+
+if (-not $ConfigMode) { $ConfigMode = 'REPORT' }
+switch ($ConfigMode) {
+    'REPORT' { }   # query only: documents.csv plus the field/type reference CSVs
+    'DRYRUN' { if (-not $PSBoundParameters.ContainsKey('WhatIf')) { $WhatIfPreference = $true } }
+    'UPDATE' { }
+    'EXPORT' { }
+    default  { throw "documents.ini: MODE must be REPORT, DRYRUN, UPDATE or EXPORT (got '$ConfigMode')." }
+}
+# DRYRUN is UPDATE with the writes withheld, so everything downstream branches on the action.
+$Action = if ($ConfigMode -eq 'DRYRUN') { 'UPDATE' } else { $ConfigMode }
+
+foreach ($name in @('VaultDNS', 'OutputRoot')) {
+    if ([string]::IsNullOrWhiteSpace((Get-Variable -Name $name -ValueOnly))) {
+        throw "$name is not set. Add it to $ConfigFile, or pass -$name on the command line."
+    }
+}
+$VaultDNS = $VaultDNS -replace '^https?://', '' -replace '/+$', ''
+
+$OutputRoot = [IO.Path]::GetFullPath([IO.Path]::Combine((Get-Location).ProviderPath, $OutputRoot)).TrimEnd('\')
+if (-not (Test-Path -LiteralPath $OutputRoot)) { New-Item -ItemType Directory -Path $OutputRoot -Force | Out-Null }
+
+$stamp         = Get-Date -Format 'yyyyMMdd-HHmmss'
+$DocumentsCsv  = Join-Path $OutputRoot 'documents.csv'
+$ResultsCsv    = Join-Path $OutputRoot 'document-results.csv'
+$FieldsCsv     = Join-Path $OutputRoot 'document-fields.csv'
+$TypesCsv      = Join-Path $OutputRoot 'document-types.csv'
+$TranscriptLog = Join-Path $OutputRoot "documents-$stamp.log"
+
+function Write-Log {
+    param([string]$Message, [ValidateSet('INFO','WARN','ERROR','OK')][string]$Level = 'INFO')
+    $line = '{0} [{1}] {2}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $Level, $Message
+    switch ($Level) {
+        'ERROR' { Write-Host $line -ForegroundColor Red }
+        'WARN'  { Write-Host $line -ForegroundColor Yellow }
+        'OK'    { Write-Host $line -ForegroundColor Green }
+        default { Write-Host $line }
+    }
+    Add-Content -LiteralPath $TranscriptLog -Value $line -Encoding UTF8
+}
+
+# --------------------------------------------------------------------------------------
+# Field updates: parse SetFields once, up front
+#
+# Done before authenticating so a typo in documents.ini is reported immediately rather
+# than after a five-thousand-row query.
+# --------------------------------------------------------------------------------------
+
+$Updates = [ordered]@{}
+if ($SetFields) {
+    foreach ($pair in ($SetFields -split '\|')) {
+        $p = $pair.Trim()
+        if (-not $p) { continue }
+        $eq = $p.IndexOf('=')
+        if ($eq -lt 1) { throw "SetFields: '$p' is not a name=value pair. Separate pairs with | (a pipe)." }
+        $n = $p.Substring(0, $eq).Trim()
+        $v = $p.Substring($eq + 1).Trim()
+        if ($n -ieq 'id') { throw "SetFields: id is the key, it cannot be updated." }
+        $Updates[$n] = $v
+    }
+}
+if ($Action -eq 'UPDATE' -and $Updates.Count -eq 0) {
+    throw "MODE is $ConfigMode but SetFields is empty - there is nothing to write. Set it in $ConfigFile."
+}
+
+# --------------------------------------------------------------------------------------
+# Existing output reports
+#
+# The CSV reports this run writes may already be in OutputRoot from an earlier run.
+# Continuing is usually right: it skips what already succeeded and keeps the old rows.
+# But if the last run was a different view or a different field, those rows are not
+# this run's, and you want a clean sheet.
+#
+# Restarting ROTATES, it never deletes: the old report is renamed to carry the time it
+# was written, so the record survives and the new run starts empty.
+# --------------------------------------------------------------------------------------
+
+function Get-ReportSummary {
+    param([Parameter(Mandatory)][string]$Path)
+    try {
+        $rows = @(Import-Csv -LiteralPath $Path)
+        if ($rows.Count -eq 0) { return 'empty' }
+        $ok  = @($rows | Where-Object { (Get-Field $_ 'Status') -eq 'SUCCESS' }).Count
+        $when = (Get-Item -LiteralPath $Path).LastWriteTime.ToString('yyyy-MM-dd HH:mm')
+        return "$($rows.Count) row(s), $ok SUCCESS, last written $when"
+    }
+    catch { return 'unreadable' }
+}
+
+function Move-ExistingReport {
+    param([Parameter(Mandatory)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    $when = (Get-Item -LiteralPath $Path).LastWriteTime.ToString('yyyyMMdd-HHmmss')
+    $moved = [IO.Path]::Combine([IO.Path]::GetDirectoryName($Path),
+             ('{0}-{1}{2}' -f [IO.Path]::GetFileNameWithoutExtension($Path), $when, [IO.Path]::GetExtension($Path)))
+    Move-Item -LiteralPath $Path -Destination $moved -Force
+    Write-Log "Rotated $([IO.Path]::GetFileName($Path)) -> $([IO.Path]::GetFileName($moved))"
+}
+
+$existing = @($DocumentsCsv, $ResultsCsv | Where-Object { Test-Path -LiteralPath $_ })
+if ($existing.Count) {
+    $choice = $ExistingResults
+    if ($choice -eq 'Prompt') {
+        Write-Host ''
+        Write-Host 'Reports from an earlier run are already in this folder:' -ForegroundColor Yellow
+        foreach ($f in $existing) { Write-Host ('  {0,-22} {1}' -f [IO.Path]::GetFileName($f), (Get-ReportSummary -Path $f)) }
+        Write-Host ''
+        if ($Host.UI.RawUI -and -not [Console]::IsInputRedirected) {
+            $answer = Read-Host 'Resume (keep them, skip what already succeeded) or Restart (rotate aside, start fresh)? [R]esume/[S]tart fresh'
+            $choice = if ($answer -match '^[Ss]') { 'Restart' } else { 'Resume' }
+        }
+        else {
+            Write-Host 'Non-interactive host - resuming.' -ForegroundColor Yellow
+            $choice = 'Resume'
+        }
+    }
+    if ($choice -eq 'Restart') { foreach ($f in $existing) { Move-ExistingReport -Path $f } }
+    else { Write-Log 'Resuming: rows already SUCCESS will be skipped and carried forward.' }
+}
+
+# --------------------------------------------------------------------------------------
+# Session id
+#
+# $script:SessionId is the single source of truth for the Vault session:
+#   seeded here from the SessionId config value, written only by Connect-Vault,
+#   read only by Invoke-VaultApi when it builds the Authorization header.
+# No function takes a session id as an argument, which is what makes mid-run re-auth
+# safe - the header is rebuilt from this variable on every attempt.
+# --------------------------------------------------------------------------------------
+
+$script:BaseUrl   = "https://$VaultDNS/api/$ApiVersion"
+$script:SessionId = $SessionId
+$script:Cred      = $Credential
+
+function Connect-Vault {
+    if (-not $script:Cred) { $script:Cred = Get-Credential -Message "Vault credentials for $VaultDNS" }
+    $body = @{ username = $script:Cred.UserName; password = $script:Cred.GetNetworkCredential().Password }
+    $r = Invoke-RestMethod -Method Post -Uri "$script:BaseUrl/auth" -Body $body `
+            -ContentType 'application/x-www-form-urlencoded' -Headers @{ Accept = 'application/json' }
+    if ($r.responseStatus -ne 'SUCCESS') { throw "Authentication failed: $($r | ConvertTo-Json -Depth 5 -Compress)" }
+    $script:SessionId = $r.sessionId
+    Write-Log "Authenticated to $VaultDNS (vaultId $($r.vaultId), userId $($r.userId))" 'OK'
+}
+
+# --------------------------------------------------------------------------------------
+# Core request helper
+# --------------------------------------------------------------------------------------
+
+function Invoke-VaultApi {
+    param(
+        [Parameter(Mandatory)][ValidateSet('GET','POST','PUT','DELETE')][string]$Method,
+        [Parameter(Mandatory)][string]$Path,
+        $Body,
+        [string]$ContentType,
+        [hashtable]$ExtraHeaders = @{},
+        [int]$TimeoutSec = 600,
+        [switch]$Raw
+    )
+
+    # Three shapes of Path arrive here and they are not interchangeable:
+    #   https://...        a full URL (File Staging pagination hands these back)
+    #   /api/v26.2/query   host-relative and ALREADY carrying the api prefix - this is
+    #                      what VQL next_page returns, and prefixing BaseUrl onto it
+    #                      would produce .../api/v26.2/api/v26.2/query
+    #   /query             our own calls, relative to BaseUrl
+    $uri =
+        if     ($Path -match '^https?://') { $Path }
+        elseif ($Path -match '^/api/')     { "https://$VaultDNS$Path" }
+        else                               { "$script:BaseUrl$Path" }
+
+    for ($attempt = 1; $attempt -le $MaxRetries; $attempt++) {
+        $headers = @{ Authorization = $script:SessionId; Accept = if ($Raw) { '*/*' } else { 'application/json' } }
+        foreach ($k in $ExtraHeaders.Keys) { $headers[$k] = $ExtraHeaders[$k] }
+
+        try {
+            $req = @{ Method = $Method; Uri = $uri; Headers = $headers; TimeoutSec = $TimeoutSec; UseBasicParsing = $true }
+            if ($null -ne $Body) { $req['Body'] = $Body }
+            if ($ContentType)    { $req['ContentType'] = $ContentType }
+
+            $resp = Invoke-WebRequest @req
+
+            $remaining = $resp.Headers['X-VaultAPI-BurstLimitRemaining']
+            if ($remaining -and [int]$remaining -lt 200) {
+                Write-Log "Burst limit low ($remaining remaining) - pausing 30s" 'WARN'
+                Start-Sleep -Seconds 30
+            }
+
+            if ($Raw) { return $resp.Content }
+
+            $json = $null
+            if ($resp.Content) { try { $json = $resp.Content | ConvertFrom-Json } catch { } }
+            if ($null -eq $json) { return [pscustomobject]@{ responseStatus = 'SUCCESS'; raw = $resp.Content } }
+
+            if ((Get-Field $json 'responseStatus') -eq 'FAILURE') {
+                $errs  = @(Get-Field $json 'errors' @())
+                $types = @($errs | ForEach-Object { Get-Field $_ 'type' })
+                if ($types -contains 'INVALID_SESSION_ID') {
+                    Write-Log 'Session expired - re-authenticating' 'WARN'
+                    Connect-Vault
+                    continue
+                }
+                $msg = ($errs | ForEach-Object { "$(Get-Field $_ 'type'): $(Get-Field $_ 'message')" }) -join '; '
+                throw "Vault API FAILURE on $Method $Path -- $msg"
+            }
+            return $json
+        }
+        catch {
+            # Windows PowerShell 5.1 throws WebException here; PowerShell 7 throws
+            # HttpResponseException for an HTTP status and HttpRequestException for a
+            # transport failure. Matching on the type NAME covers all three without
+            # needing System.Net.Http to be loadable on 5.1. Anything else - a real bug
+            # in this script - is rethrown immediately rather than retried four times.
+            $ex   = $_.Exception
+            $name = $ex.GetType().Name
+            if ($name -notin @('WebException', 'HttpResponseException', 'HttpRequestException')) { throw }
+
+            $status = $null
+            try { if ($ex.Response) { $status = [int]$ex.Response.StatusCode } } catch { }
+
+            if ($status -eq 429) {
+                Write-Log "HTTP 429 rate limited - waiting 60s (attempt $attempt/$MaxRetries)" 'WARN'
+                Start-Sleep -Seconds 60
+                continue
+            }
+            $transient = (-not $status) -or ($status -ge 500)
+            if (-not $transient -or $attempt -eq $MaxRetries) {
+                # 5.1 leaves the body on the response stream; 7 has already read it into
+                # ErrorDetails. Try both, take whichever produced something.
+                $detail = ''
+                try { $detail = "$(Get-Field $_ 'ErrorDetails' $null | Select-Object -ExpandProperty Message -ErrorAction SilentlyContinue)" } catch { }
+                if (-not $detail) {
+                    try { $detail = (New-Object IO.StreamReader($ex.Response.GetResponseStream())).ReadToEnd() } catch { }
+                }
+                throw "$Method $Path failed (HTTP $status): $($ex.Message) $detail"
+            }
+            $wait = [math]::Pow(2, $attempt) * 5
+            Write-Log "Transient error on $Method $Path (HTTP $status) - retry $attempt/$MaxRetries in ${wait}s" 'WARN'
+            Start-Sleep -Seconds $wait
+        }
+    }
+    throw "$Method $Path failed after $MaxRetries attempts"
+}
+
+function Wait-VaultJob {
+    param([Parameter(Mandatory)]$JobId)
+    $running  = @('SCHEDULED','QUEUING','QUEUED','RUNNING','IN_PROGRESS')
+    $deadline = (Get-Date).AddMinutes($JobTimeoutMinutes)
+    while ((Get-Date) -lt $deadline) {
+        $r = Invoke-VaultApi -Method GET -Path "/services/jobs/$JobId"
+        $status = "$(Get-Field (Get-Field $r 'data' $null) 'status' '')".ToUpperInvariant()
+        if ($status -and ($running -notcontains $status)) { return $status }
+        Start-Sleep -Seconds $JobPollSeconds
+    }
+    return "TIMEOUT_AFTER_${JobTimeoutMinutes}_MIN"
+}
+
+# --------------------------------------------------------------------------------------
+# The query behind the view
+# --------------------------------------------------------------------------------------
+
+function New-DocumentVql {
+    # Rebuild a Library view's filters as VQL. Three things about document VQL that
+    # trip up a direct translation from the UI:
+    #   - There is no NOT IN, and NOT is only legal inside a FIND clause. "Document
+    #     Types not in (a, b, c)" has to become type__v != 'a' AND type__v != 'b' ...
+    #   - IN is not a value list either; it only works as an inner-join subquery.
+    #   - Document queries match on field LABELS by default, which is why the excluded
+    #     types are spelled the way the UI spells them.
+    $fields = @('id') + @($SelectFields | Where-Object { $_ -and $_ -ne 'id' })
+    $fields = @($fields | Select-Object -Unique)
+
+    $clauses = New-Object System.Collections.ArrayList
+    if ($Product) {
+        [void]$clauses.Add("$ProductField = '$(ConvertTo-VqlLiteral $Product)'")
+    }
+    foreach ($t in $ExcludeTypes) {
+        if (-not $t) { continue }
+        [void]$clauses.Add("type__v != '$(ConvertTo-VqlLiteral $t)'")
+    }
+    if ($Where) { [void]$clauses.Add("($Where)") }
+
+    $q = "SELECT $($fields -join ', ') FROM documents"
+    if ($clauses.Count) { $q += " WHERE $($clauses -join ' AND ')" }
+    return $q
+}
+
+function Invoke-VaultQuery {
+    # Page with next_page rather than PAGEOFFSET: Vault warns on manual pagination and
+    # errors outright past 10,000 records, and next_page carries a query token that is
+    # cheaper on their side.
+    param([Parameter(Mandatory)][string]$Query)
+    $rows  = New-Object System.Collections.ArrayList
+    $total = $null
+    $next  = ''
+    $page  = 0
+
+    while ($true) {
+        $r =
+            if ($next) { Invoke-VaultApi -Method GET -Path $next }
+            else {
+                Invoke-VaultApi -Method POST -Path '/query' -ContentType 'application/x-www-form-urlencoded' `
+                    -Body @{ q = $Query; pagesize = $PageSize }
+            }
+        foreach ($d in @(Get-Field $r 'data' @())) { [void]$rows.Add($d) }
+
+        $details = Get-Field $r 'responseDetails' $null
+        if ($null -eq $total) { $total = Get-Field $details 'total' $rows.Count }
+        $page++
+        Write-Log "Query page $page - $($rows.Count) of $total document(s) retrieved"
+
+        if ($MaxDocuments -gt 0 -and $rows.Count -ge $MaxDocuments) { break }
+        $next = "$(Get-Field $details 'next_page' '')"
+        if (-not $next) { break }
+    }
+
+    if ($MaxDocuments -gt 0 -and $rows.Count -gt $MaxDocuments) {
+        $rows = New-Object System.Collections.ArrayList (, @($rows | Select-Object -First $MaxDocuments))
+    }
+    return [pscustomobject]@{ Rows = $rows; Total = $total }
+}
+
+function Export-DocumentReference {
+    # REPORT mode also dumps the two metadata endpoints, because the single most common
+    # cause of a failed bulk update is writing a field that is not editable, or spelling
+    # a document type the way the UI shows it when the vault wants the field name.
+    Write-Log 'Retrieving document fields and types for reference'
+    try {
+        $props = Invoke-VaultApi -Method GET -Path '/metadata/objects/documents/properties'
+        @(Get-Field $props 'properties' @()) |
+            Select-Object @{n='Name';e={Get-Field $_ 'name'}},
+                          @{n='Label';e={Get-Field $_ 'label'}},
+                          @{n='Type';e={Get-Field $_ 'type'}},
+                          @{n='Editable';e={Get-Field $_ 'editable' $false}},
+                          @{n='Required';e={Get-Field $_ 'required' $false}},
+                          @{n='Repeating';e={Get-Field $_ 'repeating' $false}} |
+            Export-Csv -LiteralPath $FieldsCsv -NoTypeInformation -Encoding UTF8
+        Write-Log "Document fields  : $FieldsCsv"
+    }
+    catch { Write-Log "Could not retrieve document fields: $_" 'WARN' }
+
+    try {
+        $types = Invoke-VaultApi -Method GET -Path '/metadata/objects/documents/types'
+        # value is a metadata URL; its last segment is the type NAME, which is what
+        # TONAME(type__v) wants when a label is ambiguous or localised.
+        @(Get-Field $types 'types' @()) |
+            Select-Object @{n='Label';e={Get-Field $_ 'label'}},
+                          @{n='Name';e={ ("$(Get-Field $_ 'value' '')" -split '/')[-1] }},
+                          @{n='Value';e={Get-Field $_ 'value'}} |
+            Export-Csv -LiteralPath $TypesCsv -NoTypeInformation -Encoding UTF8
+        Write-Log "Document types   : $TypesCsv"
+    }
+    catch { Write-Log "Could not retrieve document types: $_" 'WARN' }
+}
+
+# --------------------------------------------------------------------------------------
+# Actions
+# --------------------------------------------------------------------------------------
+
+function Update-DocumentBatch {
+    # Update Multiple Documents. The CSV goes up as UTF-8 bytes because Vault requires
+    # UTF-8 and a PowerShell string body is not guaranteed to be encoded that way.
+    param([Parameter(Mandatory)][string[]]$Ids)
+
+    $cols  = @('id') + @($Updates.Keys)
+    $lines = New-Object System.Collections.ArrayList
+    [void]$lines.Add(($cols -join ','))
+    foreach ($id in $Ids) {
+        $vals = @(ConvertTo-CsvValue $id) + @($Updates.Keys | ForEach-Object { ConvertTo-CsvValue $Updates[$_] })
+        [void]$lines.Add(($vals -join ','))
+    }
+    $csv = ($lines -join "`r`n")
+
+    $resp = Invoke-VaultApi -Method PUT -Path '/objects/documents/batch' `
+                -ContentType 'text/csv' -Body ([Text.Encoding]::UTF8.GetBytes($csv))
+
+    # Per-row outcomes, keyed by id. Vault returns them in request order, but keying by
+    # the id it echoes back is safer than trusting position.
+    $byId = @{}
+    foreach ($row in @(Get-Field $resp 'data' @())) {
+        $rid = "$(Get-Field $row 'id' '')"
+        $st  = "$(Get-Field $row 'responseStatus' '')"
+        $msg = ''
+        if ($st -ne 'SUCCESS') {
+            $errs = @(Get-Field $row 'errors' @())
+            $msg  = ($errs | ForEach-Object { "$(Get-Field $_ 'type'): $(Get-Field $_ 'message')" }) -join '; '
+            if (-not $msg) { $msg = ($row | ConvertTo-Json -Depth 5 -Compress) }
+        }
+        if ($rid) { $byId[$rid] = [pscustomobject]@{ Status = $st; Message = $msg } }
+    }
+    return $byId
+}
+
+function Export-DocumentBatch {
+    # Export Documents: asynchronous, so this posts the batch, polls the job, and reads
+    # the results manifest. The files land on File Staging; the manifest gives the path
+    # of each one so a later step can download them.
+    param([Parameter(Mandatory)][string[]]$Ids)
+
+    # Built by hand rather than with ConvertTo-Json: on Windows PowerShell 5.1 a
+    # single-element array serialises as a bare object, and Vault wants an array.
+    $payload = '[' + (($Ids | ForEach-Object { '{"id":"' + $_ + '"}' }) -join ',') + ']'
+    $qs = 'source={0}&renditions={1}&allversions={2}&text={3}' -f `
+            $ExportSource.ToString().ToLowerInvariant(), $ExportRenditions.ToString().ToLowerInvariant(),
+            $ExportAllVersions.ToString().ToLowerInvariant(), $ExportText.ToString().ToLowerInvariant()
+
+    $resp  = Invoke-VaultApi -Method POST -Path "/objects/documents/batch/actions/fileextract?$qs" `
+                 -ContentType 'application/json' -Body ([Text.Encoding]::UTF8.GetBytes($payload))
+    $jobId = "$(Get-Field $resp 'job_id' '')"
+    if (-not $jobId) { throw "Export did not return a job id: $($resp | ConvertTo-Json -Depth 5 -Compress)" }
+    Write-Log "Export job $jobId started for $($Ids.Count) document(s); polling"
+
+    $status = Wait-VaultJob -JobId $jobId
+    Write-Log "Export job $jobId ended $status" $(if ($status -eq 'SUCCESS') { 'OK' } else { 'ERROR' })
+
+    $byId = @{}
+    try {
+        $res = Invoke-VaultApi -Method GET -Path "/objects/documents/batch/actions/fileextract/$jobId/results"
+        foreach ($row in @(Get-Field $res 'data' @())) {
+            $rid = "$(Get-Field $row 'id' '')"
+            if (-not $rid) { continue }
+            $byId[$rid] = [pscustomobject]@{
+                Status  = "$(Get-Field $row 'responseStatus' $status)"
+                Message = "$(Get-Field $row 'file' '')"
+                JobId   = $jobId
+            }
+        }
+    }
+    catch {
+        Write-Log "Could not read export results for job ${jobId}: $_" 'WARN'
+    }
+    return [pscustomobject]@{ JobId = $jobId; JobStatus = $status; ById = $byId }
+}
+
+# --------------------------------------------------------------------------------------
+# Main
+# --------------------------------------------------------------------------------------
+
+if (-not $script:SessionId) { Connect-Vault }
+else { Write-Log 'Using the session id from configuration' }
+
+$Query = if ($Vql) { $Vql } else { New-DocumentVql }
+Write-Log "MODE $ConfigMode"
+Write-Log "VQL: $Query"
+
+if ($Action -eq 'REPORT') { Export-DocumentReference }
+
+$found = Invoke-VaultQuery -Query $Query
+$docs  = @($found.Rows)
+$TotalDiscovered = $docs.Count
+Write-Log "$TotalDiscovered document(s) matched (vault reports $($found.Total) total)" 'OK'
+if ($MaxDocuments -gt 0 -and $found.Total -gt $MaxDocuments) {
+    Write-Log "MaxDocuments $MaxDocuments - this run covers only the first $TotalDiscovered of $($found.Total)" 'WARN'
+}
+
+if ($TotalDiscovered -eq 0) {
+    Write-Log 'Nothing matched the query - check the filters against document-fields.csv.' 'WARN'
+    exit 0
+}
+
+$docs | Export-Csv -LiteralPath $DocumentsCsv -NoTypeInformation -Encoding UTF8
+Write-Log "Documents CSV    : $DocumentsCsv"
+
+if ($SamplePercent -gt 0 -and $SamplePercent -lt 100) {
+    $take = [math]::Ceiling($TotalDiscovered * $SamplePercent / 100.0)
+    $docs = @($docs | Get-Random -Count $take)
+    Write-Log "SAMPLE $SamplePercent% - $($docs.Count) of $TotalDiscovered document(s) selected at random" 'WARN'
+}
+
+if ($Action -eq 'REPORT') {
+    Write-Log '----------------------------------------------------------------'
+    Write-Log "REPORT only - nothing was changed. Review $DocumentsCsv, then set MODE = DRYRUN." 'OK'
+    Write-Log "Log              : $TranscriptLog"
+    exit 0
+}
+
+# Rows an earlier run recorded, so a re-run skips what already landed and keeps its record.
+$done  = @{}
+$prior = [ordered]@{}
+if (Test-Path -LiteralPath $ResultsCsv) {
+    foreach ($row in (Import-Csv -LiteralPath $ResultsCsv)) {
+        $rid = "$(Get-Field $row 'Id' '')"
+        if (-not $rid) { continue }
+        $prior[$rid] = $row
+        if ((Get-Field $row 'Status') -eq 'SUCCESS') { $done[$rid] = $true }
+    }
+    if ($done.Count) { Write-Log "$($done.Count) document(s) already SUCCESS in $ResultsCsv - skipping them" }
+}
+
+$results = New-Object System.Collections.ArrayList
+
+function Save-Results {
+    # Rewrite the results CSV after every batch, so an interrupted run still leaves a
+    # usable file. Rows an earlier run recorded for documents this run did not touch are
+    # carried through instead of being dropped - otherwise a sampled run (or any re-run,
+    # which skips the ones already SUCCESS) would truncate the file to just what it
+    # processed, losing the record of everything already done.
+    $current = @{}
+    foreach ($r in $results) { $current["$($r.Id)"] = $r }
+
+    $out     = New-Object System.Collections.ArrayList
+    $written = @{}
+    foreach ($k in $prior.Keys) {
+        $key = "$k"
+        if ($current.ContainsKey($key)) { [void]$out.Add($current[$key]) } else { [void]$out.Add($prior[$key]) }
+        $written[$key] = $true
+    }
+    foreach ($r in $results) {
+        if (-not $written.ContainsKey("$($r.Id)")) { [void]$out.Add($r) }
+    }
+    $out | Export-Csv -LiteralPath $ResultsCsv -NoTypeInformation -Encoding UTF8
+}
+
+$pending = @($docs | Where-Object { -not $done.ContainsKey("$(Get-Field $_ 'id' '')") })
+Write-Log "$($pending.Count) document(s) to process in batches of $BatchSize"
+
+$applied = if ($Action -eq 'UPDATE') { ($Updates.Keys | ForEach-Object { "$_=$($Updates[$_])" }) -join '; ' } else { '' }
+$batchNo = 0
+$total   = [math]::Ceiling($pending.Count / [double]$BatchSize)
+
+for ($offset = 0; $offset -lt $pending.Count; $offset += $BatchSize) {
+    $batchNo++
+    $batch  = @($pending[$offset..([math]::Min($offset + $BatchSize, $pending.Count) - 1)])
+    $ids    = @($batch | ForEach-Object { "$(Get-Field $_ 'id' '')" } | Where-Object { $_ })
+    $prefix = "[batch $batchNo/$total] $($ids.Count) document(s)"
+    $startedUtc = (Get-Date).ToUniversalTime().ToString('s')
+
+    $outcome = @{}
+    $jobId   = ''
+    $failure = ''
+
+    try {
+        if ($PSCmdlet.ShouldProcess("$($ids.Count) document(s)", $Action)) {
+            if ($Action -eq 'UPDATE') {
+                Write-Log "$prefix - updating $applied"
+                $outcome = Update-DocumentBatch -Ids $ids
+            }
+            else {
+                Write-Log "$prefix - exporting to File Staging"
+                $exp     = Export-DocumentBatch -Ids $ids
+                $jobId   = $exp.JobId
+                $outcome = $exp.ById
+                if ($exp.JobStatus -ne 'SUCCESS') { $failure = "export job ended $($exp.JobStatus)" }
+            }
+        }
+        else {
+            Write-Log "$prefix - WhatIf: would $Action $($ids -join ', ')"
+        }
+    }
+    catch {
+        $failure = "$_"
+        Write-Log "$prefix - ERROR: $_" 'ERROR'
+    }
+
+    foreach ($d in $batch) {
+        $id = "$(Get-Field $d 'id' '')"
+        $status  = 'WHATIF'
+        $message = ''
+        if ($failure) { $status = 'ERROR'; $message = $failure }
+        elseif ($outcome.ContainsKey($id)) { $status = $outcome[$id].Status; $message = $outcome[$id].Message }
+        elseif ($outcome.Count -gt 0) { $status = 'ERROR'; $message = 'no result returned for this document' }
+
+        [void]$results.Add([pscustomobject][ordered]@{
+            Id          = $id
+            Name        = "$(Get-Field $d 'name__v' '')"
+            Type        = "$(Get-Field $d 'type__v' '')"
+            Action      = $Action
+            Applied     = $applied
+            JobId       = $jobId
+            Status      = $status
+            Message     = $message
+            StartedUtc  = $startedUtc
+            FinishedUtc = (Get-Date).ToUniversalTime().ToString('s')
+        })
+    }
+
+    Save-Results
+    $ok = @($results | Where-Object { $_.Status -eq 'SUCCESS' }).Count
+    Write-Log "$prefix - done ($ok SUCCESS so far)" $(if ($failure) { 'WARN' } else { 'OK' })
+}
+
+# --------------------------------------------------------------------------------------
+# Summary
+# --------------------------------------------------------------------------------------
+
+$ok   = @($results | Where-Object { $_.Status -eq 'SUCCESS' }).Count
+$bad  = @($results | Where-Object { $_.Status -notin @('SUCCESS','WHATIF') }).Count
+$what = @($results | Where-Object { $_.Status -eq 'WHATIF' }).Count
+
+Write-Log '----------------------------------------------------------------'
+Write-Log "Processed $($results.Count) document(s): $ok succeeded, $bad failed, $what dry-run" $(if ($bad) { 'WARN' } else { 'OK' })
+if ($SamplePercent -gt 0 -and $SamplePercent -lt 100) {
+    Write-Log "SAMPLE $SamplePercent% - this covered $($docs.Count) of $TotalDiscovered document(s), NOT the whole view" 'WARN'
+}
+Write-Log "Documents CSV    : $DocumentsCsv"
+Write-Log "Results CSV      : $ResultsCsv"
+Write-Log "Log              : $TranscriptLog"
+
+if ($bad -gt 0) { exit 1 }

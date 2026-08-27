@@ -7,3 +7,14 @@ manifest-*.csv
 *.zip
 *.tar.gz
 *.tgz
+
+# Invoke-VaultDocumentAction.ps1 run artifacts
+documents.csv
+documents-*.csv
+document-results.csv
+document-results-*.csv
+document-fields.csv
+document-types.csv
+documents-*.log
+probe-output.txt
+products.csv
