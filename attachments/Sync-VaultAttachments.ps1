@@ -144,7 +144,7 @@ param(
     [int]    $MaxRetries = 4
 )
 
-$ScriptVersion = '2026.08.27-19'
+$ScriptVersion = '2026.08.27-20'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -771,8 +771,29 @@ function Import-IdMap {
     if ($best -eq 0) { throw "IdMap $Path has no delimiter in its header row: '$($header[0])'. It needs a header and at least two columns." }
     $shown = if ($delim -eq "`t") { 'tab' } else { $delim }
 
-    $rows = if ($bom) { @(Import-Csv -LiteralPath $Path -Delimiter $delim -Encoding UTF8) }
-            else       { @(Import-Csv -LiteralPath $Path -Delimiter $delim) }
+    # Import-Csv refuses a sheet with two columns of the same name - "The member
+    # 'Created By' is already present" - and a real export very often has some. Only two
+    # columns matter here, so a duplicate elsewhere should not stop the job: the header
+    # is parsed, repeats are suffixed _2, _3, and the rows are converted against that.
+    $all = if ($bom) { @(Get-Content -LiteralPath $Path -Encoding UTF8) }
+           else      { @(Get-Content -LiteralPath $Path) }
+    if ($all.Count -lt 2) { throw "IdMap $Path has a header but no rows" }
+
+    $names    = New-Object System.Collections.ArrayList
+    $usedName = @{}
+    $renamed  = 0
+    foreach ($raw in ($header[0] -split [regex]::Escape($delim))) {
+        $n = $raw.Trim().Trim('"')
+        if (-not $n) { $n = 'Column' }
+        $base = $n
+        $k = 2
+        while ($usedName.ContainsKey($n.ToLowerInvariant())) { $n = "${base}_$k"; $k++; $renamed++ }
+        $usedName[$n.ToLowerInvariant()] = $true
+        [void]$names.Add($n)
+    }
+    if ($renamed) { Write-Log "$renamed duplicate column name(s) in the header were suffixed to keep them apart" }
+
+    $rows = @($all | Select-Object -Skip 1 | ConvertFrom-Csv -Header $names -Delimiter $delim)
     if ($rows.Count -eq 0) { throw "IdMap $Path has a header but no rows" }
     $headers = @($rows[0].PSObject.Properties.Name)
     if ($headers.Count) { Write-Log "IdMap columns: $($headers -join ', ')" }
