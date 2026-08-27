@@ -144,7 +144,7 @@ param(
     [int]    $MaxRetries = 4
 )
 
-$ScriptVersion = '2026.08.27-20'
+$ScriptVersion = '2026.08.27-21'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -1059,10 +1059,13 @@ if (Test-Path -LiteralPath $ResultsCsv) {
 # already moved are skipped individually, inside the loop.
 $pending = @($ids)
 if ($MaxDocuments -gt 0 -and $pending.Count -gt $MaxDocuments) {
-    Write-Log "MaxDocuments $MaxDocuments - this run moves the first $MaxDocuments of $($pending.Count) outstanding" 'WARN'
+    # Not "outstanding": every mapped document is visited every run. Whether anything is
+    # left to do is decided per ATTACHMENT inside the loop, from the two vaults - the
+    # document list never shrinks as work completes.
+    Write-Log "MaxDocuments $MaxDocuments - this run examines the first $MaxDocuments of $($pending.Count) mapped document(s)" 'WARN'
     $pending = @($pending | Select-Object -First $MaxDocuments)
 }
-Write-Log "$($pending.Count) document(s) to move"
+Write-Log "$($pending.Count) mapped document(s) to examine"
 
 if (-not $script:Session['Source']) { Connect-Vault -Side Source } else { Write-Log 'Source: using the configured session id' }
 if ($Test) {
