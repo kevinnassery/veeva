@@ -1,6 +1,6 @@
 # Veeva Vault RIM tooling
 
-*Updated 2026-08-26 22:04 EDT*
+*Updated 2026-08-26 22:14 EDT*
 
 ## Get the scripts
 
@@ -86,23 +86,40 @@ Written to `OutputRoot`: `probe-output.txt`, `document-fields.csv`, `document-ty
 
 ---
 
-## Bulk-update documents
+## Export source documents
 
 1. In `documents.ini` set `VaultDNS` and `OutputRoot`. Leave `SessionId` blank.
 2. Run `probe.bat`. Read `probe-output.txt`.
-3. From the probe, set `Product` (id from `products.csv`), `ExcludeTypes`, `Where`.
-4. Set `MODE = REPORT`, run `Run-Documents.bat`. Confirm `documents.csv` row count matches
+3. Set the filters:
+
+```
+Product      = 00P000000000310
+Where        = binder__v = false
+ExcludeTypes = Audit Trail, Device Submissions, Staged, Submission Receipt Binder, Submissions Archive
+```
+
+4. `MODE = REPORT`, run `Run-Documents.bat`. Confirm the `documents.csv` row count matches
    the Library view. If it does not, go back to step 3.
-5. Set `MODE = DRYRUN` and `SetFields = product__v=00P1110`. Run. Check `document-results.csv`.
-6. Set `MODE = UPDATE`, `MaxDocuments = 10`. Run. Verify those 10 in the Library.
-7. Clear `MaxDocuments`. Run.
+5. `MODE = EXPORT`, `MaxDocuments = 10`. Run. Check the staged paths in `document-results.csv`.
+6. Clear `MaxDocuments`. Run.
 
-Re-runs skip rows already `SUCCESS`. Old reports are renamed, never deleted.
+Source files only is the default:
 
-## Export documents
+```
+ExportSource      = true
+ExportRenditions  = false
+ExportAllVersions = false
+ExportText        = false
+```
 
-1. Set `MODE = EXPORT`. Optionally `ExportText = true`, `ExportAllVersions = true`.
-2. Run `Run-Documents.bat`. Staged file paths land in `document-results.csv`.
+Files land on the source vault's File Staging under a job-id folder. Re-runs skip rows
+already `SUCCESS`; old reports are renamed, never deleted.
+
+## Update document fields
+
+Not needed for extraction. `MODE = UPDATE` with `SetFields = field=value` if it ever is —
+field names are checked against the vault before the first batch, and repeating
+(multi-value) fields are refused unless `AllowRepeatingFields = true`.
 
 ## Move files to another vault
 

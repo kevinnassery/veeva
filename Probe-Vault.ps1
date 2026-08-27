@@ -233,19 +233,10 @@ if ($props) {
                       @{n='Repeating';e={Get-Field $_ 'repeating' $false}},
                       @{n='Queryable';e={Get-Field $_ 'queryable' $false}}
     $fields | Export-Csv -LiteralPath $FieldsCsv -NoTypeInformation -Encoding UTF8
-    $editable = @($fields | Where-Object { $_.Editable })
-    Say "      $($fields.Count) field(s), $($editable.Count) editable   [full list: document-fields.csv]"
-    Say ''
-    Say '      Fields that look product- or binder-related:'
-    $interesting = @($fields | Where-Object { $_.Name -match 'product|binder|country|application|submission' })
-    if ($interesting.Count -eq 0) { Say '        (none matched)' }
-    foreach ($f in $interesting) {
-        Say ('        {0,-28} {1,-14} editable={2,-5} repeating={3,-5} queryable={4}' -f $f.Name, $f.Type, $f.Editable, $f.Repeating, $f.Queryable)
-    }
+    $editable = @($fields | Where-Object { $_.Editable }).Count
+    Say "      $($fields.Count) field(s), $editable editable   [full list: document-fields.csv]"
 }
 Say ''
-
-# ---- 4. document types --------------------------------------------------------------
 
 Say '[4] DOCUMENT TYPES'
 $types = Try-Api -Path '/metadata/objects/documents/types'
@@ -254,17 +245,52 @@ if ($types) {
         Select-Object @{n='Label';e={Get-Field $_ 'label'}},
                       @{n='Name';e={ ("$(Get-Field $_ 'value' '')" -split '/')[-1] }}
     $rows | Export-Csv -LiteralPath $TypesCsv -NoTypeInformation -Encoding UTF8
-    Say "      $($rows.Count) type(s)   [full list: document-types.csv]"
+    Say "      $($rows.Count) top-level type(s)"
+    Say ''
+
+    # The UI's "Document Types" filter lists types AND subtypes together, but
+    # /metadata/objects/documents/types returns only the top level. Walk each type for
+    # its subtypes, otherwise a subtype in ExcludeTypes reads as a typo when it is not.
+    Say '      Reading subtypes...'
+    $all = New-Object System.Collections.ArrayList
+    foreach ($r in $rows) {
+        [void]$all.Add([pscustomobject]@{ Level = 'type'; Label = $r.Label; Name = $r.Name; Parent = '' })
+        $d = Try-Api -Path "/metadata/objects/documents/types/$($r.Name)"
+        if (-not $d) { continue }
+        foreach ($st in @(Get-Field $d 'subtypes' @())) {
+            [void]$all.Add([pscustomobject]@{
+                Level  = 'subtype'
+                Label  = "$(Get-Field $st 'label' '')"
+                Name   = ("$(Get-Field $st 'value' '')" -split '/')[-1]
+                Parent = $r.Label
+            })
+        }
+    }
+    $all | Export-Csv -LiteralPath $TypesCsv -NoTypeInformation -Encoding UTF8
+    $subCount = @($all | Where-Object { $_.Level -eq 'subtype' }).Count
+    Say "      $($rows.Count) type(s) + $subCount subtype(s)   [full list: document-types.csv]"
     Say ''
     Say '      The ones the view excludes - confirm every one of these is spelled right:'
     foreach ($want in $ExcludeTypes) {
-        $hit = @($rows | Where-Object { $_.Label -eq $want })
-        if ($hit.Count) { Say ('        OK       "{0}"  -> name {1}' -f $want, $hit[0].Name) }
+        $hit = @($all | Where-Object { $_.Label -eq $want })
+        if ($hit.Count) {
+            $h = $hit[0]
+            if ($h.Level -eq 'type') { Say ('        OK       "{0}"  type, name {1}' -f $want, $h.Name) }
+            else {
+                Say ('        SUBTYPE  "{0}"  subtype of "{1}", name {2}' -f $want, $h.Parent, $h.Name)
+                Say ('                 -> filter this with subtype__v, NOT type__v' )
+            }
+        }
         else {
-            $near = @($rows | Where-Object { $_.Label -like "*$want*" -or $want -like "*$($_.Label)*" } | Select-Object -First 3)
+            $near = @($all | Where-Object { $_.Label -like "*$want*" -or $want -like "*$($_.Label)*" } | Select-Object -First 3)
             $hint = if ($near.Count) { '  did you mean: ' + (($near | ForEach-Object { '"' + $_.Label + '"' }) -join ', ') } else { '' }
             Say ('        NO MATCH "{0}"{1}' -f $want, $hint)
         }
+    }
+    if (@($ExcludeTypes | Where-Object { $t = $_; @($all | Where-Object { $_.Label -eq $t -and $_.Level -eq 'subtype' }).Count }).Count) {
+        Say ''
+        Say '      Subtypes cannot go in ExcludeTypes - that builds type__v != ... clauses.'
+        Say '      Put them in Where instead, e.g.  Where = subtype__v != ''Label One'' AND subtype__v != ''Label Two'''
     }
 }
 Say ''

@@ -105,6 +105,11 @@ param(
     # updated; past versions need Update Document Version, which this does not do.
     [string]     $SetFields        = '',
 
+    # Repeating (multi-value) fields are refused by default - see Test-UpdateField.
+    # Set this only once you have confirmed what Vault does with a repeating field in
+    # THIS vault, on documents you can afford to be wrong about.
+    [switch]     $AllowRepeatingFields,
+
     # Export options, used in EXPORT mode. text=true is the one to use if what you
     # want out is document text rather than the source files.
     [bool]       $ExportSource     = $true,
@@ -175,6 +180,7 @@ function ConvertTo-CsvValue {
 $IntKeys    = @('MaxDocuments', 'SamplePercent', 'BatchSize', 'PageSize',
                 'JobTimeoutMinutes', 'JobPollSeconds', 'MaxRetries')
 $BoolKeys   = @('ExportSource', 'ExportRenditions', 'ExportAllVersions', 'ExportText')
+$SwitchKeys = @('AllowRepeatingFields')
 $ListKeys   = @('SelectFields', 'ExcludeTypes')
 
 function Import-ConfigFile {
@@ -214,8 +220,9 @@ if (Test-Path -LiteralPath $ConfigFile) {
             continue
         }
         if ([string]::IsNullOrWhiteSpace($value)) { continue }
-        if     ($IntKeys  -contains $key) { Set-Variable -Name $key -Value ([int]$value) }
-        elseif ($BoolKeys -contains $key) { Set-Variable -Name $key -Value ([bool]($value -match '^(1|true|yes|on)$')) }
+        if     ($IntKeys    -contains $key) { Set-Variable -Name $key -Value ([int]$value) }
+        elseif ($BoolKeys   -contains $key) { Set-Variable -Name $key -Value ([bool]($value -match '^(1|true|yes|on)$')) }
+        elseif ($SwitchKeys -contains $key) { Set-Variable -Name $key -Value ([bool]($value -match '^(1|true|yes|on)$')) }
         elseif ($ListKeys -contains $key) { Set-Variable -Name $key -Value ([string[]]($value -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ })) }
         else                              { Set-Variable -Name $key -Value $value }
     }
@@ -577,6 +584,69 @@ function Export-DocumentReference {
 }
 
 # --------------------------------------------------------------------------------------
+# Preflight for UPDATE
+#
+# Checked against the vault's own field metadata before the first batch, because all
+# three of these failures are silent or expensive after the fact:
+#
+#   unknown field   - Vault reports a per-row error 1,000 rows at a time
+#   not editable    - same, and it is the single most common cause of a failed run
+#   repeating field - the dangerous one. A repeating (multi-value) field holds a SET.
+#                     Writing one value to it does not necessarily append; it can
+#                     replace everything already there. On thousands of documents that
+#                     is unrecoverable without a restore, so it is refused by default.
+# --------------------------------------------------------------------------------------
+
+function Test-UpdateField {
+    $props = $null
+    try { $props = Invoke-VaultApi -Method GET -Path '/metadata/objects/documents/properties' }
+    catch {
+        Write-Log "Could not read document field metadata to pre-check SetFields: $_" 'WARN'
+        Write-Log 'Continuing unchecked - a bad field name will surface as per-row errors.' 'WARN'
+        return
+    }
+
+    $byName = @{}
+    foreach ($f in @(Get-Field $props 'properties' @())) {
+        $n = "$(Get-Field $f 'name' '')"
+        if ($n) { $byName[$n] = $f }
+    }
+
+    $missing   = New-Object System.Collections.ArrayList
+    $readonly  = New-Object System.Collections.ArrayList
+    $repeating = New-Object System.Collections.ArrayList
+
+    foreach ($n in $Updates.Keys) {
+        if (-not $byName.ContainsKey($n)) { [void]$missing.Add($n); continue }
+        $f = $byName[$n]
+        if (-not [bool](Get-Field $f 'editable' $false)) { [void]$readonly.Add($n) }
+        if ([bool](Get-Field $f 'repeating' $false))     { [void]$repeating.Add($n) }
+        Write-Log ("SetFields: {0} type={1} editable={2} repeating={3}" -f `
+            $n, "$(Get-Field $f 'type' '')", [bool](Get-Field $f 'editable' $false), [bool](Get-Field $f 'repeating' $false))
+    }
+
+    if ($missing.Count)  { throw "SetFields names field(s) this vault does not have: $($missing -join ', '). Check document-fields.csv." }
+    if ($readonly.Count) { throw "SetFields names field(s) that are not editable: $($readonly -join ', '). Check document-fields.csv." }
+
+    if ($repeating.Count) {
+        Write-Log '----------------------------------------------------------------' 'WARN'
+        Write-Log "REPEATING FIELD: $($repeating -join ', ')" 'WARN'
+        Write-Log 'A repeating field holds a set of values. Writing a single value to it may' 'WARN'
+        Write-Log 'REPLACE every value already on the document rather than adding to it, and' 'WARN'
+        Write-Log "this run would do that to $($pending.Count) document(s)." 'WARN'
+        Write-Log '' 'WARN'
+        Write-Log 'Before overriding: pick ONE document, note its current values, update just' 'WARN'
+        Write-Log 'that one with -MaxDocuments 1, and look at what Vault actually did. If it' 'WARN'
+        Write-Log 'replaced rather than appended, the full value set has to go in SetFields.' 'WARN'
+        Write-Log '----------------------------------------------------------------' 'WARN'
+        if (-not $AllowRepeatingFields) {
+            throw "Refusing to write repeating field(s): $($repeating -join ', '). Confirm the behaviour on one document, then re-run with -AllowRepeatingFields (or AllowRepeatingFields = true in the ini)."
+        }
+        Write-Log 'AllowRepeatingFields is set - proceeding.' 'WARN'
+    }
+}
+
+# --------------------------------------------------------------------------------------
 # Actions
 # --------------------------------------------------------------------------------------
 
@@ -736,6 +806,8 @@ function Save-Results {
 
 $pending = @($docs | Where-Object { -not $done.ContainsKey("$(Get-Field $_ 'id' '')") })
 Write-Log "$($pending.Count) document(s) to process in batches of $BatchSize"
+
+if ($Action -eq 'UPDATE' -and $pending.Count -gt 0) { Test-UpdateField }
 
 $applied = if ($Action -eq 'UPDATE') { ($Updates.Keys | ForEach-Object { "$_=$($Updates[$_])" }) -join '; ' } else { '' }
 $batchNo = 0
