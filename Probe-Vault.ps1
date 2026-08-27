@@ -40,6 +40,7 @@ param(
     # changed. Left blank, the counting section is skipped.
     [string]   $Product      = '',
     [string]   $ProductField = 'product__v',
+    [string[]] $IncludeTypes = @(),
     [string[]] $ExcludeTypes = @(),
     [string]   $Where        = '',
 
@@ -75,7 +76,7 @@ function ConvertTo-StagingUrlPath {
 
 # ---- configuration: same documents.ini, only the keys this script cares about --------
 
-$ListKeys = @('ExcludeTypes')
+$ListKeys = @('IncludeTypes', 'ExcludeTypes')
 if ([string]::IsNullOrWhiteSpace($ConfigFile)) {
     $here = if ($PSScriptRoot) { $PSScriptRoot } else { (Get-Location).ProviderPath }
     $ConfigFile = Join-Path $here 'documents.ini'
@@ -270,8 +271,10 @@ if ($types) {
     $subCount = @($all | Where-Object { $_.Level -eq 'subtype' }).Count
     Say "      $($rows.Count) type(s) + $subCount subtype(s)   [full list: document-types.csv]"
     Say ''
-    Say '      The ones the view excludes - confirm every one of these is spelled right:'
-    foreach ($want in $ExcludeTypes) {
+    $check = if ($IncludeTypes.Count) { $IncludeTypes } else { $ExcludeTypes }
+    $word  = if ($IncludeTypes.Count) { 'keeps' } else { 'excludes' }
+    Say "      The ones the view $word - confirm every one of these is spelled right:"
+    foreach ($want in $check) {
         $hit = @($all | Where-Object { $_.Label -eq $want })
         if ($hit.Count) {
             $h = $hit[0]
@@ -287,7 +290,7 @@ if ($types) {
             Say ('        NO MATCH "{0}"{1}' -f $want, $hint)
         }
     }
-    if (@($ExcludeTypes | Where-Object { $t = $_; @($all | Where-Object { $_.Label -eq $t -and $_.Level -eq 'subtype' }).Count }).Count) {
+    if (@($check | Where-Object { $t = $_; @($all | Where-Object { $_.Label -eq $t -and $_.Level -eq 'subtype' }).Count }).Count) {
         Say ''
         Say '      Subtypes cannot go in ExcludeTypes - that builds type__v != ... clauses.'
         Say '      Put them in Where instead, e.g.  Where = subtype__v != ''Label One'' AND subtype__v != ''Label Two'''
@@ -334,7 +337,11 @@ Say ''
 Say '[7] THE VIEW, AS VQL'
 $clauses = New-Object System.Collections.ArrayList
 if ($Product) { [void]$clauses.Add("$ProductField = '$(ConvertTo-VqlLiteral $Product)'") }
-foreach ($t in $ExcludeTypes) { if ($t) { [void]$clauses.Add("type__v != '$(ConvertTo-VqlLiteral $t)'") } }
+if ($IncludeTypes.Count) {
+    $list = ($IncludeTypes | Where-Object { $_ } | ForEach-Object { "'$(ConvertTo-VqlLiteral $_)'" }) -join ', '
+    [void]$clauses.Add("type__v CONTAINS ($list)")
+}
+else { foreach ($t in $ExcludeTypes) { if ($t) { [void]$clauses.Add("type__v != '$(ConvertTo-VqlLiteral $t)'") } } }
 if ($Where) { [void]$clauses.Add("($Where)") }
 
 $q = 'SELECT id FROM documents'

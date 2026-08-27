@@ -65,10 +65,15 @@ param(
 
     [pscredential] $Credential,
 
-    # ---- Which documents (the saved view, as VQL) ----
+    # ---- Which documents ----
     #
-    # Either hand the whole query over in Vql, or leave it blank and let the filter
-    # settings below build it. Vql wins if both are set.
+    # A local .txt of document ids, one per line. When set, nothing is queried: this
+    # IS the document list. Blank lines, #-comments and an "id" header are ignored,
+    # duplicates are dropped. Highest precedence of the three.
+    [string]     $IdFile           = '',
+
+    # Otherwise: hand the whole query over in Vql, or leave that blank and let the
+    # filter settings below build it. Vql wins over the filters.
     [string]     $Vql              = '',
 
     # Fields to pull back. id is always included whether it is listed or not.
@@ -80,10 +85,15 @@ param(
     [string]     $Product          = '',
     [string]     $ProductField     = 'product__v',
 
+    # Document types to KEEP. This is the allowlist, and it is the safer of the two:
+    # a type added to the vault later is excluded by default rather than swept in.
+    # Becomes  type__v CONTAINS ('A', 'B', ...)  which is VQL's OR-of-values.
+    # Document queries match on LABELS by default, so use what the UI shows.
+    [string[]]   $IncludeTypes     = @(),
+
     # Document types to leave out - the UI's "Document Types not in (...)" filter.
     # VQL has no NOT IN: this becomes a chain of type__v != '...' AND ...
-    # Document queries match on LABELS by default, so use what the UI shows
-    # ("Migrated Document"), not the field name.
+    # Ignored when IncludeTypes is set.
     [string[]]   $ExcludeTypes     = @(),
 
     # Anything else, appended to the WHERE clause verbatim. Your escaping, your risk.
@@ -181,7 +191,7 @@ $IntKeys    = @('MaxDocuments', 'SamplePercent', 'BatchSize', 'PageSize',
                 'JobTimeoutMinutes', 'JobPollSeconds', 'MaxRetries')
 $BoolKeys   = @('ExportSource', 'ExportRenditions', 'ExportAllVersions', 'ExportText')
 $SwitchKeys = @('AllowRepeatingFields')
-$ListKeys   = @('SelectFields', 'ExcludeTypes')
+$ListKeys   = @('SelectFields', 'IncludeTypes', 'ExcludeTypes')
 
 function Import-ConfigFile {
     param([Parameter(Mandatory)][string]$Path)
@@ -504,15 +514,59 @@ function New-DocumentVql {
     if ($Product) {
         [void]$clauses.Add("$ProductField = '$(ConvertTo-VqlLiteral $Product)'")
     }
-    foreach ($t in $ExcludeTypes) {
-        if (-not $t) { continue }
-        [void]$clauses.Add("type__v != '$(ConvertTo-VqlLiteral $t)'")
+    if ($IncludeTypes.Count) {
+        # CONTAINS is VQL's OR-of-values. Not IN - that is inner-join subqueries only.
+        $list = ($IncludeTypes | Where-Object { $_ } | ForEach-Object { "'$(ConvertTo-VqlLiteral $_)'" }) -join ', '
+        [void]$clauses.Add("type__v CONTAINS ($list)")
+        if ($ExcludeTypes.Count) { Write-Log 'IncludeTypes is set, so ExcludeTypes is ignored.' 'WARN' }
+    }
+    else {
+        foreach ($t in $ExcludeTypes) {
+            if (-not $t) { continue }
+            [void]$clauses.Add("type__v != '$(ConvertTo-VqlLiteral $t)'")
+        }
     }
     if ($Where) { [void]$clauses.Add("($Where)") }
 
     $q = "SELECT $($fields -join ', ') FROM documents"
     if ($clauses.Count) { $q += " WHERE $($clauses -join ' AND ')" }
     return $q
+}
+
+function Import-IdFile {
+    # One id per line. Tolerant on purpose - this file usually arrives pasted out of
+    # Excel or the Library grid, so it may carry a header, quotes, a BOM, CRLFs, a
+    # trailing comma, or blank lines.
+    param([Parameter(Mandatory)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { throw "IdFile not found: $Path" }
+
+    $ids     = New-Object System.Collections.ArrayList
+    $seen    = @{}
+    $skipped = New-Object System.Collections.ArrayList
+    $dupes   = 0
+    $lineNo  = 0
+
+    foreach ($raw in (Get-Content -LiteralPath $Path)) {
+        $lineNo++
+        $t = "$raw".Trim().Trim([char]0xFEFF).Trim('"', "'").TrimEnd(',').Trim()
+        if (-not $t -or $t.StartsWith('#')) { continue }
+        if ($lineNo -eq 1 -and $t -match '^(id|document.?id)$') { continue }   # header
+        if ($t -notmatch '^\d+$') { [void]$skipped.Add("line ${lineNo}: '$t'"); continue }
+        if ($seen.ContainsKey($t)) { $dupes++; continue }
+        $seen[$t] = $true
+        [void]$ids.Add($t)
+    }
+
+    if ($skipped.Count) {
+        Write-Log "$($skipped.Count) line(s) in $Path are not document ids and were skipped" 'WARN'
+        foreach ($sk in ($skipped | Select-Object -First 5)) { Write-Log "  $sk" 'WARN' }
+        if ($skipped.Count -gt 5) { Write-Log "  ... and $($skipped.Count - 5) more" 'WARN' }
+    }
+    if ($dupes) { Write-Log "$dupes duplicate id(s) dropped" }
+    if ($ids.Count -eq 0) { throw "No document ids found in $Path" }
+
+    Write-Log "$($ids.Count) document id(s) read from $Path" 'OK'
+    return @($ids | ForEach-Object { [pscustomobject]@{ id = $_ } })
 }
 
 function Invoke-VaultQuery {
@@ -732,23 +786,34 @@ function Export-DocumentBatch {
 if (-not $script:SessionId) { Connect-Vault }
 else { Write-Log 'Using the session id from configuration' }
 
-$Query = if ($Vql) { $Vql } else { New-DocumentVql }
 Write-Log "MODE $ConfigMode"
-Write-Log "VQL: $Query"
 
-if ($Action -eq 'REPORT') { Export-DocumentReference }
-
-$found = Invoke-VaultQuery -Query $Query
-$docs  = @($found.Rows)
-$TotalDiscovered = $docs.Count
-Write-Log "$TotalDiscovered document(s) matched (vault reports $($found.Total) total)" 'OK'
-if ($MaxDocuments -gt 0 -and $found.Total -gt $MaxDocuments) {
-    Write-Log "MaxDocuments $MaxDocuments - this run covers only the first $TotalDiscovered of $($found.Total)" 'WARN'
+if ($IdFile) {
+    Write-Log "Document list: $IdFile (no query)"
+    $docs = @(Import-IdFile -Path $IdFile)
+    if ($MaxDocuments -gt 0 -and $docs.Count -gt $MaxDocuments) {
+        Write-Log "MaxDocuments $MaxDocuments - taking the first $MaxDocuments of $($docs.Count)" 'WARN'
+        $docs = @($docs | Select-Object -First $MaxDocuments)
+    }
+    $TotalDiscovered = $docs.Count
 }
+else {
+    $Query = if ($Vql) { $Vql } else { New-DocumentVql }
+    Write-Log "VQL: $Query"
 
-if ($TotalDiscovered -eq 0) {
-    Write-Log 'Nothing matched the query - check the filters against document-fields.csv.' 'WARN'
-    exit 0
+    if ($Action -eq 'REPORT') { Export-DocumentReference }
+
+    $found = Invoke-VaultQuery -Query $Query
+    $docs  = @($found.Rows)
+    $TotalDiscovered = $docs.Count
+    Write-Log "$TotalDiscovered document(s) matched (vault reports $($found.Total) total)" 'OK'
+    if ($MaxDocuments -gt 0 -and $found.Total -gt $MaxDocuments) {
+        Write-Log "MaxDocuments $MaxDocuments - this run covers only the first $TotalDiscovered of $($found.Total)" 'WARN'
+    }
+    if ($TotalDiscovered -eq 0) {
+        Write-Log 'Nothing matched the query - check the filters.' 'WARN'
+        exit 0
+    }
 }
 
 $docs | Export-Csv -LiteralPath $DocumentsCsv -NoTypeInformation -Encoding UTF8
@@ -762,7 +827,7 @@ if ($SamplePercent -gt 0 -and $SamplePercent -lt 100) {
 
 if ($Action -eq 'REPORT') {
     Write-Log '----------------------------------------------------------------'
-    Write-Log "REPORT only - nothing was changed. Review $DocumentsCsv, then set MODE = DRYRUN." 'OK'
+    Write-Log "REPORT only - nothing was changed. Review $DocumentsCsv, then set MODE = EXPORT." 'OK'
     Write-Log "Log              : $TranscriptLog"
     exit 0
 }

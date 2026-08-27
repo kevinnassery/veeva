@@ -1,8 +1,20 @@
 # Veeva Vault RIM tooling
 
-*Updated 2026-08-26 22:14 EDT*
+*Updated 2026-08-26 22:23 EDT*
 
 ## Get the scripts
+
+Once:
+
+```
+curl.exe -sLo refresh.bat https://raw.githubusercontent.com/kevinnassery/veeva/main/refresh.bat
+```
+
+Then `refresh.bat` pulls everything else, and pulls it again whenever you want the latest.
+It overwrites the scripts and README, downloads `documents.ini` only if it is missing, and
+never touches `sourcedocids.txt` or anything in `OutputRoot`.
+
+Individually, if you prefer:
 
 ```
 curl.exe -sLO https://raw.githubusercontent.com/kevinnassery/veeva/main/probe.bat
@@ -89,18 +101,27 @@ Written to `OutputRoot`: `probe-output.txt`, `document-fields.csv`, `document-ty
 ## Export source documents
 
 1. In `documents.ini` set `VaultDNS` and `OutputRoot`. Leave `SessionId` blank.
-2. Run `probe.bat`. Read `probe-output.txt`.
-3. Set the filters:
+2. Run `probe.bat` once to confirm you can log in.
+3. Put the document ids in a `.txt`, one per line, next to the scripts:
 
 ```
-Product      = 00P000000000310
-Where        = binder__v = false
-ExcludeTypes = Audit Trail, Device Submissions, Staged, Submission Receipt Binder, Submissions Archive
+id
+771
+772
+773
 ```
 
-4. `MODE = REPORT`, run `Run-Documents.bat`. Confirm the `documents.csv` row count matches
-   the Library view. If it does not, go back to step 3.
-5. `MODE = EXPORT`, `MaxDocuments = 10`. Run. Check the staged paths in `document-results.csv`.
+4. Point at it and check the list is read correctly:
+
+```
+IdFile = sourcedocids.txt
+MODE   = REPORT
+```
+
+Run `Run-Documents.bat`. Confirm the `documents.csv` count.
+
+5. `MODE = EXPORT`, `MaxDocuments = 10`. Run. Check the staged paths in
+   `document-results.csv`.
 6. Clear `MaxDocuments`. Run.
 
 Source files only is the default:
@@ -114,6 +135,10 @@ ExportText        = false
 
 Files land on the source vault's File Staging under a job-id folder. Re-runs skip rows
 already `SUCCESS`; old reports are renamed, never deleted.
+
+With `IdFile` set, nothing is queried and no type filtering happens. To have the script
+find the documents itself instead, leave `IdFile` blank and use `Product`,
+`IncludeTypes`, `Where`, or `Vql`.
 
 ## Update document fields
 
