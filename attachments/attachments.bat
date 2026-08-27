@@ -1,5 +1,5 @@
 @echo off
-REM VERSION 2026.08.27-3
+REM VERSION 2026.08.27-4
 setlocal
 
 REM ============================================================================
@@ -17,11 +17,11 @@ REM
 REM  Re-running skips any attachment already recorded SUCCESS.
 REM ============================================================================
 
-set "PS1=%~dp0Transfer-VaultAttachments.ps1"
+set "PS1=%~dp0Sync-VaultAttachments.ps1"
 set "CFG=%~dp0attachments.ini"
 
 if not exist "%PS1%" (
-  echo ERROR: Transfer-VaultAttachments.ps1 not found next to this .bat file.
+  echo ERROR: Sync-VaultAttachments.ps1 not found next to this .bat file.
   goto :end
 )
 if not exist "%CFG%" (

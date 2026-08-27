@@ -1,6 +1,6 @@
 # Veeva Vault RIM tooling
 
-*Updated 2026-08-27 18:48 EDT*
+*Updated 2026-08-27 19:02 EDT*
 
 ## Get the scripts
 
@@ -187,38 +187,33 @@ real user id, whether that account is Admin there, and which staging folders exi
 
 ## Attachments
 
-The unit of work is the attachment, not the document. Most documents carry none, some
-carry many, and the document count says nothing about the volume — so this always starts
-with a report.
+Reconciles rather than copies: given a map of source document id to target document id,
+it compares both sides and delivers only what the target is missing. A document whose
+attachments are already there costs two listing calls and nothing else, so it is safe to
+run again after any interruption.
 
-1. In `attachments.ini` set `SourceVaultDNS` and `OutputRoot`. Leave `SessionId` blank.
-2. `Mode = REPORT`, `MaxDocuments = 200`, run `attachments.bat`. Nothing is moved and the
-   target vault is not contacted.
-3. Read the summary: how many attachments across those documents, and their total size.
-   Multiply out against your full id list before going further.
-4. Set `TargetVaultDNS` and `TargetPath`, then `Mode = TRANSFER`, `MaxDocuments = 5`. Run.
-   Confirm the files arrive.
-5. Clear `MaxDocuments`. Run.
+1. Put the map in `docidmap.csv` — a header row plus old and new document id columns.
+   The usual spellings are detected; unusual ones stop the run and are named.
+2. In `attachments.ini` set the two vault DNS values, `TargetPath` and `OutputRoot`.
+   Everything shared with `transfer.ini` means the same thing — copy it across.
+3. `Mode = REPORT`, `MaxDocuments = 200`, run `attachments.bat`. Nothing changes.
+4. Read the summary: source attachments, already present, missing, and same-name-
+   different-MD5. Multiply the missing count out against the full map.
+5. `Mode = SYNC`, `MaxDocuments = 5`. Run. Confirm the attachments appear on the target
+   documents.
+6. Clear `MaxDocuments`. Run.
 
-Each attachment lands at:
+Each file is staged at `<TargetPath>/<target doc id>/attachments/<source attachment id>/`
+then attached with `POST /objects/documents/attachments/batch`, 500 per call.
 
-```
-<TargetPath>/<source doc id>/attachments/<attachment id>/<filename>
-```
+**Matching is by filename**, because that is how Vault matches too — posting a name that
+already exists creates a new *version* of that attachment rather than a second one. A
+name present on both sides with a different MD5 is reported `DIFFERS` and left alone
+unless `ReplaceDiffering` is set.
 
-The attachment id is in the path because one document can carry two attachments with the
-same filename, which the document folder alone would not keep apart.
-
-`Workers` applies to `TRANSFER` only and shards by document, so one document's
-attachments stay on one worker. Everything else behaves like the document transfer:
-bounded local disk, resumable, re-runs skip anything already `SUCCESS`.
-
-**Getting the files onto target documents is a separate step and is not built.**
-`POST /objects/documents/attachments/batch` takes a CSV of `document_id__v`,
-`filename__v`, `file` (a staging path), 500 per batch — but it needs the *target*
-document id for each source document, and nothing here builds that mapping yet.
-`attachment-results.csv` records the source document id and staged path for every file,
-which is the half of the mapping that can be produced without it.
+If a run dies between staging and attaching, `Mode = ATTACH` finishes the files already
+staged without re-downloading anything — `STAGED` rows are deliberately not treated as
+done.
 
 ## curl
 

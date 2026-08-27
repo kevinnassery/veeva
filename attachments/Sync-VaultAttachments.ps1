@@ -1,35 +1,41 @@
 <#
 .SYNOPSIS
-    Copy document ATTACHMENTS from one Vault to another, one file at a time.
+    Reconcile document attachments between two Vaults: find what the target is missing
+    and deliver only that.
 
 .DESCRIPTION
-    Same shape as Transfer-VaultDocuments.ps1, one level down: for every document id in
-    the list it enumerates that document's attachments, then for each attachment
-    downloads it from the SOURCE vault, uploads it to the TARGET vault's File Staging,
-    and deletes the local copy.
+    Given a map of source document id to target document id, for each pair:
 
-    A document has zero or many attachments, so the unit of work here is the attachment,
-    not the document. The results file has one row per attachment and resume is keyed on
-    document id plus attachment id.
+      1. List the attachments on the SOURCE document.
+      2. List the attachments on the TARGET document.
+      3. Work out which source attachments are missing on the target.
+      4. Download each missing one, upload it to the target's File Staging, and attach
+         it to the target document.
 
-    MODE = REPORT lists what is there and projects the total size without moving
-    anything. Start there - attachment volume is not knowable from the document count.
+    Comparing before copying is what makes this safe to run repeatedly. A document whose
+    attachments are already present costs two listing calls and nothing else, and a run
+    interrupted anywhere can simply be run again.
+
+    Attachments are matched by filename, which is also how Vault itself decides: posting
+    an attachment whose name already exists creates a new VERSION of it rather than a
+    second attachment. Matching on anything looser would silently produce version churn.
+    The listing also carries an MD5, so a name that matches with a different checksum is
+    reported as DIFFERS and left alone unless you ask for it.
+
+    Three modes:
+      REPORT - diff only. Downloads nothing, uploads nothing, changes nothing.
+      SYNC   - diff, then stage and attach everything missing.
+      ATTACH - attach files already staged by an earlier interrupted SYNC.
 
 .NOTES
     Windows PowerShell 5.1 compatible.
-    SOURCE, relative to https://<SourceVaultDNS>/api/<ApiVersion>:
-      POST /auth
-      GET  /objects/documents/{id}/attachments                  list, with size and name
-      GET  /objects/documents/{id}/attachments/{aid}/file        the attachment itself
+    SOURCE:
+      GET  /objects/documents/{id}/attachments                   what exists
+      GET  /objects/documents/{id}/attachments/{aid}/file         the bytes
     TARGET:
-      POST /auth
-      POST /services/file_staging/upload                         resumable session
-      PUT  /services/file_staging/upload/{id}                    one part
-      POST /services/file_staging/upload/{id}                    commit
-
-    Attaching the staged files to documents in the TARGET vault is a separate step and
-    is NOT done here - see the note at the end of attachments.ini. It needs a source
-    document id to target document id mapping, which nothing in this repo has yet.
+      GET  /objects/documents/{id}/attachments                   what is already there
+      POST /services/file_staging/upload  (+ PUT parts, POST commit)
+      POST /objects/documents/attachments/batch                  attach, 500 per batch
 #>
 
 [CmdletBinding(SupportsShouldProcess = $true)]
@@ -64,13 +70,27 @@ param(
     [string] $ApiVersion = 'v26.2',
 
     # ---- What to do ----
-    # REPORT   = list every attachment and project the total size. Moves nothing.
-    # TRANSFER = download each attachment and upload it to the target vault's staging.
-    #
-    # Always start at REPORT. A document count says nothing about attachment volume -
-    # one document can carry dozens, most carry none.
-    [ValidateSet('REPORT', 'TRANSFER')]
+    # REPORT = compare both sides and report the gap. Changes nothing, downloads
+    #          nothing. Always start here.
+    # SYNC   = deliver every missing attachment: download, stage, attach.
+    # ATTACH = attach files an earlier interrupted SYNC already staged, and stop.
+    [ValidateSet('REPORT', 'SYNC', 'ATTACH')]
     [string] $Mode       = 'REPORT',
+
+    # CSV mapping source document id to target document id, with a header row. Column
+    # names are detected from the usual spellings; set them explicitly if yours differ.
+    [string] $IdMap            = 'docidmap.csv',
+    [string] $MapSourceColumn  = '',
+    [string] $MapTargetColumn  = '',
+
+    # An attachment whose name matches on both sides but whose MD5 differs is reported
+    # as DIFFERS and left alone. Set this to send it anyway, which Vault records as a
+    # new VERSION of the existing attachment rather than a second attachment.
+    [switch] $ReplaceDiffering,
+
+    # Attachments per bulk attach call. Vault's ceiling is 500.
+    [ValidateRange(1, 500)]
+    [int]    $AttachBatchSize  = 500,
 
     # ---- What to move ----
     [string] $IdFile     = 'sourcedocids.txt',
@@ -112,7 +132,7 @@ param(
     [int]    $MaxRetries = 4
 )
 
-$ScriptVersion = '2026.08.27-3'
+$ScriptVersion = '2026.08.27-4'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -147,8 +167,8 @@ function ConvertTo-StagingUrlPath {
 # Configuration
 # --------------------------------------------------------------------------------------
 
-$IntKeys    = @('MaxDocuments', 'ReserveMB', 'PartSizeMB', 'MaxRetries', 'Workers')
-$SwitchKeys = @('SeparateCredentials')
+$IntKeys    = @('MaxDocuments', 'ReserveMB', 'PartSizeMB', 'MaxRetries', 'Workers', 'AttachBatchSize')
+$SwitchKeys = @('SeparateCredentials', 'ReplaceDiffering')
 
 if ([string]::IsNullOrWhiteSpace($ConfigFile)) {
     $here = $PSScriptRoot
@@ -181,7 +201,7 @@ if (Test-Path -LiteralPath $ConfigFile) {
 }
 else { Write-Warning "No attachments.ini found at $ConfigFile - relying on command-line arguments." }
 
-if ($Mode -eq 'TRANSFER' -and [string]::IsNullOrWhiteSpace($TargetPath)) {
+if ($Mode -ne 'REPORT' -and [string]::IsNullOrWhiteSpace($TargetPath)) {
     throw @'
 TargetPath is not set.
 
@@ -193,7 +213,7 @@ whether your account is Admin there, then set TargetPath - for example
 }
 
 $needTarget = @('SourceVaultDNS', 'OutputRoot')
-if ($Mode -eq 'TRANSFER') { $needTarget = @('SourceVaultDNS', 'TargetVaultDNS', 'OutputRoot') }
+if ($Mode -ne 'REPORT') { $needTarget = @('SourceVaultDNS', 'TargetVaultDNS', 'OutputRoot') }
 foreach ($n in $needTarget) {
     if ([string]::IsNullOrWhiteSpace((Get-Variable -Name $n -ValueOnly))) {
         throw "$n is not set. Add it to $ConfigFile, or pass -$n on the command line."
@@ -587,11 +607,14 @@ function Read-WorkerLog {
 }
 
 function Get-DocumentAttachment {
-    # Every attachment on the latest version of a document. The listing carries name and
-    # size, so the size projection costs nothing extra and no file has to be fetched to
-    # find out how big it is.
-    param([Parameter(Mandatory)][string]$DocId)
-    $r = Invoke-VaultApi -Side Source -Method GET -Path "/objects/documents/$DocId/attachments"
+    # Every attachment on the latest version of a document, from either vault. The
+    # listing carries name, size and MD5, so the comparison and the size projection both
+    # come free - no file has to be fetched to find out what is there.
+    param(
+        [Parameter(Mandatory)][ValidateSet('Source','Target')][string]$Side,
+        [Parameter(Mandatory)][string]$DocId
+    )
+    $r = Invoke-VaultApi -Side $Side -Method GET -Path "/objects/documents/$DocId/attachments"
     $out = New-Object System.Collections.ArrayList
     foreach ($a in @(Get-Field $r 'data' @())) {
         $aid = "$(Get-Field $a 'id' '')"
@@ -606,6 +629,93 @@ function Get-DocumentAttachment {
         })
     }
     return $out
+}
+
+function Import-IdMap {
+    # source document id -> target document id, from a CSV with a header row.
+    #
+    # Column names are guessed from the usual spellings rather than dictated, because
+    # this file comes from whatever produced the load and its headers are not ours to
+    # choose. An unguessable header is an error naming what was found, not a silent
+    # mis-read of the first two columns.
+    param([Parameter(Mandatory)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { throw "IdMap not found: $Path" }
+
+    $rows = @(Import-Csv -LiteralPath $Path)
+    if ($rows.Count -eq 0) { throw "IdMap $Path has no rows" }
+    $headers = @($rows[0].PSObject.Properties.Name)
+
+    $srcCol = $MapSourceColumn
+    $tgtCol = $MapTargetColumn
+    if (-not $srcCol) {
+        foreach ($c in @('source_id','sourceid','old_id','oldid','source_document_id','from_id','SourceDocId','source','old')) {
+            $hit = @($headers | Where-Object { $_ -replace '[^a-z0-9]', '' -ieq ($c -replace '[^a-z0-9]', '') })
+            if ($hit.Count) { $srcCol = $hit[0]; break }
+        }
+    }
+    if (-not $tgtCol) {
+        foreach ($c in @('target_id','targetid','new_id','newid','target_document_id','to_id','TargetDocId','target','new')) {
+            $hit = @($headers | Where-Object { $_ -replace '[^a-z0-9]', '' -ieq ($c -replace '[^a-z0-9]', '') })
+            if ($hit.Count) { $tgtCol = $hit[0]; break }
+        }
+    }
+    if (-not $srcCol -or -not $tgtCol) {
+        throw "Could not work out which columns hold the ids in $Path. Headers found: $($headers -join ', '). Set MapSourceColumn and MapTargetColumn."
+    }
+
+    $map = @{}
+    $bad = 0
+    foreach ($row in $rows) {
+        $a = "$(Get-Field $row $srcCol '')".Trim()
+        $b = "$(Get-Field $row $tgtCol '')".Trim()
+        if ($a -notmatch '^\d+$' -or $b -notmatch '^\d+$') { $bad++; continue }
+        $map[$a] = $b
+    }
+    if ($bad) { Write-Log "$bad row(s) in $Path had no usable id pair and were skipped" 'WARN' }
+    if ($map.Count -eq 0) { throw "No usable id pairs in $Path (columns '$srcCol' -> '$tgtCol')" }
+    Write-Log "$($map.Count) id pair(s) from $Path (column '$srcCol' -> '$tgtCol')" 'OK'
+    return $map
+}
+
+function Invoke-AttachBatch {
+    # Attach staged files to target documents. JSON rather than CSV: the filenames carry
+    # commas and quotes often enough that RFC 4180 escaping is a liability here, and the
+    # endpoint takes either.
+    #
+    # Returns the per-row outcomes in request order - the response carries no key to
+    # match on, only the new attachment id.
+    param([Parameter(Mandatory)][array]$Rows)
+
+    $items = foreach ($r in $Rows) {
+        # Vault's own example uses a staging path with no leading slash.
+        $file = "$($r.StagedPath)".TrimStart('/')
+        '{{"document_id__v":"{0}","filename__v":{1},"file":{2}}}' -f `
+            $r.TargetDocId, (ConvertTo-Json $r.Name -Compress), (ConvertTo-Json $file -Compress)
+    }
+    $payload = '[' + ($items -join ',') + ']'
+
+    $resp = Invoke-VaultApi -Side Target -Method POST -Path '/objects/documents/attachments/batch' `
+                -ContentType 'application/json' -Body ([Text.Encoding]::UTF8.GetBytes($payload))
+
+    $out = @(Get-Field $resp 'data' @())
+    $results = New-Object System.Collections.ArrayList
+    for ($i = 0; $i -lt $Rows.Count; $i++) {
+        $row = if ($i -lt $out.Count) { $out[$i] } else { $null }
+        $st  = "$(Get-Field $row 'responseStatus' 'ERROR')"
+        $msg = ''
+        if ($st -ne 'SUCCESS') {
+            $errs = @(Get-Field $row 'errors' @())
+            $msg  = ($errs | ForEach-Object { "$(Get-Field $_ 'type'): $(Get-Field $_ 'message')" }) -join '; '
+            if (-not $msg) { $msg = if ($row) { ($row | ConvertTo-Json -Depth 5 -Compress) } else { 'no result returned for this row' } }
+        }
+        [void]$results.Add([pscustomobject]@{
+            Status       = $st
+            Message      = $msg
+            AttachmentId = "$(Get-Field $row 'id' '')"
+            Version      = "$(Get-Field $row 'version' '')"
+        })
+    }
+    return $results
 }
 
 function Save-AttachmentFile {
@@ -654,7 +764,7 @@ function Get-FreeSpace {
 # Main
 # --------------------------------------------------------------------------------------
 
-Write-Log "Transfer-VaultAttachments.ps1 $ScriptVersion"
+Write-Log "Sync-VaultAttachments.ps1 $ScriptVersion"
 Write-Log "Source: $SourceVaultDNS"
 Write-Log "Target: $TargetVaultDNS  ->  $(if ($TargetPath) { $TargetPath } else { '(staging root)' })"
 Write-Log "Work  : $WorkDir"
@@ -665,12 +775,15 @@ if (-not (Test-Path -LiteralPath $IdFile)) {
     $beside = Join-Path $here2 $IdFile
     if (Test-Path -LiteralPath $beside) { $IdFile = $beside }
 }
-if (-not (Test-Path -LiteralPath $IdFile)) { throw "IdFile not found: $IdFile" }
+$haveIdFile = Test-Path -LiteralPath $IdFile
+if (-not $haveIdFile) {
+    Write-Log "No $IdFile - every document in the map will be checked" 'WARN'
+}
 
 $ids  = New-Object System.Collections.ArrayList
 $seen = @{}
 $n = 0
-foreach ($raw in (Get-Content -LiteralPath $IdFile)) {
+foreach ($raw in $(if ($haveIdFile) { Get-Content -LiteralPath $IdFile } else { @() })) {
     $n++
     $t = "$raw".Trim().Trim([char]0xFEFF).Trim('"', "'").TrimEnd(',').Trim()
     if (-not $t -or $t.StartsWith('#')) { continue }
@@ -680,8 +793,24 @@ foreach ($raw in (Get-Content -LiteralPath $IdFile)) {
     $seen[$t] = $true
     [void]$ids.Add($t)
 }
-if ($ids.Count -eq 0) { throw "No document ids found in $IdFile" }
+if ($ids.Count -eq 0 -and $haveIdFile) { throw "No document ids found in $IdFile" }
 Write-Log "$($ids.Count) document id(s) from $IdFile" 'OK'
+
+# The map is what makes this possible at all: without a target id there is nothing to
+# compare against and nowhere to deliver. It defines the set of work; IdFile, if there
+# is one, only narrows it.
+$idMap = Import-IdMap -Path $IdMap
+
+if (-not $haveIdFile) { $ids = @($idMap.Keys) }
+$mapped   = @($ids | Where-Object { $idMap.ContainsKey($_) })
+$unmapped = @($ids | Where-Object { -not $idMap.ContainsKey($_) })
+if ($unmapped.Count) {
+    Write-Log "$($unmapped.Count) id(s) in $IdFile have no target in the map and are skipped" 'WARN'
+    foreach ($u in ($unmapped | Select-Object -First 5)) { Write-Log "  unmapped: $u" 'WARN' }
+    if ($unmapped.Count -gt 5) { Write-Log "  ... and $($unmapped.Count - 5) more" 'WARN' }
+}
+$ids = $mapped
+if ($ids.Count -eq 0) { throw "None of those ids appear in $IdMap - nothing to reconcile." }
 
 # Prior results, so a re-run picks up where it stopped.
 $done  = @{}
@@ -708,7 +837,9 @@ if (Test-Path -LiteralPath $ResultsCsv) {
             $rk = "$(Get-Field $row 'Key' '')"
             if (-not $rk) { continue }
             $prior[$rk] = $row
-            if ((Get-Field $row 'Status') -eq 'SUCCESS') { $done[$rk] = $true }
+            # STAGED is deliberately NOT done - the file is up but nothing points at it
+            # yet, and ATTACH mode exists to finish exactly those.
+            if ((Get-Field $row 'Status') -in @('ATTACHED', 'PRESENT')) { $done[$rk] = $true }
         }
         if ($done.Count) { Write-Log "$($done.Count) already transferred - skipping them" }
     }
@@ -725,10 +856,8 @@ if ($MaxDocuments -gt 0 -and $pending.Count -gt $MaxDocuments) {
 Write-Log "$($pending.Count) document(s) to move"
 
 if (-not $script:Session['Source']) { Connect-Vault -Side Source } else { Write-Log 'Source: using the configured session id' }
-if ($Mode -eq 'TRANSFER') {
-    if (-not $script:Session['Target']) { Connect-Vault -Side Target } else { Write-Log 'Target: using the configured session id' }
-}
-else { Write-Log 'REPORT mode - the target vault is not contacted' }
+# REPORT still needs the target: the whole point is comparing against what is there.
+if (-not $script:Session['Target']) { Connect-Vault -Side Target } else { Write-Log 'Target: using the configured session id' }
 
 # --------------------------------------------------------------------------------------
 # Parallel mode
@@ -744,7 +873,7 @@ else { Write-Log 'REPORT mode - the target vault is not contacted' }
 # sequential path stays the single implementation, with nothing duplicated to drift.
 # --------------------------------------------------------------------------------------
 
-if ($Mode -eq 'TRANSFER' -and $Workers -gt 1 -and $pending.Count -gt 1) {
+if ($Mode -eq 'SYNC' -and $Workers -gt 1 -and $pending.Count -gt 1) {
 
     if (-not $script:Cred['Source'] -or -not $script:Cred['Target']) {
         throw @'
@@ -785,7 +914,7 @@ Blank SourceSessionId and TargetSessionId in attachments.ini and run again.
                 '-OutputRoot',      "`"$wDir`"",
                 '-WorkDir',         "`"$(Join-Path $wDir 'work')`"",
                 '-CredentialFile',  "`"$credPath`"",
-                '-Workers', '1', '-MaxDocuments', '0', '-ExistingResults', 'Restart', '-Mode', 'TRANSFER'
+                '-Workers', '1', '-MaxDocuments', '0', '-ExistingResults', 'Restart', '-Mode', 'SYNC'
             )
             $procs += Start-Process -FilePath 'powershell.exe' -ArgumentList $argList `
                         -WindowStyle Hidden -PassThru
@@ -874,89 +1003,169 @@ function Save-Results {
 }
 
 $i = 0
-$moved = [long]0
-$seenAttachments = 0
+$moved     = [long]0
+$stat      = @{ Src = 0; Present = 0; Missing = 0; Differs = 0; Staged = 0; Attached = 0; NoMap = 0; NoAtt = 0 }
+$attachQ   = New-Object System.Collections.ArrayList
 
-foreach ($id in $pending) {
-    $i++
-    $docPrefix = "[$i/$($pending.Count)] doc $id"
+function Send-AttachQueue {
+    # Attach whatever is queued and write the outcome back onto the rows already in the
+    # results file, so an interruption leaves STAGED rows that a later ATTACH run
+    # finishes rather than files stranded on staging with nothing pointing at them.
+    param([switch]$Force)
+    if ($attachQ.Count -eq 0) { return }
+    if (-not $Force -and $attachQ.Count -lt $AttachBatchSize) { return }
 
-    # A document with no attachments is the common case, so it must be cheap and quiet.
-    try { $attachments = @(Get-DocumentAttachment -DocId $id) }
-    catch {
-        Write-Log "$docPrefix - ERROR listing attachments: $_" 'ERROR'
-        [void]$results.Add([pscustomobject][ordered]@{
-            Key = "$id`:LIST"; DocId = $id; AttachmentId = ''; Name = ''; SizeBytes = 0
-            Version = ''; TargetPath = ''; Parts = 0; Status = 'ERROR'; Message = "$_"
-            StartedUtc = (Get-Date).ToUniversalTime().ToString('s')
-            FinishedUtc = (Get-Date).ToUniversalTime().ToString('s')
-        })
+    while ($attachQ.Count -gt 0) {
+        $take  = [math]::Min($AttachBatchSize, $attachQ.Count)
+        $batch = @($attachQ[0..($take - 1)])
+        $attachQ.RemoveRange(0, $take)
+
+        Write-Log "attaching $($batch.Count) file(s) to target documents"
+        try { $outcomes = @(Invoke-AttachBatch -Rows $batch) }
+        catch {
+            foreach ($b in $batch) { $b.Record.Status = 'ERROR'; $b.Record.Message = "attach failed: $_" }
+            Write-Log "attach batch failed: $_" 'ERROR'
+            Save-Results
+            continue
+        }
+        for ($k = 0; $k -lt $batch.Count; $k++) {
+            $o = $outcomes[$k]
+            if ($o.Status -eq 'SUCCESS') {
+                $batch[$k].Record.Status  = 'ATTACHED'
+                $batch[$k].Record.Message = "attachment $($o.AttachmentId) v$($o.Version)"
+                $stat.Attached++
+            }
+            else {
+                $batch[$k].Record.Status  = 'ERROR'
+                $batch[$k].Record.Message = $o.Message
+                Write-Log "attach failed for $($batch[$k].Name) on doc $($batch[$k].TargetDocId): $($o.Message)" 'ERROR'
+            }
+        }
         Save-Results
+        if (-not $Force) { break }
+    }
+}
+
+# ATTACH picks up where an interrupted SYNC stopped: rows already staged, never attached.
+if ($Mode -eq 'ATTACH') {
+    foreach ($k in $prior.Keys) {
+        $row = $prior[$k]
+        if ((Get-Field $row 'Status') -ne 'STAGED') { continue }
+        [void]$attachQ.Add([pscustomobject]@{
+            Key = "$k"; TargetDocId = "$(Get-Field $row 'TargetDocId' '')"
+            Name = "$(Get-Field $row 'Name' '')"; StagedPath = "$(Get-Field $row 'TargetPath' '')"
+            Record = $row
+        })
+    }
+    Write-Log "$($attachQ.Count) staged file(s) waiting to be attached"
+    Send-AttachQueue -Force
+}
+else {
+
+foreach ($srcId in $pending) {
+    $i++
+    $tgtId     = $idMap[$srcId]
+    $docPrefix = "[$i/$($pending.Count)] $srcId -> $tgtId"
+
+    try { $srcAtt = @(Get-DocumentAttachment -Side Source -DocId $srcId) }
+    catch {
+        Write-Log "$docPrefix - ERROR listing source attachments: $_" 'ERROR'
+        continue
+    }
+    if ($srcAtt.Count -eq 0) { $stat.NoAtt++; continue }
+    $stat.Src += $srcAtt.Count
+
+    try { $tgtAtt = @(Get-DocumentAttachment -Side Target -DocId $tgtId) }
+    catch {
+        Write-Log "$docPrefix - ERROR listing target attachments: $_" 'ERROR'
         continue
     }
 
-    if ($attachments.Count -eq 0) { continue }
-    $seenAttachments += $attachments.Count
-    $totalBytes = ($attachments | Measure-Object -Property Size -Sum).Sum
-    Write-Log "$docPrefix - $($attachments.Count) attachment(s), $(Format-Bytes $totalBytes)"
+    # Filename is the key because it is the key Vault itself uses: posting a name that
+    # already exists creates a new version of that attachment, not a second one.
+    $tgtByName = @{}
+    foreach ($t in $tgtAtt) { $tgtByName[$t.Name.ToLowerInvariant()] = $t }
 
-    $n = 0
-    foreach ($att in $attachments) {
-        $n++
-        $key    = "$id`:$($att.Id)"
-        $prefix = "$docPrefix att $n/$($attachments.Count) [$($att.Id)]"
+    foreach ($att in $srcAtt) {
+        $key  = "$srcId`:$($att.Id)"
+        $name = $att.Name
+        $have = $null
+        if ($tgtByName.ContainsKey($name.ToLowerInvariant())) { $have = $tgtByName[$name.ToLowerInvariant()] }
 
-        if ($done.ContainsKey($key)) { Write-Log "$prefix - skipped (already transferred)"; continue }
+        $state = 'MISSING'
+        if ($have) {
+            $state = 'PRESENT'
+            if ($att.Checksum -and $have.Checksum -and $att.Checksum -ne $have.Checksum) { $state = 'DIFFERS' }
+        }
+        if ($state -eq 'PRESENT') { $stat.Present++ }
+        elseif ($state -eq 'DIFFERS') { $stat.Differs++ }
+        else { $stat.Missing++ }
 
-        $record = [ordered]@{
-            Key = $key; DocId = $id; AttachmentId = $att.Id; Name = $att.Name
-            SizeBytes = $att.Size; Version = $att.Version; TargetPath = ''; Parts = 0
-            Status = ''; Message = ''
+        if ($done.ContainsKey($key)) { continue }
+
+        $record = [pscustomobject][ordered]@{
+            Key = $key; SourceDocId = $srcId; TargetDocId = $tgtId
+            AttachmentId = $att.Id; Name = $name; SizeBytes = $att.Size
+            Version = $att.Version; Checksum = $att.Checksum
+            TargetPath = ''; Parts = 0
+            Status = $state; Message = ''
             StartedUtc = (Get-Date).ToUniversalTime().ToString('s'); FinishedUtc = ''
         }
+
+        $wanted = ($state -eq 'MISSING') -or ($state -eq 'DIFFERS' -and $ReplaceDiffering)
+
+        if ($Mode -eq 'REPORT' -or -not $wanted) {
+            if ($state -eq 'DIFFERS' -and -not $ReplaceDiffering) {
+                $record.Message = 'same name, different MD5 - left alone. ReplaceDiffering sends it as a new version.'
+                Write-Log "$docPrefix - DIFFERS $name" 'WARN'
+            }
+            $record.FinishedUtc = (Get-Date).ToUniversalTime().ToString('s')
+            [void]$results.Add($record)
+            Save-Results
+            continue
+        }
+
         $local = $null
         try {
-            if ($Mode -eq 'REPORT') {
-                $record.Status  = 'LISTED'
-                $record.Message = 'REPORT only'
-                Write-Log "$prefix - $($att.Name), $(Format-Bytes $att.Size)"
-            }
-            elseif ($PSCmdlet.ShouldProcess("attachment $($att.Id) of document $id", 'Transfer')) {
+            if ($PSCmdlet.ShouldProcess("attachment $name of document $srcId -> $tgtId", 'Deliver')) {
                 $free = Get-FreeSpace -Path $WorkDir
                 if ($free -ge 0 -and $att.Size -gt 0 -and ($free - $att.Size) -lt ($ReserveMB * 1MB)) {
                     throw "not enough disk: $(Format-Bytes $att.Size) needed, $(Format-Bytes $free) free, ${ReserveMB}MB reserve"
                 }
 
-                Write-Log "$prefix - downloading $($att.Name) ($(Format-Bytes $att.Size))"
-                $local = Save-AttachmentFile -DocId $id -AttachmentId $att.Id -FileName $att.Name -Destination $WorkDir
+                Write-Log "$docPrefix - $state $name ($(Format-Bytes $att.Size)) - downloading"
+                $local = Save-AttachmentFile -DocId $srcId -AttachmentId $att.Id -FileName $name -Destination $WorkDir
                 $record.SizeBytes = $local.Size
 
-                # One folder per source document id, then per attachment id, so two
-                # attachments sharing a filename on the same document cannot collide
-                # either - which the document-level layout alone would not prevent.
-                $folder = if ($TargetPath) { $TargetPath.TrimEnd('/') + "/$id/attachments/$($att.Id)" }
-                          else { "/$id/attachments/$($att.Id)" }
+                # Keyed by TARGET document id: this is staging on the target vault, and
+                # the attachment id keeps two same-named files on one document apart.
+                $folder = $TargetPath.TrimEnd('/') + "/$tgtId/attachments/$($att.Id)"
                 $remote = $folder + '/' + $local.Name
                 $record.TargetPath = $remote
                 New-StagingFolder -Path $folder
 
-                Write-Log "$prefix - uploading to $remote"
+                Write-Log "$docPrefix - uploading to $remote"
                 $up = Send-StagingFile -LocalPath $local.Path -RemotePath $remote -Size $local.Size
                 $record.Parts  = $up.Parts
-                $record.Status = 'SUCCESS'
+                $record.Status = 'STAGED'
                 $moved += $local.Size
-                Write-Log "$prefix - OK ($($local.Name), $(Format-Bytes $local.Size), $($up.Parts) part(s))" 'OK'
+                $stat.Staged++
+
+                [void]$attachQ.Add([pscustomobject]@{
+                    Key = $key; TargetDocId = $tgtId; Name = $local.Name
+                    StagedPath = $remote; Record = $record
+                })
             }
             else {
                 $record.Status  = 'WHATIF'
-                $record.Message = "would move $(Format-Bytes $att.Size)"
-                Write-Log "$prefix - WhatIf: would move $($att.Name) ($(Format-Bytes $att.Size))"
+                $record.Message = "would deliver $(Format-Bytes $att.Size)"
+                Write-Log "$docPrefix - WhatIf: would deliver $name"
             }
         }
         catch {
             $record.Status  = 'ERROR'
             $record.Message = "$_"
-            Write-Log "$prefix - ERROR: $_" 'ERROR'
+            Write-Log "$docPrefix - ERROR on $name : $_" 'ERROR'
         }
         finally {
             if ($local -and (Test-Path -LiteralPath $local.Path)) {
@@ -964,18 +1173,27 @@ foreach ($id in $pending) {
                     Remove-Item -LiteralPath $local.Path -Force -WhatIf:$false
                     $freeNow = Get-FreeSpace -Path $WorkDir
                     $freeTxt = if ($freeNow -ge 0) { ", $(Format-Bytes $freeNow) free" } else { '' }
-                    Write-Log "$prefix - scratch file deleted ($(Format-Bytes $local.Size)$freeTxt)"
+                    Write-Log "$docPrefix - scratch file deleted ($(Format-Bytes $local.Size)$freeTxt)"
                 }
                 catch { Write-Log "Could not delete $($local.Path): $_" 'WARN' }
             }
         }
+
         $record.FinishedUtc = (Get-Date).ToUniversalTime().ToString('s')
-        [void]$results.Add([pscustomobject]$record)
+        [void]$results.Add($record)
         Save-Results
+        Send-AttachQueue
     }
 }
 
-Write-Log "$seenAttachments attachment(s) found across $($pending.Count) document(s)"
+Send-AttachQueue -Force
+}
+
+Write-Log '----------------------------------------------------------------'
+Write-Log ("source attachments {0}   already present {1}   missing {2}   same name different MD5 {3}" -f `
+            $stat.Src, $stat.Present, $stat.Missing, $stat.Differs)
+Write-Log ("documents with no attachments {0}" -f $stat.NoAtt)
+if ($Mode -ne 'REPORT') { Write-Log ("staged {0}   attached {1}" -f $stat.Staged, $stat.Attached) }
 
 # Scratch should be empty. Anything still here is a file a crash or a kill left
 # behind, and it will sit there consuming disk until someone notices.
