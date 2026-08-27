@@ -77,6 +77,21 @@ param(
 
     [int]    $MaxDocuments = 0,
 
+    # How many documents to move at once. 1 keeps the original single-threaded path.
+    # Above 1, this process becomes a supervisor: it shards the outstanding ids, runs
+    # that many copies of itself, and merges their results at the end.
+    #
+    # Per-document time is dominated by round trips, not bytes, so this scales close to
+    # linearly until Vault's burst limit starts throttling. 4 is a safe starting point.
+    [ValidateRange(1, 16)]
+    [int]    $Workers = 1,
+
+    # Set by the supervisor on the workers it launches. A PSCredential exported with
+    # Export-CliXml, which on Windows is DPAPI-encrypted for the current user only - so
+    # a worker can authenticate, and re-authenticate when its session expires, without a
+    # password ever appearing on a command line or in the environment.
+    [string] $CredentialFile = '',
+
     # ---- Disk safety ----
     # Refuse to start a download unless this much free space would remain afterwards.
     # The run stops cleanly instead of filling the volume out from under everything.
@@ -93,7 +108,7 @@ param(
     [int]    $MaxRetries = 4
 )
 
-$ScriptVersion = '2026.08.26-14'
+$ScriptVersion = '2026.08.26-15'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -128,7 +143,7 @@ function ConvertTo-StagingUrlPath {
 # Configuration
 # --------------------------------------------------------------------------------------
 
-$IntKeys    = @('MaxDocuments', 'ReserveMB', 'PartSizeMB', 'MaxRetries')
+$IntKeys    = @('MaxDocuments', 'ReserveMB', 'PartSizeMB', 'MaxRetries', 'Workers')
 $SwitchKeys = @('SeparateCredentials')
 
 if ([string]::IsNullOrWhiteSpace($ConfigFile)) {
@@ -215,6 +230,13 @@ function Write-Log {
 # --------------------------------------------------------------------------------------
 
 $script:Session = @{ Source = $SourceSessionId; Target = $TargetSessionId }
+if ($CredentialFile) {
+    if (-not (Test-Path -LiteralPath $CredentialFile)) { throw "CredentialFile not found: $CredentialFile" }
+    $imported = Import-Clixml -LiteralPath $CredentialFile
+    if (-not $SourceCredential) { $SourceCredential = $imported }
+    if (-not $TargetCredential) { $TargetCredential = $imported }
+}
+
 $script:Cred    = @{ Source = $SourceCredential; Target = $TargetCredential }
 if (-not $SeparateCredentials) {
     if (-not $script:Cred['Source']) { $script:Cred['Source'] = $Credential }
@@ -591,6 +613,128 @@ Write-Log "$($pending.Count) document(s) to move"
 
 if (-not $script:Session['Source']) { Connect-Vault -Side Source } else { Write-Log 'Source: using the configured session id' }
 if (-not $script:Session['Target']) { Connect-Vault -Side Target } else { Write-Log 'Target: using the configured session id' }
+
+# --------------------------------------------------------------------------------------
+# Parallel mode
+#
+# Above one worker this process stops moving documents itself and becomes a supervisor:
+# it shards the outstanding ids, launches that many copies of THIS script - each in
+# single-worker mode, i.e. the same code path proven in production - and merges their
+# results at the end.
+#
+# Separate processes rather than runspaces on purpose. Each worker authenticates for
+# itself, so it can re-authenticate when its session expires; a shared session handed
+# out by the parent could not be refreshed from inside a worker. It also means the
+# sequential path stays the single implementation, with nothing duplicated to drift.
+# --------------------------------------------------------------------------------------
+
+if ($Workers -gt 1 -and $pending.Count -gt 1) {
+
+    if (-not $script:Cred['Source'] -or -not $script:Cred['Target']) {
+        throw @'
+Parallel mode needs a username and password, not a pasted session id: each worker
+authenticates for itself so it can re-authenticate when its session expires.
+
+Blank SourceSessionId and TargetSessionId in transfer.ini and run again.
+'@
+    }
+
+    $workerCount = [math]::Min($Workers, $pending.Count)
+    $parallelDir = Join-Path $OutputRoot 'transfer-workers'
+    if (Test-Path -LiteralPath $parallelDir) { Remove-Item -LiteralPath $parallelDir -Recurse -Force -WhatIf:$false }
+    New-Item -ItemType Directory -Path $parallelDir -Force -WhatIf:$false | Out-Null
+
+    # DPAPI-encrypted for this user only. Deleted in the finally below, whatever happens.
+    $credPath = Join-Path $parallelDir 'cred.xml'
+    $script:Cred['Source'] | Export-Clixml -LiteralPath $credPath -WhatIf:$false
+
+    try {
+        # Round robin, so a run of large documents cannot all land on one worker.
+        $shards = @{}
+        for ($w = 1; $w -le $workerCount; $w++) { $shards[$w] = New-Object System.Collections.ArrayList }
+        for ($n = 0; $n -lt $pending.Count; $n++) { [void]$shards[($n % $workerCount) + 1].Add($pending[$n]) }
+
+        $procs = @()
+        for ($w = 1; $w -le $workerCount; $w++) {
+            $wDir   = Join-Path $parallelDir "w$w"
+            New-Item -ItemType Directory -Path $wDir -Force -WhatIf:$false | Out-Null
+            $shardFile = Join-Path $wDir 'ids.txt'
+            Set-Content -LiteralPath $shardFile -Value ($shards[$w] -join "`r`n") -Encoding ASCII -WhatIf:$false
+
+            $argList = @(
+                '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$PSCommandPath`"",
+                '-ConfigFile',      "`"$ConfigFile`"",
+                '-IdFile',          "`"$shardFile`"",
+                '-OutputRoot',      "`"$wDir`"",
+                '-WorkDir',         "`"$(Join-Path $wDir 'work')`"",
+                '-CredentialFile',  "`"$credPath`"",
+                '-Workers', '1', '-MaxDocuments', '0', '-ExistingResults', 'Restart'
+            )
+            $procs += Start-Process -FilePath 'powershell.exe' -ArgumentList $argList `
+                        -WindowStyle Hidden -PassThru
+            Write-Log "worker $w started (pid $($procs[-1].Id)) with $($shards[$w].Count) document(s)"
+        }
+
+        Write-Log "$workerCount worker(s) moving $($pending.Count) document(s). Per-worker logs are under $parallelDir"
+        $started = Get-Date
+
+        # Progress from the workers' own results files - no shared state to contend on.
+        while ($procs | Where-Object { -not $_.HasExited }) {
+            Start-Sleep -Seconds 30
+            $moved = 0
+            for ($w = 1; $w -le $workerCount; $w++) {
+                $f = Join-Path (Join-Path $parallelDir "w$w") 'transfer-results.csv'
+                if (Test-Path -LiteralPath $f) {
+                    try { $moved += @(Import-Csv -LiteralPath $f | Where-Object { $_.Status -eq 'SUCCESS' }).Count } catch { }
+                }
+            }
+            $elapsed = ((Get-Date) - $started).TotalSeconds
+            $alive   = @($procs | Where-Object { -not $_.HasExited }).Count
+            if ($moved -gt 0 -and $elapsed -gt 0) {
+                $rate = $moved / $elapsed
+                $left = $pending.Count - $moved
+                $eta  = (Get-Date).AddSeconds($left / [math]::Max($rate, 0.0001))
+                Write-Log ("progress {0:N0}/{1:N0} at {2:N2} doc/s, {3} worker(s) alive, ETA {4:yyyy-MM-dd HH:mm}" -f `
+                            $moved, $pending.Count, $rate, $alive, $eta)
+            }
+            else { Write-Log "progress 0/$($pending.Count), $alive worker(s) alive" }
+        }
+
+        foreach ($proc in $procs) {
+            if ($proc.ExitCode -ne 0) { Write-Log "worker pid $($proc.Id) exited $($proc.ExitCode) - some documents failed" 'WARN' }
+        }
+
+        # Merge every worker's rows back into the one results file the operator reads.
+        $merged = New-Object System.Collections.ArrayList
+        foreach ($k in $prior.Keys) { [void]$merged.Add($prior[$k]) }
+        $seenIds = @{}
+        foreach ($k in $prior.Keys) { $seenIds["$k"] = $true }
+        $wOk = 0; $wBad = 0
+        for ($w = 1; $w -le $workerCount; $w++) {
+            $f = Join-Path (Join-Path $parallelDir "w$w") 'transfer-results.csv'
+            if (-not (Test-Path -LiteralPath $f)) { Write-Log "worker $w produced no results file" 'WARN'; continue }
+            foreach ($row in (Import-Csv -LiteralPath $f)) {
+                if ((Get-Field $row 'Status') -eq 'SUCCESS') { $wOk++ } else { $wBad++ }
+                if ($seenIds.ContainsKey("$(Get-Field $row 'Id' '')")) { continue }
+                [void]$merged.Add($row)
+            }
+        }
+        $merged | Export-Csv -LiteralPath $ResultsCsv -NoTypeInformation -Encoding UTF8 -WhatIf:$false
+
+        $secs = ((Get-Date) - $started).TotalSeconds
+        Write-Log '----------------------------------------------------------------'
+        Write-Log ("Moved $wOk of $($pending.Count) document(s), $wBad failed, in {0:N1} hour(s) across $workerCount worker(s)" -f ($secs / 3600)) $(if ($wBad) { 'WARN' } else { 'OK' })
+        Write-Log "Results     : $ResultsCsv"
+        Write-Log "Worker logs : $parallelDir"
+        Write-Log "Log         : $TranscriptLog"
+        if ($wBad -gt 0) { exit 1 }
+        exit 0
+    }
+    finally {
+        # The credential file must not outlive the run, even on Ctrl-C.
+        if (Test-Path -LiteralPath $credPath) { Remove-Item -LiteralPath $credPath -Force -WhatIf:$false }
+    }
+}
 
 $results = New-Object System.Collections.ArrayList
 function Save-Results {
