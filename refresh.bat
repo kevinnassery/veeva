@@ -1,5 +1,5 @@
 @echo off
-REM VERSION 2026.08.27-1
+REM VERSION 2026.08.27-2
 setlocal
 
 REM ============================================================================
@@ -21,7 +21,7 @@ REM
 REM  documents.ini is yours. If you ever want a fresh default copy, rename the one
 REM  you have out of the way and fetch it by hand:
 REM
-REM  curl.exe -sLO https://raw.githubusercontent.com/kevinnassery/veeva/main/documents.ini
+REM  curl.exe -sLO https://raw.githubusercontent.com/kevinnassery/veeva/main/document-transfer/documents.ini
 REM ============================================================================
 
 set "REPO=kevinnassery/veeva"
@@ -45,39 +45,41 @@ if errorlevel 1 (
 echo Refreshing from %B%
 echo.
 
-call :get login.bat
-call :get Get-VaultSession.ps1
-call :get probe.bat
-call :get Probe-Vault.ps1
-call :get Run-Documents.bat
-call :get Invoke-VaultDocumentAction.ps1
-call :get transfer.bat
-call :get Transfer-VaultDocuments.ps1
-call :get refresh.bat
-call :get README.md
+call :get document-transfer/login.bat                     login.bat
+call :get document-transfer/Get-VaultSession.ps1          Get-VaultSession.ps1
+call :get document-transfer/probe.bat                     probe.bat
+call :get document-transfer/Probe-Vault.ps1               Probe-Vault.ps1
+call :get document-transfer/Run-Documents.bat             Run-Documents.bat
+call :get document-transfer/Invoke-VaultDocumentAction.ps1 Invoke-VaultDocumentAction.ps1
+call :get document-transfer/transfer.bat                  transfer.bat
+call :get document-transfer/Transfer-VaultDocuments.ps1   Transfer-VaultDocuments.ps1
+call :get refresh.bat                                     refresh.bat
+call :get README.md                                       README.md
 
 if not exist "%D%documents.ini" (
   echo.
   echo   NOTE: no documents.ini here. Fetch one with:
-  echo         curl.exe -sLO %B%/documents.ini
+  echo         curl.exe -sLO %B%/document-transfer/documents.ini
 )
 if not exist "%D%transfer.ini" (
   echo.
   echo   NOTE: no transfer.ini here. Fetch one with:
-  echo         curl.exe -sLO %B%/transfer.ini
+  echo         curl.exe -sLO %B%/document-transfer/transfer.ini
 )
 
 echo.
 echo Done.
 goto :end
 
+REM  %1 = path in the repo, %2 = file name to write here. The repo groups scripts
+REM  into folders; this folder stays flat.
 :get
-curl.exe -sfL -H "Cache-Control: no-cache" -H "Pragma: no-cache" -o "%D%%~1" "%B%/%~1"
-if errorlevel 1 (echo   FAILED    %~1 & exit /b)
+curl.exe -sfL -o "%D%%~2" "%B%/%~1"
+if errorlevel 1 (echo   FAILED    %~2 & exit /b)
 set "VER=?"
-for /f "tokens=2 delims='" %%V in ('findstr /b /c:"$ScriptVersion = " "%D%%~1" 2^>nul') do set "VER=%%V"
-for /f "tokens=3" %%V in ('findstr /b /c:"REM VERSION " "%D%%~1" 2^>nul') do set "VER=%%V"
-echo   updated   %~1  [%VER%]
+for /f "tokens=2 delims='" %%V in ('findstr /b /c:"$ScriptVersion = " "%D%%~2" 2^>nul') do set "VER=%%V"
+for /f "tokens=3" %%V in ('findstr /b /c:"REM VERSION " "%D%%~2" 2^>nul') do set "VER=%%V"
+echo   updated   %~2  [%VER%]
 exit /b
 
 :end

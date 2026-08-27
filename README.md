@@ -1,6 +1,6 @@
 # Veeva Vault RIM tooling
 
-*Updated 2026-08-26 23:27 EDT*
+*Updated 2026-08-27 18:44 EDT*
 
 ## Get the scripts
 
@@ -17,23 +17,23 @@ It overwrites the scripts and README. It never touches `documents.ini`,
 Individually, if you prefer:
 
 ```
-curl.exe -sLO https://raw.githubusercontent.com/kevinnassery/veeva/main/probe.bat
+curl.exe -sLO https://raw.githubusercontent.com/kevinnassery/veeva/main/document-transfer/probe.bat
 ```
 
 ```
-curl.exe -sLO https://raw.githubusercontent.com/kevinnassery/veeva/main/Probe-Vault.ps1
+curl.exe -sLO https://raw.githubusercontent.com/kevinnassery/veeva/main/document-transfer/Probe-Vault.ps1
 ```
 
 ```
-curl.exe -sLO https://raw.githubusercontent.com/kevinnassery/veeva/main/Run-Documents.bat
+curl.exe -sLO https://raw.githubusercontent.com/kevinnassery/veeva/main/document-transfer/Run-Documents.bat
 ```
 
 ```
-curl.exe -sLO https://raw.githubusercontent.com/kevinnassery/veeva/main/Invoke-VaultDocumentAction.ps1
+curl.exe -sLO https://raw.githubusercontent.com/kevinnassery/veeva/main/document-transfer/Invoke-VaultDocumentAction.ps1
 ```
 
 ```
-curl.exe -sLO https://raw.githubusercontent.com/kevinnassery/veeva/main/documents.ini
+curl.exe -sLO https://raw.githubusercontent.com/kevinnassery/veeva/main/document-transfer/documents.ini
 ```
 
 ```
@@ -238,7 +238,7 @@ curl.exe -s -X DELETE -H "Authorization: $S" "https://$V/api/$A/session"
 
 | | |
 | --- | --- |
-| Tools | `probe.bat`, `Run-Documents.bat` → `documents.ini` |
+| Document tooling | [`document-transfer/`](document-transfer/) — probe, extractor, cross-vault transfer |
 | Submissions importer | [`submissions-import/`](submissions-import/README.md) |
 | Vault API v26.2, offline | [`docs/api/`](docs/api/INDEX.md) |
 | UI → endpoint mapping, and why the VQL looks the way it does | [`docs/library-bulk-action-api-map.md`](docs/library-bulk-action-api-map.md) |

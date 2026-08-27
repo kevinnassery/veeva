@@ -4,7 +4,7 @@
 #
 #   pwsh -NoProfile -File check-scripts.ps1
 #
-foreach ($f in @('Transfer-VaultDocuments.ps1','Invoke-VaultDocumentAction.ps1','Probe-Vault.ps1','Get-VaultSession.ps1')) {
+foreach ($f in (Get-ChildItem -Path . -Filter *.ps1 -Recurse | Where-Object { $_.Name -ne 'check-scripts.ps1' } | ForEach-Object { $_.FullName })) {
   $errs=$null; $toks=$null
   $ast = [System.Management.Automation.Language.Parser]::ParseFile((Resolve-Path $f).Path,[ref]$toks,[ref]$errs)
   if ($errs.Count) { "PARSE FAIL $f"; continue }
