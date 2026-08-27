@@ -144,7 +144,7 @@ param(
     [int]    $MaxRetries = 4
 )
 
-$ScriptVersion = '2026.08.27-25'
+$ScriptVersion = '2026.08.27-26'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -458,23 +458,39 @@ function Save-DocumentFile {
 # from disk a chunk at a time, so a 2GB file never lands in memory.
 # --------------------------------------------------------------------------------------
 
+$script:MadeFolders = @{}
+
 function New-StagingFolder {
-    # Create the per-document folder. On a re-run it is already there and Vault objects,
-    # which is fine and expected.
+    # Create every level, not just the leaf.
     #
-    # Deliberately NOT matched on the error text: I have not seen what Vault actually
-    # returns for "folder exists", and a guessed string match that misses would break
-    # every re-run. Any failure here is a warning, because the upload on the very next
-    # line is the real test - if the folder genuinely could not be created, that fails
-    # loudly and with Vault's own message.
+    # Vault's Create Folder does NOT create intermediate folders: posting
+    # /u123/87890/attachments/261709 in one call fails with "The parent folder
+    # [/u123/87890/attachments/] cannot be found" unless each level above already
+    # exists. That took out every upload on the first sync run.
+    #
+    # Levels are remembered for the run, so a document with twelve attachments creates
+    # its two shared levels once rather than twelve times.
+    #
+    # A create that fails is still only a warning: on any re-run the folder is already
+    # there, and the upload immediately after is the real test - if a level genuinely
+    # could not be made, that fails loudly with Vault's own message.
     param([Parameter(Mandatory)][string]$Path)
-    try {
-        Invoke-VaultApi -Side Target -Method POST -Path '/services/file_staging/items' `
-            -ContentType 'application/x-www-form-urlencoded' `
-            -Body @{ kind = 'folder'; path = $Path; overwrite = 'false' } | Out-Null
-    }
-    catch {
-        Write-Log "Folder $Path was not created (it may already exist): $_" 'WARN'
+
+    $parts = @($Path.Trim('/') -split '/' | Where-Object { $_ })
+    $cur = ''
+    foreach ($part in $parts) {
+        $cur = $cur + '/' + $part
+        if ($script:MadeFolders.ContainsKey($cur)) { continue }
+        $script:MadeFolders[$cur] = $true
+        try {
+            Invoke-VaultApi -Side Target -Method POST -Path '/services/file_staging/items' `
+                -ContentType 'application/x-www-form-urlencoded' `
+                -Body @{ kind = 'folder'; path = $cur; overwrite = 'false' } | Out-Null
+        }
+        catch {
+            # Expected for levels that already exist, including TargetPath itself.
+            Write-Verbose "Folder $cur not created (likely already there): $_"
+        }
     }
 }
 
