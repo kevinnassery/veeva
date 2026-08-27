@@ -26,8 +26,8 @@ curl.exe -sLO https://raw.githubusercontent.com/kevinnassery/veeva/main/attachme
 Put `map.csv` in the same folder — a header row plus the old and new document id columns,
 exported from Excel. It defines which documents are in scope.
 
-In `attachments.ini` fill in `SourceVaultDNS`, `TargetVaultDNS`, `TargetPath`,
-`OutputRoot`. Leave the session ids blank.
+In `attachments.ini` fill in `SourceVaultDNS`, `TargetVaultDNS` and `OutputRoot`.
+Leave the session ids blank.
 
 ## Run
 
@@ -62,7 +62,6 @@ with `Mode = SYNC` — delivers the rest.
 | `-Test` | stop after 5 are reconciled |
 | `-WhatIf` | rehearse, write nothing |
 | `-MaxDocuments 50` | cap the documents examined |
-| `Mode = ATTACH` | finish files a stopped run had staged |
 
 ## Worth knowing
 
@@ -70,9 +69,10 @@ Attachments match by **filename**, because that is Vault's own rule — a name t
 exists becomes a new *version*. Same name with a different MD5 is reported `DIFFERS` and
 left alone unless `ReplaceDiffering` is set.
 
-Each file goes source vault → workstation → target File Staging → attached. One file on
-disk at a time. Results are written after every attachment, so any run can be stopped and
-re-run.
+Each file goes source vault → workstation → attached to the target document, in one
+upload. No File Staging is involved and nothing is left behind on either vault. One file
+on disk at a time, deleted as soon as it lands. Results are written after every
+attachment, so any run can be stopped and re-run.
 
 `Workers` starts at 1. Raise it once a sequential run is known good.
 

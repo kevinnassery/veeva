@@ -24,8 +24,9 @@
 
     Three modes:
       REPORT - diff only. Downloads nothing, uploads nothing, changes nothing.
-      SYNC   - diff, then stage and attach everything missing.
-      ATTACH - attach files already staged by an earlier interrupted SYNC.
+      SYNC   - diff, then download and attach everything missing.
+    Both modes are idempotent: the diff is recomputed live from both vaults on every
+    run, so nothing is delivered twice and an interrupted run is simply run again.
 
 .NOTES
     Windows PowerShell 5.1 compatible.
@@ -34,8 +35,7 @@
       GET  /objects/documents/{id}/attachments/{aid}/file         the bytes
     TARGET:
       GET  /objects/documents/{id}/attachments                   what is already there
-      POST /services/file_staging/upload  (+ PUT parts, POST commit)
-      POST /objects/documents/attachments/batch                  attach, 500 per batch
+      POST /objects/documents/{id}/attachments                   upload and attach, 2GB
 #>
 
 [CmdletBinding(SupportsShouldProcess = $true)]
@@ -60,11 +60,6 @@ param(
     [string] $TargetSessionId = '',
     [pscredential] $TargetCredential,
 
-    # Folder on the TARGET vault's File Staging to upload into. As a Vault Owner or
-    # System Admin this is an absolute path from the staging root, e.g.
-    # /u11280389/wave1. A non-Admin gives a path relative to their own user folder.
-    # Uploading into Inbox is not neutral - it creates Staged documents.
-    [string] $TargetPath = '',
 
     [ValidatePattern('^v\d+\.\d+$')]
     [string] $ApiVersion = 'v26.2',
@@ -73,8 +68,7 @@ param(
     # REPORT = compare both sides and report the gap. Changes nothing, downloads
     #          nothing. Always start here.
     # SYNC   = deliver every missing attachment: download, stage, attach.
-    # ATTACH = attach files an earlier interrupted SYNC already staged, and stop.
-    [ValidateSet('REPORT', 'SYNC', 'ATTACH')]
+    [ValidateSet('REPORT', 'SYNC')]
     [string] $Mode       = 'REPORT',
 
     # CSV mapping source document id to target document id, with a header row. Column
@@ -88,9 +82,6 @@ param(
     # new VERSION of the existing attachment rather than a second attachment.
     [switch] $ReplaceDiffering,
 
-    # Attachments per bulk attach call. Vault's ceiling is 500.
-    [ValidateRange(1, 500)]
-    [int]    $AttachBatchSize  = 500,
 
     # Stop once TestCount attachments have actually been reconciled, however many
     # documents that took. MaxDocuments is the wrong tool for a first look here: most
@@ -144,7 +135,7 @@ param(
     [int]    $MaxRetries = 4
 )
 
-$ScriptVersion = '2026.08.27-26'
+$ScriptVersion = '2026.08.27-27'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -207,7 +198,7 @@ function ConvertTo-StagingUrlPath {
 # Configuration
 # --------------------------------------------------------------------------------------
 
-$IntKeys    = @('MaxDocuments', 'ReserveMB', 'PartSizeMB', 'MaxRetries', 'Workers', 'AttachBatchSize', 'TestCount')
+$IntKeys    = @('MaxDocuments', 'ReserveMB', 'PartSizeMB', 'MaxRetries', 'Workers', 'TestCount')
 $SwitchKeys = @('SeparateCredentials', 'ReplaceDiffering', 'Test')
 
 if ([string]::IsNullOrWhiteSpace($ConfigFile)) {
@@ -241,19 +232,8 @@ if (Test-Path -LiteralPath $ConfigFile) {
 }
 else { Write-Warning "No attachments.ini found at $ConfigFile - relying on command-line arguments." }
 
-if ($Mode -ne 'REPORT' -and [string]::IsNullOrWhiteSpace($TargetPath)) {
-    throw @'
-TargetPath is not set.
 
-Uploading to the staging ROOT is almost never what is wanted, so this will not
-guess. Run probe.bat against the TARGET vault to get its user folder id and
-whether your account is Admin there, then set TargetPath - for example
-/u<target user id>/wave1 for an Admin, or /wave1 for a non-Admin.
-'@
-}
-
-$needTarget = @('SourceVaultDNS', 'OutputRoot')
-if ($Mode -ne 'REPORT') { $needTarget = @('SourceVaultDNS', 'TargetVaultDNS', 'OutputRoot') }
+$needTarget = @('SourceVaultDNS', 'TargetVaultDNS', 'OutputRoot')
 foreach ($n in $needTarget) {
     if ([string]::IsNullOrWhiteSpace((Get-Variable -Name $n -ValueOnly))) {
         throw "$n is not set. Add it to $ConfigFile, or pass -$n on the command line."
@@ -458,78 +438,61 @@ function Save-DocumentFile {
 # from disk a chunk at a time, so a 2GB file never lands in memory.
 # --------------------------------------------------------------------------------------
 
-$script:MadeFolders = @{}
 
-function New-StagingFolder {
-    # Create every level, not just the leaf.
-    #
-    # Vault's Create Folder does NOT create intermediate folders: posting
-    # /u123/87890/attachments/261709 in one call fails with "The parent folder
-    # [/u123/87890/attachments/] cannot be found" unless each level above already
-    # exists. That took out every upload on the first sync run.
-    #
-    # Levels are remembered for the run, so a document with twelve attachments creates
-    # its two shared levels once rather than twelve times.
-    #
-    # A create that fails is still only a warning: on any re-run the folder is already
-    # there, and the upload immediately after is the real test - if a level genuinely
-    # could not be made, that fails loudly with Vault's own message.
-    param([Parameter(Mandatory)][string]$Path)
 
-    $parts = @($Path.Trim('/') -split '/' | Where-Object { $_ })
-    $cur = ''
-    foreach ($part in $parts) {
-        $cur = $cur + '/' + $part
-        if ($script:MadeFolders.ContainsKey($cur)) { continue }
-        $script:MadeFolders[$cur] = $true
-        try {
-            Invoke-VaultApi -Side Target -Method POST -Path '/services/file_staging/items' `
-                -ContentType 'application/x-www-form-urlencoded' `
-                -Body @{ kind = 'folder'; path = $cur; overwrite = 'false' } | Out-Null
-        }
-        catch {
-            # Expected for levels that already exist, including TargetPath itself.
-            Write-Verbose "Folder $cur not created (likely already there): $_"
-        }
-    }
-}
 
-function Send-StagingPart {
-    # One file part, over HttpWebRequest rather than Invoke-WebRequest.
+function Send-DocumentAttachment {
+    # Upload straight onto the target document. No File Staging involved at all.
     #
-    # Invoke-WebRequest was sent $buf[0..($read-1)], which on a byte[] produces an
-    # Object[], not a byte[]. It then stringifies that - so 877KB of binary went up as a
-    # much larger text body and Vault rejected it with OPERATION_NOT_ALLOWED: "Unable to
-    # upload additional file parts/bytes". Writing an exact byte count straight to the
-    # request stream removes the conversion entirely, and matches how the download side
-    # already works.
+    # POST /objects/documents/{id}/attachments takes the file as multipart/form-data, up
+    # to 2GB, and attaches it in the same call. That replaces a five-step dance - open a
+    # resumable session, create each folder level, upload parts, commit, then a separate
+    # bulk attach - with one request, and leaves nothing behind on staging afterwards.
+    #
+    # Written over HttpWebRequest with buffering off so the body streams from disk: a
+    # 2GB attachment must never be assembled in memory. PowerShell 5.1 has no -Form, so
+    # the multipart envelope is built by hand.
     param(
-        [Parameter(Mandatory)][string]$SessionId,
-        [Parameter(Mandatory)][byte[]]$Buffer,
-        [Parameter(Mandatory)][int]$Count,
-        [Parameter(Mandatory)][int]$PartNumber
+        [Parameter(Mandatory)][string]$TargetDocId,
+        [Parameter(Mandatory)][string]$LocalPath,
+        [Parameter(Mandatory)][string]$FileName
     )
 
+    $fileLen = (Get-Item -LiteralPath $LocalPath).Length
+
     for ($attempt = 1; $attempt -le $MaxRetries; $attempt++) {
-        $uri = "https://$($script:Dns['Target'])/api/$ApiVersion/services/file_staging/upload/$SessionId"
+        $boundary = '----VaultSync' + [guid]::NewGuid().ToString('N')
+        $pre  = "--$boundary`r`n" +
+                "Content-Disposition: form-data; name=`"file`"; filename=`"$FileName`"`r`n" +
+                "Content-Type: application/octet-stream`r`n`r`n"
+        $post = "`r`n--$boundary--`r`n"
+        $preB  = [Text.Encoding]::UTF8.GetBytes($pre)
+        $postB = [Text.Encoding]::UTF8.GetBytes($post)
+
+        $uri = "https://$($script:Dns['Target'])/api/$ApiVersion/objects/documents/$TargetDocId/attachments"
         $req = [Net.HttpWebRequest]::Create($uri)
-        $req.Method            = 'PUT'
-        $req.ContentType       = 'application/octet-stream'
-        $req.ContentLength     = $Count
-        $req.Timeout           = 900000
-        $req.ReadWriteTimeout  = 900000
-        # Accept is a RESTRICTED header on HttpWebRequest - Headers.Add throws
-        # "The 'Accept' header must be modified using the appropriate property or
-        # method". It has to go through the property. Same family as Content-Type and
-        # Content-Length, both already set as properties above. Authorization and the
-        # X-VaultAPI-* headers are not restricted, so those are fine via Headers.Add.
-        $req.Accept = 'application/json'
+        $req.Method                   = 'POST'
+        $req.ContentType              = "multipart/form-data; boundary=$boundary"
+        $req.ContentLength            = $preB.Length + $fileLen + $postB.Length
+        $req.AllowWriteStreamBuffering = $false
+        $req.Timeout                  = 900000
+        $req.ReadWriteTimeout         = 900000
+        $req.Accept                   = 'application/json'
         $req.Headers.Add('Authorization', $script:Session['Target'])
-        $req.Headers.Add('X-VaultAPI-FilePartNumber', "$PartNumber")
 
         try {
             $rs = $req.GetRequestStream()
-            try { $rs.Write($Buffer, 0, $Count) } finally { $rs.Dispose() }
+            try {
+                $rs.Write($preB, 0, $preB.Length)
+                $fs = [IO.File]::OpenRead($LocalPath)
+                try {
+                    $buf = New-Object byte[] 1048576
+                    while (($read = $fs.Read($buf, 0, $buf.Length)) -gt 0) { $rs.Write($buf, 0, $read) }
+                }
+                finally { $fs.Dispose() }
+                $rs.Write($postB, 0, $postB.Length)
+            }
+            finally { $rs.Dispose() }
 
             $resp = $req.GetResponse()
             try {
@@ -537,11 +500,16 @@ function Send-StagingPart {
                 $body = $sr.ReadToEnd(); $sr.Dispose()
                 $json = $null
                 try { $json = $body | ConvertFrom-Json } catch { }
-                if ($json -and (Get-Field $json 'responseStatus') -eq 'FAILURE') {
+                if ($null -eq $json) { throw "attachment upload returned no JSON: $body" }
+                if ((Get-Field $json 'responseStatus') -ne 'SUCCESS') {
                     $errs = @(Get-Field $json 'errors' @())
-                    throw 'part ' + $PartNumber + ' rejected -- ' + (($errs | ForEach-Object { "$(Get-Field $_ 'type'): $(Get-Field $_ 'message')" }) -join '; ')
+                    throw (($errs | ForEach-Object { "$(Get-Field $_ 'type'): $(Get-Field $_ 'message')" }) -join '; ')
                 }
-                return
+                $d = Get-Field $json 'data' $null
+                return [pscustomobject]@{
+                    AttachmentId = "$(Get-Field $d 'id' '')"
+                    Version      = "$(Get-Field $d 'version__v' (Get-Field $d 'version' ''))"
+                }
             }
             finally { $resp.Dispose() }
         }
@@ -555,61 +523,22 @@ function Send-StagingPart {
             } catch { }
 
             if ($status -eq 429 -and $attempt -lt $MaxRetries) {
-                Write-Log "Target HTTP 429 on part $PartNumber - waiting 60s" 'WARN'
+                Write-Log "Target HTTP 429 attaching $FileName - waiting 60s" 'WARN'
                 Start-Sleep -Seconds 60
                 continue
             }
             if (((-not $status) -or ($status -ge 500)) -and $attempt -lt $MaxRetries) {
                 $wait = [math]::Pow(2, $attempt) * 5
-                Write-Log "Target transient error on part $PartNumber (HTTP $status) - retry $attempt/$MaxRetries in ${wait}s" 'WARN'
+                Write-Log "Transient error attaching $FileName (HTTP $status) - retry $attempt/$MaxRetries in ${wait}s" 'WARN'
                 Start-Sleep -Seconds $wait
                 continue
             }
-            throw "part $PartNumber failed (HTTP $status): $($_.Exception.Message) $detail"
+            throw "attach failed (HTTP $status): $($_.Exception.Message) $detail"
         }
     }
-    throw "part $PartNumber failed after $MaxRetries attempts"
+    throw "attach of $FileName failed after $MaxRetries attempts"
 }
 
-function Send-StagingFile {
-    param(
-        [Parameter(Mandatory)][string]$LocalPath,
-        [Parameter(Mandatory)][string]$RemotePath,
-        [Parameter(Mandatory)][long]$Size
-    )
-    $dns  = $script:Dns['Target']
-    $open = Invoke-VaultApi -Side Target -Method POST -Path '/services/file_staging/upload' `
-                -ContentType 'application/x-www-form-urlencoded' `
-                -Body @{ path = $RemotePath; size = $Size; overwrite = 'true' }
-    $sid = "$(Get-Field (Get-Field $open 'data' $null) 'id' '')"
-    if (-not $sid) { throw "Target did not return an upload session id: $($open | ConvertTo-Json -Depth 5 -Compress)" }
-
-    try {
-        $part     = 0
-        $partSize = $PartSizeMB * 1MB
-        $sent     = [long]0
-        $fs = [IO.File]::OpenRead($LocalPath)
-        try {
-            $buf = New-Object byte[] $partSize
-            while (($read = $fs.Read($buf, 0, $buf.Length)) -gt 0) {
-                $part++
-                Send-StagingPart -SessionId $sid -Buffer $buf -Count $read -PartNumber $part
-                $sent += $read
-            }
-        }
-        finally { $fs.Dispose() }
-        if ($sent -ne $Size) { throw "uploaded $sent bytes but the session declared $Size" }
-
-        $commit = Invoke-VaultApi -Side Target -Method POST -Path "/services/file_staging/upload/$sid"
-        return [pscustomobject]@{ Parts = $part; Session = $sid; Response = $commit }
-    }
-    catch {
-        # Leave no half-finished session behind - they hold quota and expire slowly.
-        try { Invoke-VaultApi -Side Target -Method DELETE -Path "/services/file_staging/upload/$sid" | Out-Null }
-        catch { Write-Log "Could not abort upload session ${sid}: $_" 'WARN' }
-        throw
-    }
-}
 
 # --------------------------------------------------------------------------------------
 # Disk
@@ -689,11 +618,8 @@ function Get-DocumentAttachment {
 
 function Test-TargetStaging {
     # What probe.bat was for, asked at the moment it matters instead of as a separate
-    # errand: who this account is on the TARGET vault, and whether TargetPath is real.
-    #
-    # A wrong TargetPath does not fail loudly - it can succeed into a folder nobody
-    # looks in. Checking it before the first download is the difference between an
-    # error now and a discovery later.
+    # errand: who this account is on the TARGET vault. Attachments go straight onto
+    # documents now, so there is no staging path left to get wrong.
     $me = $null
     try { $me = Invoke-VaultApi -Side Target -Method GET -Path '/objects/users/me' } catch {
         Write-Log "Could not read the target user: $_" 'WARN'
@@ -705,24 +631,6 @@ function Test-TargetStaging {
     $isAdmin = ($profile -match 'vault_owner|system_admin')
     Write-Log "Target user $(Get-Field $u 'user_name__v' '') id=$uid profile=$profile"
 
-    if ($Mode -eq 'REPORT') { return }
-
-    # Admin paths are absolute from the staging root; everyone else is relative to
-    # their own folder. Getting this backwards is the most likely reason a path is wrong.
-    if ($isAdmin -and $TargetPath -notmatch '^/u\d+') {
-        Write-Log "This account is an admin on the target, so TargetPath should start /u$uid - it is '$TargetPath'" 'WARN'
-    }
-    if (-not $isAdmin -and $TargetPath -match '^/u\d+') {
-        Write-Log "This account is NOT an admin on the target, so staging paths are relative to its own folder - drop the /u$uid from TargetPath" 'WARN'
-    }
-
-    try {
-        $null = Invoke-VaultApi -Side Target -Method GET -Path ("/services/file_staging/items/" + (ConvertTo-StagingUrlPath $TargetPath) + "?recursive=false&limit=1")
-        Write-Log "TargetPath $TargetPath is reachable on the target vault" 'OK'
-    }
-    catch {
-        throw "TargetPath '$TargetPath' could not be listed on the target vault: $_`n`nThe user folder there is /u$uid. Fix TargetPath before running again - a wrong one can succeed into a folder nobody looks in."
-    }
 }
 
 function Import-IdMap {
@@ -916,46 +824,6 @@ Re-export with both id columns formatted as Text before running again.
     return $map
 }
 
-function Invoke-AttachBatch {
-    # Attach staged files to target documents. JSON rather than CSV: the filenames carry
-    # commas and quotes often enough that RFC 4180 escaping is a liability here, and the
-    # endpoint takes either.
-    #
-    # Returns the per-row outcomes in request order - the response carries no key to
-    # match on, only the new attachment id.
-    param([Parameter(Mandatory)][array]$Rows)
-
-    $items = foreach ($r in $Rows) {
-        # Vault's own example uses a staging path with no leading slash.
-        $file = "$($r.StagedPath)".TrimStart('/')
-        '{{"document_id__v":"{0}","filename__v":{1},"file":{2}}}' -f `
-            $r.TargetDocId, (ConvertTo-Json $r.Name -Compress), (ConvertTo-Json $file -Compress)
-    }
-    $payload = '[' + ($items -join ',') + ']'
-
-    $resp = Invoke-VaultApi -Side Target -Method POST -Path '/objects/documents/attachments/batch' `
-                -ContentType 'application/json' -Body ([Text.Encoding]::UTF8.GetBytes($payload))
-
-    $out = @(Get-Field $resp 'data' @())
-    $results = New-Object System.Collections.ArrayList
-    for ($i = 0; $i -lt $Rows.Count; $i++) {
-        $row = if ($i -lt $out.Count) { $out[$i] } else { $null }
-        $st  = "$(Get-Field $row 'responseStatus' 'ERROR')"
-        $msg = ''
-        if ($st -ne 'SUCCESS') {
-            $errs = @(Get-Field $row 'errors' @())
-            $msg  = ($errs | ForEach-Object { "$(Get-Field $_ 'type'): $(Get-Field $_ 'message')" }) -join '; '
-            if (-not $msg) { $msg = if ($row) { ($row | ConvertTo-Json -Depth 5 -Compress) } else { 'no result returned for this row' } }
-        }
-        [void]$results.Add([pscustomobject]@{
-            Status       = $st
-            Message      = $msg
-            AttachmentId = "$(Get-Field $row 'id' '')"
-            Version      = "$(Get-Field $row 'version' '')"
-        })
-    }
-    return $results
-}
 
 function Save-AttachmentFile {
     # Streamed to disk, for the same reason the document download is: a 2GB attachment
@@ -1005,7 +873,7 @@ function Get-FreeSpace {
 
 Write-Log "Sync-VaultAttachments.ps1 $ScriptVersion"
 Write-Log "Source: $SourceVaultDNS"
-Write-Log "Target: $TargetVaultDNS  ->  $(if ($TargetPath) { $TargetPath } else { '(staging root)' })"
+Write-Log "Target: $TargetVaultDNS"
 Write-Log "Work  : $WorkDir"
 
 # IdFile is optional and normally blank - map.csv defines the scope. Every path test
@@ -1097,8 +965,7 @@ if (Test-Path -LiteralPath $ResultsCsv) {
             # - by the time this check runs, both listings have already been fetched -
             # so skipping PRESENT saved nothing and could only go stale.
             #
-            # STAGED is also not done: the file is up but nothing points at it yet, and
-            # ATTACH mode exists to finish exactly those.
+
             if ((Get-Field $row 'Status') -eq 'ATTACHED') { $done[$rk] = $true }
         }
         if ($done.Count) { Write-Log "$($done.Count) attachment(s) already delivered by an earlier run - not re-sent" }
@@ -1120,10 +987,6 @@ Write-Log "$($pending.Count) mapped document(s) to examine"
 
 if (-not $script:Session['Source']) { Connect-Vault -Side Source } else { Write-Log 'Source: using the configured session id' }
 if ($Test) {
-    # Attach one at a time, so each reconciled attachment is confirmed on the target
-    # before it is counted. Batching 500 would leave the run finished with nothing
-    # actually attached.
-    $AttachBatchSize = 1
     # Workers would each count their own five.
     if ($Workers -gt 1) { Write-Log 'TEST: running single-threaded so the count is the whole run' 'WARN'; $Workers = 1 }
     Write-Log "TEST: stopping after $TestCount attachment(s) are reconciled, however many documents that takes" 'WARN'
@@ -1148,7 +1011,7 @@ Test-TargetStaging
 # sequential path stays the single implementation, with nothing duplicated to drift.
 # --------------------------------------------------------------------------------------
 
-if ($Mode -ne 'ATTACH' -and $Workers -gt 1 -and $pending.Count -gt 1) {
+if ($Mode -eq 'SYNC' -and $Workers -gt 1 -and $pending.Count -gt 1) {
 
     if (-not $script:Cred['Source'] -or -not $script:Cred['Target']) {
         throw @'
@@ -1281,63 +1144,7 @@ function Save-Results {
 $i = 0
 $moved     = [long]0
 $stat      = @{ Src = 0; Present = 0; Missing = 0; Differs = 0; Staged = 0; Attached = 0; NoMap = 0; NoAtt = 0 }
-$attachQ   = New-Object System.Collections.ArrayList
 $script:TestStopped = $false
-
-function Send-AttachQueue {
-    # Attach whatever is queued and write the outcome back onto the rows already in the
-    # results file, so an interruption leaves STAGED rows that a later ATTACH run
-    # finishes rather than files stranded on staging with nothing pointing at them.
-    param([switch]$Force)
-    if ($attachQ.Count -eq 0) { return }
-    if (-not $Force -and $attachQ.Count -lt $AttachBatchSize) { return }
-
-    while ($attachQ.Count -gt 0) {
-        $take  = [math]::Min($AttachBatchSize, $attachQ.Count)
-        $batch = @($attachQ[0..($take - 1)])
-        $attachQ.RemoveRange(0, $take)
-
-        Write-Log "attaching $($batch.Count) file(s) to target documents"
-        try { $outcomes = @(Invoke-AttachBatch -Rows $batch) }
-        catch {
-            foreach ($b in $batch) { $b.Record.Status = 'ERROR'; $b.Record.Message = "attach failed: $_" }
-            Write-Log "attach batch failed: $_" 'ERROR'
-            Save-Results
-            continue
-        }
-        for ($k = 0; $k -lt $batch.Count; $k++) {
-            $o = $outcomes[$k]
-            if ($o.Status -eq 'SUCCESS') {
-                $batch[$k].Record.Status  = 'ATTACHED'
-                $batch[$k].Record.Message = "attachment $($o.AttachmentId) v$($o.Version)"
-                $stat.Attached++
-            }
-            else {
-                $batch[$k].Record.Status  = 'ERROR'
-                $batch[$k].Record.Message = $o.Message
-                Write-Log "attach failed for $($batch[$k].Name) on doc $($batch[$k].TargetDocId): $($o.Message)" 'ERROR'
-            }
-        }
-        Save-Results
-        if (-not $Force) { break }
-    }
-}
-
-# ATTACH picks up where an interrupted SYNC stopped: rows already staged, never attached.
-if ($Mode -eq 'ATTACH') {
-    foreach ($k in $prior.Keys) {
-        $row = $prior[$k]
-        if ((Get-Field $row 'Status') -ne 'STAGED') { continue }
-        [void]$attachQ.Add([pscustomobject]@{
-            Key = "$k"; TargetDocId = "$(Get-Field $row 'TargetDocId' '')"
-            Name = "$(Get-Field $row 'Name' '')"; StagedPath = "$(Get-Field $row 'TargetPath' '')"
-            Record = $row
-        })
-    }
-    Write-Log "$($attachQ.Count) staged file(s) waiting to be attached"
-    Send-AttachQueue -Force
-}
-else {
 
 :documents foreach ($srcId in $pending) {
     $i++
@@ -1384,7 +1191,7 @@ else {
             Key = $key; SourceDocId = $srcId; TargetDocId = $tgtId
             AttachmentId = $att.Id; Name = $name; SizeBytes = $att.Size
             Version = $att.Version; Checksum = $att.Checksum
-            TargetPath = ''; Parts = 0
+            Parts = 0
             Status = $state; Message = ''
             StartedUtc = (Get-Date).ToUniversalTime().ToString('s'); FinishedUtc = ''
         }
@@ -1414,24 +1221,14 @@ else {
                 $local = Save-AttachmentFile -DocId $srcId -AttachmentId $att.Id -FileName $name -Destination $WorkDir
                 $record.SizeBytes = $local.Size
 
-                # Keyed by TARGET document id: this is staging on the target vault, and
-                # the attachment id keeps two same-named files on one document apart.
-                $folder = $TargetPath.TrimEnd('/') + "/$tgtId/attachments/$($att.Id)"
-                $remote = $folder + '/' + $local.Name
-                $record.TargetPath = $remote
-                New-StagingFolder -Path $folder
-
-                Write-Log "$docPrefix - uploading to $remote"
-                $up = Send-StagingFile -LocalPath $local.Path -RemotePath $remote -Size $local.Size
-                $record.Parts  = $up.Parts
-                $record.Status = 'STAGED'
+                # Straight onto the target document. One call, no staging, and no
+                # intermediate state - which is why there is no ATTACH mode any more.
+                Write-Log "$docPrefix - attaching to document $tgtId"
+                $up = Send-DocumentAttachment -TargetDocId $tgtId -LocalPath $local.Path -FileName $local.Name
+                $record.Status  = 'ATTACHED'
+                $record.Message = "attachment $($up.AttachmentId) v$($up.Version)"
                 $moved += $local.Size
-                $stat.Staged++
-
-                [void]$attachQ.Add([pscustomobject]@{
-                    Key = $key; TargetDocId = $tgtId; Name = $local.Name
-                    StagedPath = $remote; Record = $record
-                })
+                $stat.Attached++
             }
             else {
                 $record.Status  = 'WHATIF'
@@ -1459,7 +1256,6 @@ else {
         $record.FinishedUtc = (Get-Date).ToUniversalTime().ToString('s')
         [void]$results.Add($record)
         Save-Results
-        Send-AttachQueue
 
         if ($Test) {
             $reconciled = if ($Mode -eq 'REPORT') { $stat.Missing } else { $stat.Attached }
@@ -1471,9 +1267,6 @@ else {
             }
         }
     }
-}
-
-Send-AttachQueue -Force
 }
 
 Write-Log '----------------------------------------------------------------'
@@ -1498,7 +1291,6 @@ if ($leftovers.Count) {
 # over from before this became a reconcile - so every compared attachment counted as a
 # failure, and a REPORT that worked perfectly ended "361 failed" and exited 1.
 $ok     = @($results | Where-Object { $_.Status -eq 'ATTACHED' }).Count
-$staged = @($results | Where-Object { $_.Status -eq 'STAGED' }).Count
 $bad    = @($results | Where-Object { $_.Status -eq 'ERROR' }).Count
 
 Write-Log '----------------------------------------------------------------'
@@ -1513,7 +1305,7 @@ if ($Mode -eq 'REPORT') {
 }
 else {
     Write-Log "Attached $ok attachment(s), $bad failed, $(Format-Bytes $moved) transferred" $(if ($bad) { 'WARN' } else { 'OK' })
-    if ($staged) { Write-Log "$staged staged but not attached - re-run with Mode = ATTACH to finish them" 'WARN' }
+
 }
 Write-Log "Results : $ResultsCsv"
 Write-Log "Log     : $TranscriptLog"
