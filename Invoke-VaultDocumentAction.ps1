@@ -766,10 +766,22 @@ function Export-DocumentBatch {
         foreach ($row in @(Get-Field $res 'data' @())) {
             $rid = "$(Get-Field $row 'id' '')"
             if (-not $rid) { continue }
-            $byId[$rid] = [pscustomobject]@{
-                Status  = "$(Get-Field $row 'responseStatus' $status)"
-                Message = "$(Get-Field $row 'file' '')"
-                JobId   = $jobId
+            # One row per exported FILE, not per document - a document comes back more
+            # than once with allversions or renditions on. Keep every path rather than
+            # letting the last row silently win.
+            $file = "$(Get-Field $row 'file' '')"
+            $ver  = "$(Get-Field $row 'major_version_number__v' '')" + '_' + "$(Get-Field $row 'minor_version_number__v' '')"
+            if ($ver -ne '_') { $file = "v$ver $file" }
+            if ($byId.ContainsKey($rid)) {
+                $byId[$rid].Message = ($byId[$rid].Message + ' | ' + $file).Trim(' ', '|')
+                if ("$(Get-Field $row 'responseStatus' '')" -ne 'SUCCESS') { $byId[$rid].Status = "$(Get-Field $row 'responseStatus' $status)" }
+            }
+            else {
+                $byId[$rid] = [pscustomobject]@{
+                    Status  = "$(Get-Field $row 'responseStatus' $status)"
+                    Message = $file
+                    JobId   = $jobId
+                }
             }
         }
     }
