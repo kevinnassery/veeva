@@ -93,7 +93,7 @@ param(
     [int]    $MaxRetries = 4
 )
 
-$ScriptVersion = '2026.08.26-13'
+$ScriptVersion = '2026.08.26-14'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -663,15 +663,30 @@ foreach ($id in $pending) {
     }
     finally {
         # The local copy goes as soon as it is no longer needed - success or failure.
-        # This is the whole reason the run fits in a few GB.
+        # This is the whole reason the run fits in a few GB, so it is logged every time
+        # rather than only when it fails. A silent delete that quietly stopped working
+        # would show up as a full volume hours later instead of a line in the log.
         if ($local -and (Test-Path -LiteralPath $local.Path)) {
-            try { Remove-Item -LiteralPath $local.Path -Force -WhatIf:$false }
+            try {
+                Remove-Item -LiteralPath $local.Path -Force -WhatIf:$false
+                $freeNow = Get-FreeSpace -Path $WorkDir
+                $freeTxt = if ($freeNow -ge 0) { ", $(Format-Bytes $freeNow) free" } else { '' }
+                Write-Log "$prefix - scratch file deleted ($(Format-Bytes $local.Size)$freeTxt)"
+            }
             catch { Write-Log "Could not delete $($local.Path): $_" 'WARN' }
         }
     }
     $record.FinishedUtc = (Get-Date).ToUniversalTime().ToString('s')
     [void]$results.Add([pscustomobject]$record)
     Save-Results
+}
+
+# Scratch should be empty. Anything still here is a file a crash or a kill left
+# behind, and it will sit there consuming disk until someone notices.
+$leftovers = @(Get-ChildItem -LiteralPath $WorkDir -File -ErrorAction SilentlyContinue)
+if ($leftovers.Count) {
+    $bytes = ($leftovers | Measure-Object -Property Length -Sum).Sum
+    Write-Log "$($leftovers.Count) file(s) left in $WorkDir taking $(Format-Bytes $bytes) - safe to delete" 'WARN'
 }
 
 $ok  = @($results | Where-Object { $_.Status -eq 'SUCCESS' }).Count
