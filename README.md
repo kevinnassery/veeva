@@ -1,6 +1,6 @@
 # Veeva Vault RIM tooling
 
-*Updated 2026-08-26 22:45 EDT*
+*Updated 2026-08-26 22:53 EDT*
 
 ## Get the scripts
 
@@ -115,11 +115,11 @@ id
 773
 ```
 
-5. Point at it and check the list is read correctly:
+5. Check the list is read correctly. `sourcedocids.txt` beside the scripts is picked up
+   automatically - no ini line needed:
 
 ```
-IdFile = sourcedocids.txt
-MODE   = REPORT
+MODE = REPORT
 ```
 
 Run `Run-Documents.bat`. Confirm the `documents.csv` count.

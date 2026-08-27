@@ -74,7 +74,12 @@ param(
     # A local .txt of document ids, one per line. When set, nothing is queried: this
     # IS the document list. Blank lines, #-comments and an "id" header are ignored,
     # duplicates are dropped. Highest precedence of the three.
-    [string]     $IdFile           = '',
+    #
+    # Defaults to sourcedocids.txt, picked up automatically when that file sits beside
+    # the script - so an older documents.ini with no IdFile line still uses it. If the
+    # file is absent the run falls through to the filters below instead of failing.
+    # Naming a file explicitly is different: then a missing file IS an error.
+    [string]     $IdFile           = 'sourcedocids.txt',
 
     # Otherwise: hand the whole query over in Vql, or leave that blank and let the
     # filter settings below build it. Vql wins over the filters.
@@ -263,6 +268,27 @@ if ($cfg) {
         Write-Warning "  $($shown -join ', ')$tail"
         Write-Warning '  If you expected one of those to apply, add the line - refresh.bat never'
         Write-Warning '  overwrites documents.ini, so an older ini lacks anything added since.'
+    }
+}
+
+# Resolve IdFile against the script's own folder as well as the working directory - a
+# .bat double-clicked from Explorer does not necessarily run with its folder as the CWD.
+$IdFileExplicit = $PSBoundParameters.ContainsKey('IdFile')
+if ($cfg -and $cfg.Contains('IdFile') -and -not [string]::IsNullOrWhiteSpace($cfg['IdFile'])) { $IdFileExplicit = $true }
+
+if ($IdFile) {
+    if (-not (Test-Path -LiteralPath $IdFile)) {
+        $here2 = $PSScriptRoot
+        if (-not $here2) { $here2 = (Get-Location).ProviderPath }
+        $beside = Join-Path $here2 $IdFile
+        if (Test-Path -LiteralPath $beside) { $IdFile = $beside }
+    }
+    if (-not (Test-Path -LiteralPath $IdFile)) {
+        if ($IdFileExplicit) {
+            throw "IdFile not found: $IdFile"
+        }
+        Write-Warning "No $IdFile found - falling back to the filter settings. Put your document ids in that file to work from a list instead."
+        $IdFile = ''
     }
 }
 
