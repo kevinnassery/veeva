@@ -144,7 +144,7 @@ param(
     [int]    $MaxRetries = 4
 )
 
-$ScriptVersion = '2026.08.27-22'
+$ScriptVersion = '2026.08.27-23'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -832,7 +832,10 @@ function Import-IdMap {
     $sci = 0
     $dupes = 0
     $conflict = New-Object System.Collections.ArrayList
+    $badRows  = New-Object System.Collections.ArrayList
+    $rowNo    = 1
     foreach ($row in $rows) {
+        $rowNo++
         $a = "$(Get-Field $row $srcCol '')".Trim()
         $b = "$(Get-Field $row $tgtCol '')".Trim()
         if ($a -match '^\d+(\.\d+)?[eE][+-]?\d+$' -or $b -match '^\d+(\.\d+)?[eE][+-]?\d+$') {
@@ -840,7 +843,13 @@ function Import-IdMap {
             $bad++
             continue
         }
-        if ($a -notmatch '^\d+$' -or $b -notmatch '^\d+$') { $bad++; continue }
+        if ($a -notmatch '^\d+$' -or $b -notmatch '^\d+$') {
+            # A skipped row is a document that never gets reconciled, so say WHICH one.
+            # A bare count leaves no way to find them in a 1000-row sheet.
+            $bad++
+            [void]$badRows.Add(("line {0}: source='{1}' target='{2}'" -f $rowNo, $a, $b))
+            continue
+        }
         if ($map.ContainsKey($a)) {
             # The sheet has a row per FILE, so one document appears on many rows.
             # Repeats are expected; a repeat pointing somewhere ELSE is not.
@@ -867,7 +876,11 @@ the run still reported success.
 Re-export with both id columns formatted as Text before running again.
 "@
     }
-    if ($bad) { Write-Log "$bad row(s) in $Path had no usable id pair and were skipped" 'WARN' }
+    if ($bad) {
+        Write-Log "$bad row(s) in $Path had no usable id pair and were skipped - those documents are NOT reconciled" 'WARN'
+        foreach ($br in ($badRows | Select-Object -First 10)) { Write-Log "  $br" 'WARN' }
+        if ($badRows.Count -gt 10) { Write-Log "  ... and $($badRows.Count - 10) more" 'WARN' }
+    }
     if ($map.Count -eq 0) { throw "No usable id pairs in $Path (columns '$srcCol' -> '$tgtCol')" }
     if ($dupes) { Write-Log "$dupes repeated row(s) for documents already mapped - expected when the sheet has a row per file" }
     Write-Log "$($map.Count) id pair(s) from $Path ($shown-separated, column '$srcCol' -> '$tgtCol')" 'OK'
@@ -1097,7 +1110,7 @@ Test-TargetStaging
 # sequential path stays the single implementation, with nothing duplicated to drift.
 # --------------------------------------------------------------------------------------
 
-if ($Mode -eq 'SYNC' -and $Workers -gt 1 -and $pending.Count -gt 1) {
+if ($Mode -ne 'ATTACH' -and $Workers -gt 1 -and $pending.Count -gt 1) {
 
     if (-not $script:Cred['Source'] -or -not $script:Cred['Target']) {
         throw @'
@@ -1139,7 +1152,7 @@ Blank SourceSessionId and TargetSessionId in attachments.ini and run again.
                 '-WorkDir',         "`"$(Join-Path $wDir 'work')`"",
                 '-CredentialFile',  "`"$credPath`"",
                 '-IdMap',           "`"$resolvedIdMap`"",
-                '-Workers', '1', '-MaxDocuments', '0', '-ExistingResults', 'Restart', '-Mode', 'SYNC'
+                '-Workers', '1', '-MaxDocuments', '0', '-ExistingResults', 'Restart', '-Mode', $Mode
             )
             $procs += Start-Process -FilePath 'powershell.exe' -ArgumentList $argList `
                         -WindowStyle Hidden -PassThru
