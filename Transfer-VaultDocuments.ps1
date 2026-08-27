@@ -93,7 +93,7 @@ param(
     [int]    $MaxRetries = 4
 )
 
-$ScriptVersion = '2026.08.26-10'
+$ScriptVersion = '2026.08.26-11'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -414,8 +414,13 @@ function Send-StagingPart {
         $req.ContentLength     = $Count
         $req.Timeout           = 900000
         $req.ReadWriteTimeout  = 900000
+        # Accept is a RESTRICTED header on HttpWebRequest - Headers.Add throws
+        # "The 'Accept' header must be modified using the appropriate property or
+        # method". It has to go through the property. Same family as Content-Type and
+        # Content-Length, both already set as properties above. Authorization and the
+        # X-VaultAPI-* headers are not restricted, so those are fine via Headers.Add.
+        $req.Accept = 'application/json'
         $req.Headers.Add('Authorization', $script:Session['Target'])
-        $req.Headers.Add('Accept', 'application/json')
         $req.Headers.Add('X-VaultAPI-FilePartNumber', "$PartNumber")
 
         try {
