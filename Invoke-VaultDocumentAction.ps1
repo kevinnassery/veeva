@@ -258,7 +258,10 @@ foreach ($name in @('VaultDNS', 'OutputRoot')) {
 }
 $VaultDNS = $VaultDNS -replace '^https?://', '' -replace '/+$', ''
 
-$OutputRoot = [IO.Path]::GetFullPath([IO.Path]::Combine((Get-Location).ProviderPath, $OutputRoot)).TrimEnd('\')
+$OutputRoot = [IO.Path]::GetFullPath([IO.Path]::Combine((Get-Location).ProviderPath, $OutputRoot))
+# Trim the trailing separator, except on a drive root - "C:\" trimmed to "C:" means
+# "the current directory on C:", which is not what anyone typing C:\ meant.
+if ($OutputRoot.Length -gt 3) { $OutputRoot = $OutputRoot.TrimEnd('\') }
 if (-not (Test-Path -LiteralPath $OutputRoot)) { New-Item -ItemType Directory -Path $OutputRoot -Force | Out-Null }
 
 $stamp         = Get-Date -Format 'yyyyMMdd-HHmmss'
