@@ -127,24 +127,8 @@
     -Plan reports how many of the user assignments are already covered by group
     membership, so this can be decided on the numbers rather than on a hunch.
 
-.PARAMETER Validate
-    Prove that what a run said it assigned is actually on the documents. Read-only.
-
-    Not a re-plan. A re-plan recomputes the desired state with the same code that computed
-    it the first time and reports agreement, which shows the code is consistent with
-    itself - not that Vault holds anything. This reads role-results.csv, takes every row
-    recorded as ASSIGNED, and looks for exactly those groups on exactly those documents,
-    through doc_role__sys rather than the endpoint the run used.
-
-    It exists because of documented Vault behaviour: "Users and groups (IDs) in the input
-    that are either invalid (not recognized) or cannot be assigned to a role due to
-    permissions are ignored and not processed." A document can report SUCCESS while
-    quietly dropping a group, and nothing in the run's own output says so.
-
-    Writes validate-roles.csv. Exits non-zero if anything claimed is missing.
-
-.PARAMETER ResultsFile
-    Which results file -Validate reads. Default: role-results.csv in the output folder.
+    Proving a run landed is veeva-validate.ps1's job, deliberately a separate file: a
+    checker that shares this code could be wrong the same way and still agree with it.
 
 .PARAMETER Survey
     What is in scope, exactly, in about five seconds. One paginated query returns every
@@ -232,8 +216,6 @@ param(
     [switch]$Version,
     [switch]$Logout,
     [switch]$Survey,
-    [switch]$Validate,
-    [string]$ResultsFile = '',
     [switch]$Probe,
     [switch]$Plan,
     [string[]]$Role = @(),
@@ -246,7 +228,7 @@ param(
     [pscredential]$Credential
 )
 
-$ScriptVersion = '2026.08.28-19'
+$ScriptVersion = '2026.08.28-20'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -385,8 +367,7 @@ function Resolve-Settings {
     # Otherwise a file already sitting in the folder is almost always the one meant, so
     # offer it rather than making someone type a path they can see from where they stand.
     $mapPath = ''
-    #   -Validate  reads a results file, so it needs no document list at all.
-    if (-not $Where -and -not $Validate -and -not ($Probe -and -not $Map)) {
+    if (-not $Where -and -not ($Probe -and -not $Map)) {
         $mapDefault = ''
         foreach ($guess in @('attachments-map.csv', 'map.csv')) {
             if (Test-Path -LiteralPath (Join-Path (Get-Location).ProviderPath $guess)) { $mapDefault = $guess; break }
@@ -1729,177 +1710,6 @@ function Send-RoleBatch {
     return $byDoc
 }
 
-function Get-AssignedGroupsBulk {
-    # Current group assignments for a set of documents, keyed "docId|roleName".
-    #
-    # Read through doc_role__sys - a DIFFERENT path from the documents/{id}/roles endpoint
-    # the assign run used. That is deliberate: a validator that reads back through the
-    # same code it is checking will agree with itself no matter what happened in Vault.
-    #
-    # Bulk where the query is accepted, one document at a time where it is not. The
-    # per-document fallback is not a nicety: this endpoint's WHERE support is not in the
-    # mirrored docs, and a validator that silently checked nothing would be worse than
-    # no validator at all.
-    param([Parameter(Mandatory)]$Context, [Parameter(Mandatory)][array]$DocIds)
-
-    $byKey = @{}
-    $bulk  = $true
-    $chunk = 200
-
-    for ($off = 0; $off -lt $DocIds.Count; $off += $chunk) {
-        if (-not $bulk) { break }
-        $slice = @($DocIds[$off..([math]::Min($off + $chunk - 1, $DocIds.Count - 1))])
-        $vql = "SELECT document_id, role_name__sys, group__sys FROM doc_role__sys WHERE document_id CONTAINS ($($slice -join ','))"
-        $path  = '/query'
-        $body  = "q=$([Uri]::EscapeDataString($vql))"
-        $pages = 0
-        try {
-            while ($path -and $pages -lt 500) {
-                $pages++
-                $r = if ($pages -eq 1) {
-                        Invoke-Api -VaultHost $Context.VaultHost -ApiVersion $Context.Api -Method POST `
-                            -Path $path -Body $body -ContentType 'application/x-www-form-urlencoded' -MaxRetries 1
-                     } else {
-                        Invoke-Api -VaultHost $Context.VaultHost -ApiVersion $Context.Api -Method GET -Path $path -MaxRetries 1
-                     }
-                foreach ($row in @(Get-Field $r 'data' @())) {
-                    $d = "$(Get-Field $row 'document_id' '')"
-                    $n = "$(Get-Field $row 'role_name__sys' '')"
-                    $g = "$(Get-Field $row 'group__sys' '')"
-                    if (-not $d -or -not $n -or -not $g) { continue }
-                    $k = "$d|$(ConvertTo-NameKey $n)"
-                    if (-not $byKey.ContainsKey($k)) { $byKey[$k] = @{} }
-                    $byKey[$k][$g] = $true
-                }
-                $path = "$(Get-Field (Get-Field $r 'responseDetails' $null) 'next_page' '')"
-            }
-        }
-        catch {
-            Write-Log "doc_role__sys is not queryable this way, falling back to one read per document: $_" 'WARN'
-            $bulk = $false
-        }
-    }
-
-    if ($bulk) {
-        Write-Log "Read current assignments for $($DocIds.Count) document(s) in bulk from doc_role__sys" 'OK'
-        return [pscustomobject]@{ ByKey = $byKey; Bulk = $true }
-    }
-
-    $byKey = @{}
-    $i = 0
-    foreach ($docId in $DocIds) {
-        $i++
-        if (($i % 500) -eq 0) { Write-Log "  read $i of $($DocIds.Count)" }
-        try {
-            foreach ($r in @(Get-DocumentRole -Context $Context -DocId $docId)) {
-                $n = "$(Get-Field $r 'name' '')"
-                if (-not $n) { continue }
-                $k = "$docId|$(ConvertTo-NameKey $n)"
-                if (-not $byKey.ContainsKey($k)) { $byKey[$k] = @{} }
-                foreach ($g in @(Get-Field $r 'assignedGroups' @())) { $byKey[$k]["$g"] = $true }
-            }
-        }
-        catch { Write-Log "  could not read document ${docId}: $_" 'ERROR' }
-    }
-    return [pscustomobject]@{ ByKey = $byKey; Bulk = $false }
-}
-
-function Invoke-Validate {
-    # Prove that what a run SAID it assigned is actually on the documents.
-    #
-    # Not a re-plan. A re-plan recomputes the desired state with the same code that
-    # computed it the first time and then reports agreement - which proves the code is
-    # consistent with itself, not that Vault holds anything.
-    #
-    # This reads role-results.csv, takes every row the run recorded as ASSIGNED, and looks
-    # for exactly those groups on exactly those documents. It exists because Vault's
-    # assign endpoint documents this behaviour: "Users and groups (IDs) in the input that
-    # are either invalid (not recognized) or cannot be assigned to a role due to
-    # permissions are ignored and not processed." A document can therefore report SUCCESS
-    # while quietly dropping a group, and nothing in the run's own output would say so.
-    param([Parameter(Mandatory)]$Context)
-
-    $c    = $Context
-    $path = $ResultsFile
-    if (-not $path) { $path = Join-Path $c.Out 'role-results.csv' }
-    if (-not (Test-Path -LiteralPath $path)) {
-        throw "No results file at $path. Pass -ResultsFile, or run an assign first - there is nothing to validate without one."
-    }
-
-    $rows = @(Import-Csv -LiteralPath $path)
-    Write-Log "$($rows.Count) row(s) from $path"
-
-    $claims = New-Object System.Collections.ArrayList
-    $statuses = @{}
-    foreach ($row in $rows) {
-        $st = "$(Get-Field $row 'Status' '')"
-        if ($st) { $statuses[$st] = 1 + $(if ($statuses.ContainsKey($st)) { $statuses[$st] } else { 0 }) }
-        if ($st -ne 'ASSIGNED') { continue }
-        $groups = "$(Get-Field $row 'MissingGroups' '')"
-        if (-not $groups) { continue }
-        [void]$claims.Add([pscustomobject]@{
-            DocId  = "$(Get-Field $row 'DocId' '')"
-            Role   = "$(Get-Field $row 'Role' '')"
-            Groups = @($groups -split ';' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-        })
-    }
-    Write-Log "Row statuses: $((($statuses.Keys | Sort-Object) | ForEach-Object { "$_=$($statuses[$_])" }) -join ', ')"
-
-    if (-not $claims.Count) {
-        Write-Log 'No ASSIGNED rows with groups in that file - nothing was claimed, so there is nothing to prove.' 'WARN'
-        return 0
-    }
-
-    $docIds = @($claims | ForEach-Object { $_.DocId } | Select-Object -Unique)
-    Write-Log "$($claims.Count) claim(s) over $($docIds.Count) document(s) to verify"
-
-    $dir     = Get-Directory -Context $c
-    $current = Get-AssignedGroupsBulk -Context $c -DocIds $docIds
-
-    $out  = New-Object System.Collections.ArrayList
-    $stat = @{ Confirmed = 0; Missing = 0; Unknown = 0 }
-
-    foreach ($claim in $claims) {
-        $k    = "$($claim.DocId)|$(ConvertTo-NameKey $claim.Role)"
-        $have = if ($current.ByKey.ContainsKey($k)) { $current.ByKey[$k] } else { @{} }
-        foreach ($gName in $claim.Groups) {
-            $gid = Resolve-NameToId -Directory $dir -Kind 'group' -Name $gName
-            $status = ''
-            if (-not $gid) { $status = 'UNRESOLVED_NAME'; $stat.Unknown++ }
-            elseif ($have.ContainsKey($gid)) { $status = 'CONFIRMED'; $stat.Confirmed++ }
-            else { $status = 'MISSING'; $stat.Missing++ }
-
-            if ($status -ne 'CONFIRMED') {
-                Write-Log "  doc $($claim.DocId) $($claim.Role) - $status : $gName" $(if ($status -eq 'MISSING') { 'ERROR' } else { 'WARN' })
-            }
-            [void]$out.Add([pscustomobject][ordered]@{
-                DocId = $claim.DocId; Role = $claim.Role; Group = $gName; GroupId = $gid
-                Status = $status; CheckedUtc = (Get-Date).ToUniversalTime().ToString('s')
-            })
-        }
-    }
-
-    $report = Join-Path $c.Out 'validate-roles.csv'
-    $out | Export-Csv -LiteralPath $report -NoTypeInformation -Encoding UTF8 -WhatIf:$false
-
-    Write-Log '----------------------------------------------------------------'
-    Write-Log ("{0} claim(s) checked by {1}" -f $out.Count, $(if ($current.Bulk) { 'doc_role__sys' } else { 'one read per document' }))
-    Write-Log ("  CONFIRMED        {0}" -f $stat.Confirmed) 'OK'
-    if ($stat.Missing) {
-        Write-Log ("  MISSING          {0}  - the run recorded these as assigned and Vault does not have them" -f $stat.Missing) 'ERROR'
-        Write-Log '  Vault ignores ids it does not recognise or cannot grant, and still reports SUCCESS.' 'ERROR'
-        Write-Log '  Re-running will not fix that: check whether the account may grant these groups.' 'ERROR'
-    }
-    if ($stat.Unknown) {
-        Write-Log ("  UNRESOLVED_NAME  {0}  - recorded under a name no group here answers to" -f $stat.Unknown) 'WARN'
-    }
-    if (-not $stat.Missing -and -not $stat.Unknown) {
-        Write-Log 'Every group this run recorded as assigned is on its document.' 'OK'
-    }
-    Write-Log "Report: $report"
-    return ($stat.Missing)
-}
-
 function Invoke-Survey {
     # What is actually in scope, exactly, in about five seconds.
     #
@@ -2485,7 +2295,7 @@ try {
 
     $ctx = Resolve-Settings
 
-    $mode = if ($Validate) { 'validate' } elseif ($Survey) { 'survey' } elseif ($Probe) { 'probe' } elseif ($Plan) { 'plan' } else { 'assign' }
+    $mode = if ($Survey) { 'survey' } elseif ($Probe) { 'probe' } elseif ($Plan) { 'plan' } else { 'assign' }
     Write-Log "veeva-roles $ScriptVersion - $mode"
     Write-Log "  vault    $($ctx.VaultHost)"
     Write-Log "  api      $($ctx.Api)"
@@ -2499,12 +2309,6 @@ try {
 
     # -Survey does its own single query and needs no document list, so it answers before
     # the enumeration that every other mode depends on.
-    if ($Validate) {
-        $exitCode = Invoke-Validate -Context $ctx
-        Write-Log "Log: $($script:LogFile)"
-        exit $exitCode
-    }
-
     if ($Survey) {
         $exitCode = Invoke-Survey -Context $ctx -Where $Where
         Write-Log "Log: $($script:LogFile)"

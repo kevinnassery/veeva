@@ -1,6 +1,6 @@
 # Veeva Vault — migration tools
 
-*Updated 2026-08-28 19:40 EDT*
+*Updated 2026-08-28 19:46 EDT*
 
 Two jobs, each safe to run repeatedly because each compares before it acts:
 
@@ -197,7 +197,6 @@ Three steps, in order. Nothing is written to Vault until the third.
 
 | | |
 | --- | --- |
-| `-Validate` | prove what a run assigned is actually there. Writes nothing |
 | `-Survey` | exactly what is in scope, by type and subtype, in ~5 seconds. Writes nothing |
 | `-Probe` | roles and where the defaults come from, per document. Writes nothing |
 | `-Plan` | exactly who would be added to which role, per document. Writes nothing |
@@ -253,20 +252,34 @@ its job.
 
 ### Proving it worked
 
-`-Validate` reads `role-results.csv`, takes every row recorded as `ASSIGNED`, and checks
-Vault actually holds those groups — reading through `doc_role__sys`, deliberately *not*
-the endpoint the run used. A validator that reads back through the code it is checking
-agrees with itself whatever happened.
+`veeva-validate.ps1` is a **separate tool**, and validating is all it does — run it with
+no arguments:
 
 ```
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File veeva-roles.ps1 -Validate
+curl.exe -sfL -H "Accept: application/vnd.github.raw" -o veeva-validate.ps1 "https://api.github.com/repos/kevinnassery/veeva/contents/oneshot/veeva-validate.ps1?ref=main"
 ```
 
-This is not the same as re-running `-Plan`. A re-plan recomputes the desired state with
-the same code that computed it the first time; agreement proves consistency, not that
-anything landed. It matters because Vault documents that it "ignores and does not
-process" ids it cannot grant — **a document can report SUCCESS with a group silently
-dropped**, and only reading the result back catches it.
+```
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File veeva-validate.ps1 -n 5
+```
+
+`-n 5` checks five documents; drop it to check the whole file.
+
+It reads `role-results.csv`, takes every row recorded as `ASSIGNED`, and checks Vault
+actually holds those groups — through `doc_role__sys`, deliberately *not* the endpoint the
+run wrote through. It decides nothing about what *ought* to be there; it only looks for
+what the run said it did.
+
+**Separate on purpose.** A checker that shares code with the tool it checks can be wrong
+in the same way and still agree with it. So it duplicates the small pieces it needs rather
+than importing them, and its tests assert literal expected values instead of comparing the
+two implementations against each other.
+
+This is also not the same as re-running `-Plan`. A re-plan recomputes the desired state
+with the same code that computed it the first time; agreement proves consistency, not that
+anything landed. It matters because Vault documents that it "ignores and does not process"
+ids it cannot grant — **a document can report SUCCESS with a group silently dropped**, and
+only reading the result back from somewhere else catches it.
 
 `MISSING` rows in `validate-roles.csv` are exactly that case. Re-running will not fix
 them; check whether the account may grant those groups.

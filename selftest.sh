@@ -35,6 +35,14 @@ else
   bad "test-roles"
 fi
 
+echo "== veeva-validate logic that does not need a vault =="
+if $PS -NoProfile -File oneshot/test-validate.ps1 >/tmp/veeva-test-validate.out 2>&1; then
+  ok "test-validate ($(grep -c '^  PASS' /tmp/veeva-test-validate.out) assertions)"
+else
+  grep '^  FAIL' /tmp/veeva-test-validate.out | sed 's/^/  /'
+  bad "test-validate"
+fi
+
 echo "== every version stamp matches =="
 #  The file set here must be the one bump-version.sh stamps, not a hand-written glob.
 #  The old glob was ./*.bat ./*/*/*.ps1 ./*/*/*.bat, which silently missed every
