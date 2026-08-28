@@ -135,7 +135,7 @@ param(
     [int]    $MaxRetries = 4
 )
 
-$ScriptVersion = '2026.08.27-32'
+$ScriptVersion = '2026.08.27-33'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -1165,7 +1165,18 @@ function Get-AttachmentMd5 {
                 $record.Status  = 'MISMATCH'
                 $record.Message = "source $($record.SourceMd5) vs target $($record.TargetMd5)"
                 $stat.Mismatch++
-                Write-Log "$prefix - MISMATCH source $($record.SourceMd5) target $($record.TargetMd5)" 'ERROR'
+                # Sizes alongside the hashes: identical byte counts with different
+                # digests points at repackaging - Office files are ZIP containers and
+                # re-save with different timestamps and entry order - whereas different
+                # counts mean the content itself differs. That distinction decides
+                # whether a mismatch is worth chasing, and it should not require
+                # opening the CSV.
+                $sizeNote = if ($record.SourceSize -eq $record.TargetSize) {
+                    "same size $(Format-Bytes $record.SourceSize)"
+                } else {
+                    "source $(Format-Bytes $record.SourceSize) vs target $(Format-Bytes $record.TargetSize)"
+                }
+                Write-Log "$prefix - MISMATCH $sizeNote | source $($record.SourceMd5) target $($record.TargetMd5)" 'ERROR'
             }
         }
         catch {
