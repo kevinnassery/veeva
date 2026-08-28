@@ -16,7 +16,13 @@
 
     One file. No folder of scripts, no ini, no refresh step, nothing installed:
 
-        curl.exe -sfL -o veeva-roles.ps1 https://raw.githubusercontent.com/kevinnassery/veeva/main/oneshot/veeva-roles.ps1
+        for /f %S in ('curl.exe -s -H "Accept: application/vnd.github.sha" https://api.github.com/repos/kevinnassery/veeva/commits/main') do curl.exe -sfL -o veeva-roles.ps1 https://raw.githubusercontent.com/kevinnassery/veeva/%S/oneshot/veeva-roles.ps1
+
+    Fetched by commit SHA, not by branch. raw.githubusercontent.com caches a BRANCH url
+    for five minutes and ignores no-cache, so straight after a fix is pushed it hands back
+    the previous file - which looks exactly like a fix that did not work. A SHA url is
+    immutable, so the cache can only ever hold one answer for it. The head SHA comes from
+    the GitHub API, which is not behind that cache. Inside a .bat, %S becomes %%S.
         powershell.exe -NoProfile -ExecutionPolicy Bypass -File veeva-roles.ps1 -Probe
 
     Three steps, in order. Nothing is written to Vault until the third.

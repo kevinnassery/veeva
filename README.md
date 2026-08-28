@@ -111,26 +111,40 @@ cd /d %USERPROFILE%
 ```
 
 ```
-curl.exe -sfL -o veeva-roles.ps1 https://raw.githubusercontent.com/kevinnassery/veeva/main/oneshot/veeva-roles.ps1
+for /f %S in ('curl.exe -s -H "Accept: application/vnd.github.sha" https://api.github.com/repos/kevinnassery/veeva/commits/oneshot') do curl.exe -sfL -o veeva-roles.ps1 https://raw.githubusercontent.com/kevinnassery/veeva/%S/oneshot/veeva-roles.ps1
 ```
 
 ```
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File veeva-roles.ps1 -Probe
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File veeva-roles.ps1 -Probe -Map map.csv
 ```
 
 The `-ExecutionPolicy Bypass` is not optional — a downloaded `.ps1` will not run without
 it, and double-clicking one opens Notepad.
 
-That URL is the branch tip, which `raw.githubusercontent.com` caches for five minutes.
-Right after a change is pushed it can hand back the previous version, which looks exactly
-like a fix that did not work. To pin to an exact commit instead:
+### Why the fetch is a `for /f` and not a plain URL
+
+**Never fetch this file from a branch URL.** `raw.githubusercontent.com` caches a branch
+URL for five minutes and ignores `no-cache`, so right after a change is pushed it hands
+back the *previous* version of the file — which looks exactly like a fix that did not
+work, and costs an hour of chasing a bug that was already fixed. A SHA URL is immutable,
+so the CDN can cache it as long as it likes and still only ever have one answer.
+
+The command above reads the head commit from the GitHub API — which is *not* behind the
+raw cache — and then fetches by that SHA. It is the same trick `refresh.bat` already uses
+for the attachment scripts, for the same reason.
+
+Swap `commits/oneshot` for `commits/main` once this is merged. Inside a `.bat` file,
+`%S` has to be written `%%S`; at the prompt it is `%S`.
+
+To pin to one exact version instead of the head — worth doing if two people need to be
+demonstrably running the same code:
 
 ```
-for /f %S in ('curl.exe -s -H "Accept: application/vnd.github.sha" https://api.github.com/repos/kevinnassery/veeva/commits/main') do curl.exe -sfL -o veeva-roles.ps1 https://raw.githubusercontent.com/kevinnassery/veeva/%S/oneshot/veeva-roles.ps1
+curl.exe -sfL -o veeva-roles.ps1 https://raw.githubusercontent.com/kevinnassery/veeva/954bf06b95971570998be3e4436bed432c22106c/oneshot/veeva-roles.ps1
 ```
 
-`veeva-roles.ps1 -Version` prints what you have, so "which version am I running" is
-answerable on sight.
+Either way, `veeva-roles.ps1 -Version` prints what you actually have, with no vault and no
+login, so "which version am I running" is answerable on sight.
 
 `-Probe` asks only for the vault and your login — it writes nothing, so it will survey a
 sample of the vault on its own if you give it no scope. Give it one and it surveys all of
