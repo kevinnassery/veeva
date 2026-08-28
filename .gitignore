@@ -37,3 +37,4 @@ validate-work/
 old-*/
 .run-*.lock
 .vault-session.json
+.claude/
