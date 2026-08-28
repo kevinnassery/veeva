@@ -359,6 +359,22 @@ eq 'no members is empty'   ($withMembers.Members['12'] -join ',') ''
 eq 'label still indexed'   (Resolve-NameToId -Directory $withMembers -Kind 'group' -Name 'Document Users') '11'
 $script:Directory = $null
 
+Write-Host "`n== a user in two assigned groups is counted once, not twice =="
+# A real run reported "1449 of those 1430 user assignment(s) are already members of a
+# group" - a subset bigger than its superset, because membership rows were counted rather
+# than people. The count can never exceed the number of users offered.
+$memDir = [pscustomobject]@{
+  ById = @{}; ByName = @{}
+  Members = @{ '11' = @('101', '102'); '12' = @('102', '103'); '13' = @() }
+}
+eq 'in both groups, counted once' (Get-RedundantUserCount -Directory $memDir -Groups @('11','12') -Users @('101','102','103')) 3
+eq 'never exceeds the user count' (Get-RedundantUserCount -Directory $memDir -Groups @('11','12') -Users @('102')) 1
+eq 'uncovered user not counted'   (Get-RedundantUserCount -Directory $memDir -Groups @('11')      -Users @('103')) 0
+eq 'no groups, nothing covered'   (Get-RedundantUserCount -Directory $memDir -Groups @()          -Users @('101')) 0
+eq 'no users, nothing covered'    (Get-RedundantUserCount -Directory $memDir -Groups @('11')      -Users @()) 0
+eq 'unknown group is not fatal'   (Get-RedundantUserCount -Directory $memDir -Groups @('99')      -Users @('101')) 0
+eq 'int ids match string ids'     (Get-RedundantUserCount -Directory $memDir -Groups @(11)        -Users @(101)) 1
+
 Write-Host "`n== the cached vault host is offered back, newest session first =="
 $script:SessionPath = Join-Path $tmp '.vault-session.json'
 eq 'no file, no default' (Get-CachedVaultHost) ''

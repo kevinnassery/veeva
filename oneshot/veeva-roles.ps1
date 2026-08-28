@@ -215,7 +215,7 @@ param(
     [pscredential]$Credential
 )
 
-$ScriptVersion = '2026.08.28-10'
+$ScriptVersion = '2026.08.28-11'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -978,6 +978,27 @@ function Get-Directory {
     Write-Log "Directory: $users user(s), $groups group(s)"
     $script:Directory = [pscustomobject]@{ ById = $byId; ByName = $byName; Members = $byMembers }
     return $script:Directory
+}
+
+function Get-RedundantUserCount {
+    # How many of these users are already in at least one of these groups.
+    #
+    # Counted per USER, not per membership row. Counting per row reported 1,449 redundant
+    # out of 1,430 total on a real run - a subset larger than the set it is part of -
+    # because anyone in two of the groups was counted twice. A number that cannot be true
+    # discredits the finding it exists to support.
+    param(
+        [Parameter(Mandatory)]$Directory,
+        [Parameter(Mandatory)][AllowEmptyCollection()][array]$Groups,
+        [Parameter(Mandatory)][AllowEmptyCollection()][array]$Users
+    )
+    if (-not $Users.Count -or -not $Groups.Count) { return 0 }
+    $covered = @{}
+    foreach ($g in $Groups) {
+        if (-not $Directory.Members.ContainsKey("$g")) { continue }
+        foreach ($m in $Directory.Members["$g"]) { $covered["$m"] = $true }
+    }
+    return @($Users | Where-Object { $covered.ContainsKey("$_") }).Count
 }
 
 function Get-DisplayName {
@@ -1786,12 +1807,7 @@ function Invoke-Roles {
             # groups going on at the same time. A direct assignment outlives the group -
             # take someone out of the group and they keep the access - so writing hundreds
             # of thousands of them by accident is a mess that is hard to unpick later.
-            foreach ($g in $want.Groups) {
-                if (-not $dir.Members.ContainsKey($g)) { continue }
-                foreach ($m in $dir.Members[$g]) {
-                    if ($missingUsers -contains $m) { $stat.RedundantUsers++ }
-                }
-            }
+            $stat.RedundantUsers += (Get-RedundantUserCount -Directory $dir -Groups $want.Groups -Users $missingUsers)
 
             if ($Assign -eq 'Groups') { $missingUsers  = @() }
             if ($Assign -eq 'Users')  { $missingGroups = @() }

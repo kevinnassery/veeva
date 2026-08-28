@@ -48,7 +48,7 @@ param(
     [int] $ListLimit = 40
 )
 
-$ScriptVersion = '2026.08.28-10'
+$ScriptVersion = '2026.08.28-11'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
