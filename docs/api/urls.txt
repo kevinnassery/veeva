@@ -29,6 +29,14 @@ https://general.veevavault.dev/vault-api/api-reference/26.2/authentication/retri
 https://general.veevavault.dev/vault-api/api-reference/26.2/authentication/salesforcetrade-delegated-requests/
 https://general.veevavault.dev/vault-api/api-reference/26.2/authentication/session-keep-alive/
 https://general.veevavault.dev/vault-api/api-reference/26.2/authentication/user-name-and-password/
+https://general.veevavault.dev/vault-api/api-reference/26.2/document-binder-roles/
+https://general.veevavault.dev/vault-api/api-reference/26.2/document-binder-roles/document-roles/
+https://general.veevavault.dev/vault-api/api-reference/26.2/document-binder-roles/document-roles/assign-users-groups-to-roles-on-a-single-document/
+https://general.veevavault.dev/vault-api/api-reference/26.2/document-binder-roles/document-roles/assign-users-groups-to-roles-on-multiple-documents-binders/
+https://general.veevavault.dev/vault-api/api-reference/26.2/document-binder-roles/document-roles/remove-users-groups-from-roles-on-a-single-document/
+https://general.veevavault.dev/vault-api/api-reference/26.2/document-binder-roles/document-roles/remove-users-groups-from-roles-on-multiple-documents-binders/
+https://general.veevavault.dev/vault-api/api-reference/26.2/document-binder-roles/document-roles/retrieve-all-document-roles/
+https://general.veevavault.dev/vault-api/api-reference/26.2/document-binder-roles/document-roles/retrieve-document-role/
 https://general.veevavault.dev/vault-api/api-reference/26.2/document-lifecycle-workflows/
 https://general.veevavault.dev/vault-api/api-reference/26.2/document-lifecycle-workflows/binder-user-actions/
 https://general.veevavault.dev/vault-api/api-reference/26.2/document-lifecycle-workflows/binder-user-actions/initiate-binder-user-action/

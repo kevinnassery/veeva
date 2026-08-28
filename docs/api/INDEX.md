@@ -152,6 +152,17 @@ workflows), authentication, file staging, jobs, VQL, vault objects, Vault Loader
 - [Session Keep Alive](vault-api/api-reference/26.2/authentication/session-keep-alive.md)
 - [User Name and Password](vault-api/api-reference/26.2/authentication/user-name-and-password.md)
 
+## Platform — document-binder-roles
+
+- [Document & Binder Roles](vault-api/api-reference/26.2/document-binder-roles.md)
+- [Document Roles](vault-api/api-reference/26.2/document-binder-roles/document-roles.md)
+- [Assign Users & Groups to Roles on a Single Document](vault-api/api-reference/26.2/document-binder-roles/document-roles/assign-users-groups-to-roles-on-a-single-document.md)
+- [Assign Users & Groups to Roles on Multiple Documents & Binders](vault-api/api-reference/26.2/document-binder-roles/document-roles/assign-users-groups-to-roles-on-multiple-documents-binders.md)
+- [Remove Users & Groups from Roles on a Single Document](vault-api/api-reference/26.2/document-binder-roles/document-roles/remove-users-groups-from-roles-on-a-single-document.md)
+- [Remove Users & Groups from Roles on Multiple Documents & Binders](vault-api/api-reference/26.2/document-binder-roles/document-roles/remove-users-groups-from-roles-on-multiple-documents-binders.md)
+- [Retrieve All Document Roles](vault-api/api-reference/26.2/document-binder-roles/document-roles/retrieve-all-document-roles.md)
+- [Retrieve Document Role](vault-api/api-reference/26.2/document-binder-roles/document-roles/retrieve-document-role.md)
+
 ## Platform — document-lifecycle-workflows
 
 - [Binder User Actions](vault-api/api-reference/26.2/document-lifecycle-workflows/binder-user-actions.md)
