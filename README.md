@@ -1,6 +1,6 @@
 # Veeva Vault — migration tools
 
-*Updated 2026-08-28 13:33 EDT*
+*Updated 2026-08-28 13:38 EDT*
 
 Two jobs, each safe to run repeatedly because each compares before it acts:
 
@@ -111,40 +111,40 @@ cd /d %USERPROFILE%
 ```
 
 ```
-for /f %S in ('curl.exe -s -H "Accept: application/vnd.github.sha" https://api.github.com/repos/kevinnassery/veeva/commits/oneshot') do curl.exe -sfL -o veeva-roles.ps1 https://raw.githubusercontent.com/kevinnassery/veeva/%S/oneshot/veeva-roles.ps1
+curl.exe -sfL -H "Accept: application/vnd.github.raw" -o veeva-roles.ps1 "https://api.github.com/repos/kevinnassery/veeva/contents/oneshot/veeva-roles.ps1?ref=oneshot"
 ```
 
 ```
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File veeva-roles.ps1 -Probe -Map map.csv
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File veeva-roles.ps1 -Probe
 ```
 
 The `-ExecutionPolicy Bypass` is not optional — a downloaded `.ps1` will not run without
 it, and double-clicking one opens Notepad.
 
-### Why the fetch is a `for /f` and not a plain URL
+Swap `ref=oneshot` for `ref=main` once this is merged.
 
-**Never fetch this file from a branch URL.** `raw.githubusercontent.com` caches a branch
-URL for five minutes and ignores `no-cache`, so right after a change is pushed it hands
-back the *previous* version of the file — which looks exactly like a fix that did not
-work, and costs an hour of chasing a bug that was already fixed. A SHA URL is immutable,
-so the CDN can cache it as long as it likes and still only ever have one answer.
+### Why that URL and not the obvious one
 
-The command above reads the head commit from the GitHub API — which is *not* behind the
-raw cache — and then fetches by that SHA. It is the same trick `refresh.bat` already uses
-for the attachment scripts, for the same reason.
+**Do not fetch this from `raw.githubusercontent.com/…/main/…`.** That caches for five
+minutes and ignores `no-cache`, so right after a fix is pushed it hands back the
+*previous* file — which looks exactly like a fix that did not work, and costs an hour
+chasing a bug that was already dead.
 
-Swap `commits/oneshot` for `commits/main` once this is merged. Inside a `.bat` file,
-`%S` has to be written `%%S`; at the prompt it is `%S`.
+The contents API above is a different host with its own cache: 60 seconds, revalidated
+against an ETag. One request, no SHA to juggle, and always effectively current. It is
+rate-limited to 60 requests an hour from one address, which is not a constraint for a
+file you fetch when it changes.
 
-To pin to one exact version instead of the head — worth doing if two people need to be
-demonstrably running the same code:
+To pin to one exact version — worth doing when two people need to be demonstrably running
+the same code rather than merely the latest:
 
 ```
 curl.exe -sfL -o veeva-roles.ps1 https://raw.githubusercontent.com/kevinnassery/veeva/954bf06b95971570998be3e4436bed432c22106c/oneshot/veeva-roles.ps1
 ```
 
-Either way, `veeva-roles.ps1 -Version` prints what you actually have, with no vault and no
-login, so "which version am I running" is answerable on sight.
+A commit URL is immutable, so the CDN can cache it as long as it likes and still only ever
+have one answer. Either way, `veeva-roles.ps1 -Version` prints what you actually have,
+with no vault and no login.
 
 `-Probe` asks only for the vault and your login — it writes nothing, so it will survey a
 sample of the vault on its own if you give it no scope. Give it one and it surveys all of
@@ -152,21 +152,38 @@ it, because a survey that looked at 25 of 577 documents can miss a subtype entir
 then report that everything is consistent.
 
 `-Plan` and the assign run always need a scope; neither will ever default to "the whole
-vault". The map is the same
-`attachments-map.csv`; its **target** id column names the documents to repair. Two rows
-pointing at the same target are one document, not two.
+vault".
 
-If there is no map, `-Where` enumerates the documents from the vault instead — a VQL
-condition, run as `SELECT id FROM documents WHERE …` and paged through:
+### The map is optional
+
+This job only ever touches the **target** vault, so the map's source-id column is unused —
+only the target ids matter. Anything that names those documents will do, and the vault can
+usually name them itself. `-Where` takes a VQL condition, run as
+`SELECT id FROM documents WHERE …` and paged through:
 
 ```
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File veeva-roles.ps1 -Probe -Where "type__v = 'Administrative Information'"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File veeva-roles.ps1 -Probe -Where "created_by__v = 11280389"
 ```
 
-Prefer the map where one exists. It says exactly which documents the migration produced;
-a query says which documents match a condition *today*, and the two stop being the same
-set as soon as anyone adds a document by hand. `-Where` is for when the migration was the
-whole vault, or when the job really is "every document of this subtype".
+`created_by__v` set to the account the migration ran as is usually the most exact scope
+there is — it is *definitionally* "the documents that were loaded", with no spreadsheet to
+keep in step. Narrow it further with a date window or a subtype if the account did more
+than one load:
+
+```
+-Where "created_by__v = 11280389 AND created_date__v > '2026-08-01T00:00:00.000Z'"
+```
+
+`-Map` still works and still takes the same `attachments-map.csv` — two rows pointing at
+the same target are one document, not two. Use it when the migration was one batch you
+already have a manifest for. Use `-Where` otherwise.
+
+One reason to keep *some* scope rather than sweeping the vault: a document can be missing
+a default because someone deliberately removed that group from its sharing settings. This
+tool cannot tell that apart from a document the loader never populated, and would put the
+group back. Documents the UI created already have their defaults, so they report `IN_STEP`
+and nothing happens to them — but a deliberate removal is a real edit, and a scope keeps
+you away from it.
 
 Three steps, in order. Nothing is written to Vault until the third.
 
