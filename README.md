@@ -1,6 +1,6 @@
 # Veeva Vault — migration tools
 
-*Updated 2026-08-28 14:06 EDT*
+*Updated 2026-08-28 14:21 EDT*
 
 Two jobs, each safe to run repeatedly because each compares before it acts:
 
@@ -197,7 +197,8 @@ Three steps, in order. Nothing is written to Vault until the third.
 
 | | |
 | --- | --- |
-| `-Probe` | survey the vault — subtypes, roles, and where the defaults come from. Writes nothing |
+| `-Survey` | exactly what is in scope, by type and subtype, in ~5 seconds. Writes nothing |
+| `-Probe` | roles and where the defaults come from, per document. Writes nothing |
 | `-Plan` | exactly who would be added to which role, per document. Writes nothing |
 | *(neither)* | assign them |
 

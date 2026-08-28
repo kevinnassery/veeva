@@ -127,6 +127,14 @@
     -Plan reports how many of the user assignments are already covered by group
     membership, so this can be decided on the numbers rather than on a hunch.
 
+.PARAMETER Survey
+    What is in scope, exactly, in about five seconds. One paginated query returns every
+    document's type, subtype and lifecycle - 1,000 a page - and the counts are tallied
+    here. No document is read individually and nothing is written.
+
+    Use it instead of probing a sample. A -Probe -Limit 300 costs 600 calls to GUESS at
+    the subtype list; this costs sixteen and the answer is exact.
+
 .PARAMETER Probe
     Read-only survey of the target vault. Reports the subtypes the map spans, the roles
     each has, what Vault calls their defaults, and whether those defaults exceed the
@@ -204,6 +212,7 @@ param(
 
     [switch]$Version,
     [switch]$Logout,
+    [switch]$Survey,
     [switch]$Probe,
     [switch]$Plan,
     [string[]]$Role = @(),
@@ -216,7 +225,7 @@ param(
     [pscredential]$Credential
 )
 
-$ScriptVersion = '2026.08.28-14'
+$ScriptVersion = '2026.08.28-15'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -1698,6 +1707,73 @@ function Send-RoleBatch {
     return $byDoc
 }
 
+function Invoke-Survey {
+    # What is actually in scope, exactly, in about five seconds.
+    #
+    # This exists because the alternative was sampling: probing 300 documents at two reads
+    # each to GUESS at the subtype list, when one paginated query returns every document's
+    # type and subtype at 1,000 a page. Sixteen calls instead of six hundred, and the
+    # answer is exact rather than "the subtypes that happened to be in the sample".
+    #
+    # No document is read individually and nothing is written.
+    param([Parameter(Mandatory)]$Context, [Parameter(Mandatory)][AllowEmptyString()][string]$Where)
+
+    $c = $Context
+    $w = $Where.Trim()
+    $vql = if (-not $w) { 'SELECT id, type__v, subtype__v, lifecycle__v FROM documents' }
+           else         { "SELECT id, type__v, subtype__v, lifecycle__v FROM documents WHERE $w" }
+    Write-Log "Surveying: $vql"
+
+    $tally = @{}
+    $total = 0
+    $path  = '/query'
+    $body  = "q=$([Uri]::EscapeDataString($vql))"
+    $pages = 0
+
+    while ($path -and $pages -lt 2000) {
+        $pages++
+        $r = if ($pages -eq 1) {
+                Invoke-Api -VaultHost $c.VaultHost -ApiVersion $c.Api -Method POST `
+                    -Path $path -Body $body -ContentType 'application/x-www-form-urlencoded'
+             } else {
+                Invoke-Api -VaultHost $c.VaultHost -ApiVersion $c.Api -Method GET -Path $path
+             }
+        foreach ($row in @(Get-Field $r 'data' @())) {
+            $total++
+            $ty  = "$(Get-Field $row 'type__v' '(no type)')"
+            $sub = "$(Get-Field $row 'subtype__v' '')"
+            if (-not $sub) { $sub = $ty }
+            $lc  = "$(Get-Field $row 'lifecycle__v' '(no lifecycle)')"
+            $k = "$ty|$sub"
+            if (-not $tally.ContainsKey($k)) {
+                $tally[$k] = [pscustomobject]@{
+                    Type = $ty; Subtype = $sub; Count = 0
+                    Lifecycles = (New-Object System.Collections.ArrayList)
+                }
+            }
+            $tally[$k].Count++
+            if ($tally[$k].Lifecycles -notcontains $lc) { [void]$tally[$k].Lifecycles.Add($lc) }
+        }
+        $path = "$(Get-Field (Get-Field $r 'responseDetails' $null) 'next_page' '')"
+    }
+
+    Write-Log '----------------------------------------------------------------'
+    Write-Log "$total document(s) in scope, $($tally.Count) type/subtype combination(s), read in $pages page(s)"
+    Write-Log ''
+    foreach ($k in ($tally.Keys | Sort-Object { -$tally[$_].Count })) {
+        $e = $tally[$k]
+        Write-Log ("  {0,7:N0}  {1}" -f $e.Count, $(if ($e.Subtype -eq $e.Type) { $e.Type } else { "$($e.Type) / $($e.Subtype)" }))
+        Write-Log ("           lifecycle: {0}" -f (($e.Lifecycles | Sort-Object) -join ', '))
+    }
+    Write-Log ''
+    # Type defaults are cached per type and subtype, so this count IS the number of extra
+    # calls the assign run makes for them - not one per document.
+    Write-Log "An assign run over this scope reads $total document(s) and resolves type defaults $($tally.Count) time(s)."
+    $mins = [math]::Round((($total + $tally.Count * 3) * 0.3) / 60, 0)
+    Write-Log "At the rate this vault has been answering, that is roughly $mins minute(s)."
+    return 0
+}
+
 function Invoke-Probe {
     # Read-only. Answers the questions that have to be answered before anything is
     # written, and answers them from the vault rather than from an assumption:
@@ -2205,7 +2281,7 @@ try {
 
     $ctx = Resolve-Settings
 
-    $mode = if ($Probe) { 'probe' } elseif ($Plan) { 'plan' } else { 'assign' }
+    $mode = if ($Survey) { 'survey' } elseif ($Probe) { 'probe' } elseif ($Plan) { 'plan' } else { 'assign' }
     Write-Log "veeva-roles $ScriptVersion - $mode"
     Write-Log "  vault    $($ctx.VaultHost)"
     Write-Log "  api      $($ctx.Api)"
@@ -2216,6 +2292,14 @@ try {
     # costs seconds; failing an hour in costs the hour.
     [void](Get-SessionId -VaultHost $ctx.VaultHost -ApiVersion $ctx.Api)
     Test-Session -VaultHost $ctx.VaultHost -ApiVersion $ctx.Api
+
+    # -Survey does its own single query and needs no document list, so it answers before
+    # the enumeration that every other mode depends on.
+    if ($Survey) {
+        $exitCode = Invoke-Survey -Context $ctx -Where $Where
+        Write-Log "Log: $($script:LogFile)"
+        exit $exitCode
+    }
 
     # Scope is capped only where THIS SCRIPT guessed it, never where it was given. A probe
     # over a named scope surveys all of it: a survey that looked at twenty-five of 577
