@@ -1,5 +1,5 @@
 @echo off
-REM VERSION 2026.08.27-29
+REM VERSION 2026.08.27-32
 setlocal
 
 REM ============================================================================
@@ -68,6 +68,8 @@ echo.
 
 call :get attachments/attachments.bat                     attachments.bat
 call :get attachments/Sync-VaultAttachments.ps1           Sync-VaultAttachments.ps1
+call :get attachments/validator.bat                      validator.bat
+call :get attachments/Validate-VaultAttachments.ps1      Validate-VaultAttachments.ps1
 call :get starting-cleanup.bat                            starting-cleanup.bat
 call :get refresh.bat                                     refresh.bat
 call :get README.md                                       README.md

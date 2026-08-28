@@ -59,9 +59,26 @@ with `Mode = SYNC` — delivers the rest.
 | `refresh.bat` | update the scripts |
 | `starting-cleanup.bat` | set old files aside, then `refresh.bat` |
 | `attachments.bat` | run whatever `Mode` says |
+| `validator.bat` | prove both sides hold identical files |
 | `-Test` | stop after 5 are reconciled |
 | `-WhatIf` | rehearse, write nothing |
 | `-MaxDocuments 50` | cap the documents examined |
+
+## Verify
+
+```
+validator.bat
+```
+
+Downloads each attachment from **both** vaults, hashes them, and compares. Changes
+nothing. `Mode = FAST` in `attachments.ini` compares the MD5 Vault already records on
+each side instead, with no downloads.
+
+Per attachment in `validate-results.csv`: `MATCH`, `MISMATCH`, `MISSING_ON_TARGET`,
+`MISSING_ON_SOURCE`. Missing is reported whichever side it is missing from.
+
+`validator.bat -Test` checks five and stops. DEEP is bandwidth-bound, so `Workers = 8`
+helps it more than it helps the sync.
 
 ## Worth knowing
 

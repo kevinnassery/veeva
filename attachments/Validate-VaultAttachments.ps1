@@ -1,41 +1,35 @@
 <#
 .SYNOPSIS
-    Reconcile document attachments between two Vaults: find what the target is missing
-    and deliver only that.
+    Prove that the attachments on the target really are the same files as the source,
+    by comparing checksums.
 
 .DESCRIPTION
-    Given a map of source document id to target document id, for each pair:
+    For every document pair in the map, lists the attachments on both vaults and
+    compares them by name and MD5. Two modes:
 
-      1. List the attachments on the SOURCE document.
-      2. List the attachments on the TARGET document.
-      3. Work out which source attachments are missing on the target.
-      4. Download each missing one, upload it to the target's File Staging, and attach
-         it to the target document.
+      FAST - compares the MD5 Vault records for each attachment on each side. Downloads
+             nothing. This is what the listing already returns, so a full check costs
+             two API calls per document and nothing else.
+      DEEP - downloads both copies, computes the MD5 locally, and compares those.
+             Slower and bandwidth-heavy, but it does not take Vault's word for it:
+             it proves the bytes are retrievable and identical from both vaults.
 
-    Comparing before copying is what makes this safe to run repeatedly. A document whose
-    attachments are already present costs two listing calls and nothing else, and a run
-    interrupted anywhere can simply be run again.
+    Start with FAST. Use DEEP on a sample, or when FAST reports something odd and you
+    want to know whether the recorded checksum or the file itself is wrong.
 
-    Attachments are matched by filename, which is also how Vault itself decides: posting
-    an attachment whose name already exists creates a new VERSION of it rather than a
-    second attachment. Matching on anything looser would silently produce version churn.
-    The listing also carries an MD5, so a name that matches with a different checksum is
-    reported as DIFFERS and left alone unless you ask for it.
+    Writes validate-results.csv with a row per attachment and a verdict:
+      MATCH             same name, same MD5
+      MISMATCH          same name, different MD5
+      MISSING_ON_TARGET on the source, not on the target
+      MISSING_ON_SOURCE on the target, not on the source
+      NO_CHECKSUM       one side recorded no MD5, so FAST cannot judge it
 
-    Three modes:
-      REPORT - diff only. Downloads nothing, uploads nothing, changes nothing.
-      SYNC   - diff, then download and attach everything missing.
-    Both modes are idempotent: the diff is recomputed live from both vaults on every
-    run, so nothing is delivered twice and an interrupted run is simply run again.
+    Changes nothing in either vault. It only reads.
 
 .NOTES
     Windows PowerShell 5.1 compatible.
-    SOURCE:
-      GET  /objects/documents/{id}/attachments                   what exists
-      GET  /objects/documents/{id}/attachments/{aid}/file         the bytes
-    TARGET:
-      GET  /objects/documents/{id}/attachments                   what is already there
-      POST /objects/documents/{id}/attachments                   upload and attach, 2GB
+      GET /objects/documents/{id}/attachments                   both vaults
+      GET /objects/documents/{id}/attachments/{aid}/file         DEEP only, both vaults
 #>
 
 [CmdletBinding(SupportsShouldProcess = $true)]
@@ -65,14 +59,17 @@ param(
     [string] $ApiVersion = 'v26.2',
 
     # ---- What to do ----
-    # REPORT = compare both sides and report the gap. Changes nothing, downloads
-    #          nothing. Always start here.
-    # SYNC   = deliver every missing attachment: download, stage, attach.
-    # Accepted and ignored, so the validator's setting in the shared ini is quiet.
-    [string] $ValidateMode = '',
+    # Its own setting, NOT Mode: this shares attachments.ini with the sync, and the
+    # two have different vocabularies - Mode is REPORT or SYNC there. One key meaning
+    # different things in one file would break whichever tool ran second.
+    #
+    # FAST = compare the MD5 Vault records on each side. Downloads nothing.
+    # DEEP = download both copies and compute the MD5 locally. Proves the bytes.
+    [ValidateSet('FAST', 'DEEP')]
+    [string] $ValidateMode = 'DEEP',
 
-    [ValidateSet('REPORT', 'SYNC')]
-    [string] $Mode       = 'REPORT',
+    # Accepted and ignored, so the sync's Mode in the shared ini raises no warning.
+    [string] $Mode         = '',
 
     # CSV mapping source document id to target document id, with a header row. Column
     # names are detected from the usual spellings; set them explicitly if yours differ.
@@ -252,12 +249,12 @@ $OutputRoot = [IO.Path]::GetFullPath([IO.Path]::Combine((Get-Location).ProviderP
 if ($OutputRoot.Length -gt 3) { $OutputRoot = $OutputRoot.TrimEnd('\') }
 if (-not (Test-Path -LiteralPath $OutputRoot)) { New-Item -ItemType Directory -Path $OutputRoot -Force -WhatIf:$false | Out-Null }
 
-if ([string]::IsNullOrWhiteSpace($WorkDir)) { $WorkDir = Join-Path $OutputRoot 'attachment-work' }
+if ([string]::IsNullOrWhiteSpace($WorkDir)) { $WorkDir = Join-Path $OutputRoot 'validate-work' }
 if (-not (Test-Path -LiteralPath $WorkDir)) { New-Item -ItemType Directory -Path $WorkDir -Force -WhatIf:$false | Out-Null }
 
 $stamp         = Get-Date -Format 'yyyyMMdd-HHmmss'
-$ResultsCsv    = Join-Path $OutputRoot 'attachment-results.csv'
-$TranscriptLog = Join-Path $OutputRoot "attachments-$stamp.log"
+$ResultsCsv    = Join-Path $OutputRoot 'validate-results.csv'
+$TranscriptLog = Join-Path $OutputRoot "validate-$stamp.log"
 
 function Write-Log {
     param([string]$Message, [ValidateSet('INFO','WARN','ERROR','OK')][string]$Level = 'INFO')
@@ -444,103 +441,6 @@ function Save-DocumentFile {
 
 
 
-function Send-DocumentAttachment {
-    # Upload straight onto the target document. No File Staging involved at all.
-    #
-    # POST /objects/documents/{id}/attachments takes the file as multipart/form-data, up
-    # to 2GB, and attaches it in the same call. That replaces a five-step dance - open a
-    # resumable session, create each folder level, upload parts, commit, then a separate
-    # bulk attach - with one request, and leaves nothing behind on staging afterwards.
-    #
-    # Written over HttpWebRequest with buffering off so the body streams from disk: a
-    # 2GB attachment must never be assembled in memory. PowerShell 5.1 has no -Form, so
-    # the multipart envelope is built by hand.
-    param(
-        [Parameter(Mandatory)][string]$TargetDocId,
-        [Parameter(Mandatory)][string]$LocalPath,
-        [Parameter(Mandatory)][string]$FileName
-    )
-
-    $fileLen = (Get-Item -LiteralPath $LocalPath).Length
-
-    for ($attempt = 1; $attempt -le $MaxRetries; $attempt++) {
-        $boundary = '----VaultSync' + [guid]::NewGuid().ToString('N')
-        $pre  = "--$boundary`r`n" +
-                "Content-Disposition: form-data; name=`"file`"; filename=`"$FileName`"`r`n" +
-                "Content-Type: application/octet-stream`r`n`r`n"
-        $post = "`r`n--$boundary--`r`n"
-        $preB  = [Text.Encoding]::UTF8.GetBytes($pre)
-        $postB = [Text.Encoding]::UTF8.GetBytes($post)
-
-        $uri = "https://$($script:Dns['Target'])/api/$ApiVersion/objects/documents/$TargetDocId/attachments"
-        $req = [Net.HttpWebRequest]::Create($uri)
-        $req.Method                   = 'POST'
-        $req.ContentType              = "multipart/form-data; boundary=$boundary"
-        $req.ContentLength            = $preB.Length + $fileLen + $postB.Length
-        $req.AllowWriteStreamBuffering = $false
-        $req.Timeout                  = 900000
-        $req.ReadWriteTimeout         = 900000
-        $req.Accept                   = 'application/json'
-        $req.Headers.Add('Authorization', $script:Session['Target'])
-
-        try {
-            $rs = $req.GetRequestStream()
-            try {
-                $rs.Write($preB, 0, $preB.Length)
-                $fs = [IO.File]::OpenRead($LocalPath)
-                try {
-                    $buf = New-Object byte[] 1048576
-                    while (($read = $fs.Read($buf, 0, $buf.Length)) -gt 0) { $rs.Write($buf, 0, $read) }
-                }
-                finally { $fs.Dispose() }
-                $rs.Write($postB, 0, $postB.Length)
-            }
-            finally { $rs.Dispose() }
-
-            $resp = $req.GetResponse()
-            try {
-                $sr   = New-Object IO.StreamReader($resp.GetResponseStream())
-                $body = $sr.ReadToEnd(); $sr.Dispose()
-                $json = $null
-                try { $json = $body | ConvertFrom-Json } catch { }
-                if ($null -eq $json) { throw "attachment upload returned no JSON: $body" }
-                if ((Get-Field $json 'responseStatus') -ne 'SUCCESS') {
-                    $errs = @(Get-Field $json 'errors' @())
-                    throw (($errs | ForEach-Object { "$(Get-Field $_ 'type'): $(Get-Field $_ 'message')" }) -join '; ')
-                }
-                $d = Get-Field $json 'data' $null
-                return [pscustomobject]@{
-                    AttachmentId = "$(Get-Field $d 'id' '')"
-                    Version      = "$(Get-Field $d 'version__v' (Get-Field $d 'version' ''))"
-                }
-            }
-            finally { $resp.Dispose() }
-        }
-        catch [Net.WebException] {
-            $status = $null
-            try { if ($_.Exception.Response) { $status = [int]$_.Exception.Response.StatusCode } } catch { }
-            $detail = ''
-            try {
-                $er = New-Object IO.StreamReader($_.Exception.Response.GetResponseStream())
-                $detail = $er.ReadToEnd(); $er.Dispose()
-            } catch { }
-
-            if ($status -eq 429 -and $attempt -lt $MaxRetries) {
-                Write-Log "Target HTTP 429 attaching $FileName - waiting 60s" 'WARN'
-                Start-Sleep -Seconds 60
-                continue
-            }
-            if (((-not $status) -or ($status -ge 500)) -and $attempt -lt $MaxRetries) {
-                $wait = [math]::Pow(2, $attempt) * 5
-                Write-Log "Transient error attaching $FileName (HTTP $status) - retry $attempt/$MaxRetries in ${wait}s" 'WARN'
-                Start-Sleep -Seconds $wait
-                continue
-            }
-            throw "attach failed (HTTP $status): $($_.Exception.Message) $detail"
-        }
-    }
-    throw "attach of $FileName failed after $MaxRetries attempts"
-}
 
 
 # --------------------------------------------------------------------------------------
@@ -562,7 +462,7 @@ function Read-WorkerLog {
         [Parameter(Mandatory)][hashtable]$Offsets,
         [int]$MaxLines = 20
     )
-    $log = @(Get-ChildItem -LiteralPath $Dir -Filter 'attachments-*.log' -ErrorAction SilentlyContinue |
+    $log = @(Get-ChildItem -LiteralPath $Dir -Filter 'validate-*.log' -ErrorAction SilentlyContinue |
              Sort-Object LastWriteTime | Select-Object -Last 1)
     if (-not $log.Count) { return }
     $path = $log[0].FullName
@@ -829,20 +729,23 @@ Re-export with both id columns formatted as Text before running again.
 
 
 function Save-AttachmentFile {
+    # -Side so the same streamed download serves both vaults - DEEP has to fetch the
+    # target copy too, and a second near-identical function would only drift.
     # Streamed to disk, for the same reason the document download is: a 2GB attachment
     # would not survive Invoke-WebRequest buffering the whole response on 5.1.
     param(
+        [Parameter(Mandatory)][ValidateSet('Source','Target')][string]$Side,
         [Parameter(Mandatory)][string]$DocId,
         [Parameter(Mandatory)][string]$AttachmentId,
         [Parameter(Mandatory)][string]$FileName,
         [Parameter(Mandatory)][string]$Destination
     )
-    $uri = "https://$($script:Dns['Source'])/api/$ApiVersion/objects/documents/$DocId/attachments/$AttachmentId/file"
+    $uri = "https://$($script:Dns[$Side])/api/$ApiVersion/objects/documents/$DocId/attachments/$AttachmentId/file"
     $req = [Net.HttpWebRequest]::Create($uri)
     $req.Method = 'GET'
     $req.Timeout = 900000
     $req.ReadWriteTimeout = 900000
-    $req.Headers.Add('Authorization', $script:Session['Source'])
+    $req.Headers.Add('Authorization', $script:Session[$Side])
 
     $name = $FileName
     foreach ($bad in [IO.Path]::GetInvalidFileNameChars()) { $name = $name.Replace($bad, '_') }
@@ -874,7 +777,7 @@ function Get-FreeSpace {
 # Main
 # --------------------------------------------------------------------------------------
 
-Write-Log "Sync-VaultAttachments.ps1 $ScriptVersion"
+Write-Log "Validate-VaultAttachments.ps1 $ScriptVersion"
 Write-Log "Source: $SourceVaultDNS"
 Write-Log "Target: $TargetVaultDNS"
 Write-Log "Work  : $WorkDir"
@@ -951,7 +854,7 @@ if (Test-Path -LiteralPath $ResultsCsv) {
     }
     if ($choice -eq 'Restart') {
         $when = (Get-Item -LiteralPath $ResultsCsv).LastWriteTime.ToString('yyyyMMdd-HHmmss')
-        Move-Item -LiteralPath $ResultsCsv -Destination (Join-Path $OutputRoot "attachment-results-$when.csv") -Force -WhatIf:$false
+        Move-Item -LiteralPath $ResultsCsv -Destination (Join-Path $OutputRoot "validate-results-$when.csv") -Force -WhatIf:$false
         Write-Log 'Rotated the previous results aside.'
     }
     else {
@@ -969,9 +872,11 @@ if (Test-Path -LiteralPath $ResultsCsv) {
             # so skipping PRESENT saved nothing and could only go stale.
             #
 
-            if ((Get-Field $row 'Status') -eq 'ATTACHED') { $done[$rk] = $true }
+            # Nothing is skipped on a re-run: the whole point of a validator is to
+            # check the current state, and a MATCH recorded yesterday says nothing
+            # about today. Prior rows are carried forward in the file, not obeyed.
         }
-        if ($done.Count) { Write-Log "$($done.Count) attachment(s) already delivered by an earlier run - not re-sent" }
+
     }
 }
 
@@ -1014,7 +919,7 @@ Test-TargetStaging
 # sequential path stays the single implementation, with nothing duplicated to drift.
 # --------------------------------------------------------------------------------------
 
-if ($Mode -eq 'SYNC' -and $Workers -gt 1 -and $pending.Count -gt 1) {
+if ($Workers -gt 1 -and $pending.Count -gt 1) {
 
     if (-not $script:Cred['Source'] -or -not $script:Cred['Target']) {
         throw @'
@@ -1026,7 +931,7 @@ Blank SourceSessionId and TargetSessionId in attachments.ini and run again.
     }
 
     $workerCount = [math]::Min($Workers, $pending.Count)
-    $parallelDir = Join-Path $OutputRoot 'attachment-workers'
+    $parallelDir = Join-Path $OutputRoot 'validate-workers'
     if (Test-Path -LiteralPath $parallelDir) { Remove-Item -LiteralPath $parallelDir -Recurse -Force -WhatIf:$false }
     New-Item -ItemType Directory -Path $parallelDir -Force -WhatIf:$false | Out-Null
 
@@ -1056,7 +961,7 @@ Blank SourceSessionId and TargetSessionId in attachments.ini and run again.
                 '-WorkDir',         "`"$(Join-Path $wDir 'work')`"",
                 '-CredentialFile',  "`"$credPath`"",
                 '-IdMap',           "`"$resolvedIdMap`"",
-                '-Workers', '1', '-MaxDocuments', '0', '-ExistingResults', 'Restart', '-Mode', $Mode
+                '-Workers', '1', '-MaxDocuments', '0', '-ExistingResults', 'Restart', '-ValidateMode', $ValidateMode
             )
             $procs += Start-Process -FilePath 'powershell.exe' -ArgumentList $argList `
                         -WindowStyle Hidden -PassThru
@@ -1073,7 +978,7 @@ Blank SourceSessionId and TargetSessionId in attachments.ini and run again.
             for ($w = 1; $w -le $workerCount; $w++) {
                 $wd = Join-Path $parallelDir "w$w"
                 Read-WorkerLog -Dir $wd -Label "w$w" -Offsets $logOffsets
-                $f = Join-Path $wd 'attachment-results.csv'
+                $f = Join-Path $wd 'validate-results.csv'
                 if (Test-Path -LiteralPath $f) {
                     try { $moved += @(Import-Csv -LiteralPath $f | Where-Object { $_.Status -eq 'SUCCESS' }).Count } catch { }
                 }
@@ -1105,7 +1010,7 @@ Blank SourceSessionId and TargetSessionId in attachments.ini and run again.
         foreach ($k in $prior.Keys) { $seenIds["$k"] = $true }
         $wOk = 0; $wBad = 0
         for ($w = 1; $w -le $workerCount; $w++) {
-            $f = Join-Path (Join-Path $parallelDir "w$w") 'attachment-results.csv'
+            $f = Join-Path (Join-Path $parallelDir "w$w") 'validate-results.csv'
             if (-not (Test-Path -LiteralPath $f)) { Write-Log "worker $w produced no results file" 'WARN'; continue }
             foreach ($row in (Import-Csv -LiteralPath $f)) {
                 if ((Get-Field $row 'Status') -eq 'SUCCESS') { $wOk++ } else { $wBad++ }
@@ -1145,9 +1050,39 @@ function Save-Results {
 }
 
 $i = 0
-$moved     = [long]0
-$stat      = @{ Src = 0; Present = 0; Missing = 0; Differs = 0; Attached = 0; NoMap = 0; NoAtt = 0 }
+$checked = [long]0
 $script:TestStopped = $false
+$stat = @{ Match = 0; Mismatch = 0; MissingOnTarget = 0; MissingOnSource = 0; NoChecksum = 0; Errors = 0; Src = 0; NoAtt = 0 }
+
+function Get-AttachmentMd5 {
+    # Download one attachment and hash it, then delete it. One file on disk at a time,
+    # so DEEP over a large set still needs only as much room as its biggest attachment.
+    param(
+        [Parameter(Mandatory)][ValidateSet('Source','Target')][string]$Side,
+        [Parameter(Mandatory)][string]$DocId,
+        [Parameter(Mandatory)][string]$AttachmentId,
+        [Parameter(Mandatory)][string]$FileName,
+        [Parameter(Mandatory)][long]$Size
+    )
+    $free = Get-FreeSpace -Path $WorkDir
+    if ($free -ge 0 -and $Size -gt 0 -and ($free - $Size) -lt ($ReserveMB * 1MB)) {
+        throw "not enough disk: $(Format-Bytes $Size) needed, $(Format-Bytes $free) free, ${ReserveMB}MB reserve"
+    }
+    $local = $null
+    try {
+        $local = Save-AttachmentFile -Side $Side -DocId $DocId -AttachmentId $AttachmentId `
+                    -FileName ("$Side-$AttachmentId-$FileName") -Destination $WorkDir
+        return [pscustomobject]@{
+            Md5  = (Get-FileHash -LiteralPath $local.Path -Algorithm MD5).Hash
+            Size = $local.Size
+        }
+    }
+    finally {
+        if ($local -and (Test-Path -LiteralPath $local.Path)) {
+            try { Remove-Item -LiteralPath $local.Path -Force -WhatIf:$false } catch { }
+        }
+    }
+}
 
 :documents foreach ($srcId in $pending) {
     $i++
@@ -1155,136 +1090,122 @@ $script:TestStopped = $false
     $docPrefix = "[$i/$($pending.Count)] $srcId -> $tgtId"
 
     try { $srcAtt = @(Get-DocumentAttachment -Side Source -DocId $srcId) }
-    catch {
-        Write-Log "$docPrefix - ERROR listing source attachments: $_" 'ERROR'
-        continue
-    }
-    if ($srcAtt.Count -eq 0) { $stat.NoAtt++; continue }
-    $stat.Src += $srcAtt.Count
+    catch { Write-Log "$docPrefix - ERROR listing source: $_" 'ERROR'; $stat.Errors++; continue }
 
     try { $tgtAtt = @(Get-DocumentAttachment -Side Target -DocId $tgtId) }
-    catch {
-        Write-Log "$docPrefix - ERROR listing target attachments: $_" 'ERROR'
-        continue
-    }
+    catch { Write-Log "$docPrefix - ERROR listing target: $_" 'ERROR'; $stat.Errors++; continue }
 
-    # Filename is the key because it is the key Vault itself uses: posting a name that
-    # already exists creates a new version of that attachment, not a second one.
+    if ($srcAtt.Count -eq 0 -and $tgtAtt.Count -eq 0) { $stat.NoAtt++; continue }
+    $stat.Src += $srcAtt.Count
+
     $tgtByName = @{}
     foreach ($t in $tgtAtt) { $tgtByName[$t.Name.ToLowerInvariant()] = $t }
+    $matchedTargets = @{}
 
     foreach ($att in $srcAtt) {
-        $key  = "$srcId`:$($att.Id)"
-        $name = $att.Name
-        $have = $null
-        if ($tgtByName.ContainsKey($name.ToLowerInvariant())) { $have = $tgtByName[$name.ToLowerInvariant()] }
-
-        $state = 'MISSING'
-        if ($have) {
-            $state = 'PRESENT'
-            if ($att.Checksum -and $have.Checksum -and $att.Checksum -ne $have.Checksum) { $state = 'DIFFERS' }
-        }
-        if ($state -eq 'PRESENT') { $stat.Present++ }
-        elseif ($state -eq 'DIFFERS') { $stat.Differs++ }
-        else { $stat.Missing++ }
-
-        if ($done.ContainsKey($key)) { continue }
+        $key    = "$srcId`:$($att.Id)"
+        $name   = $att.Name
+        $lname  = $name.ToLowerInvariant()
+        $prefix = "$docPrefix $name"
 
         $record = [pscustomobject][ordered]@{
             Key = $key; SourceDocId = $srcId; TargetDocId = $tgtId
-            AttachmentId = $att.Id; Name = $name; SizeBytes = $att.Size
-            Version = $att.Version; Checksum = $att.Checksum
-            Parts = 0
-            Status = $state; Message = ''
-            StartedUtc = (Get-Date).ToUniversalTime().ToString('s'); FinishedUtc = ''
+            Name = $name
+            SourceAttachmentId = $att.Id; TargetAttachmentId = ''
+            SourceSize = $att.Size; TargetSize = ''
+            SourceMd5 = ''; TargetMd5 = ''
+            Method = $ValidateMode
+            Status = ''; Message = ''
+            CheckedUtc = (Get-Date).ToUniversalTime().ToString('s')
         }
 
-        $wanted = ($state -eq 'MISSING') -or ($state -eq 'DIFFERS' -and $ReplaceDiffering)
-
-        if ($Mode -eq 'REPORT' -or -not $wanted) {
-            if ($state -eq 'DIFFERS' -and -not $ReplaceDiffering) {
-                $record.Message = 'same name, different MD5 - left alone. ReplaceDiffering sends it as a new version.'
-                Write-Log "$docPrefix - DIFFERS $name" 'WARN'
-            }
-            $record.FinishedUtc = (Get-Date).ToUniversalTime().ToString('s')
-            [void]$results.Add($record)
-            Save-Results
+        if (-not $tgtByName.ContainsKey($lname)) {
+            $record.Status = 'MISSING_ON_TARGET'
+            $stat.MissingOnTarget++
+            Write-Log "$prefix - MISSING_ON_TARGET" 'WARN'
+            [void]$results.Add($record); Save-Results
             continue
         }
 
-        $local = $null
+        $have = $tgtByName[$lname]
+        $matchedTargets[$lname] = $true
+        $record.TargetAttachmentId = $have.Id
+        $record.TargetSize         = $have.Size
+
         try {
-            if ($PSCmdlet.ShouldProcess("attachment $name of document $srcId -> $tgtId", 'Deliver')) {
-                $free = Get-FreeSpace -Path $WorkDir
-                if ($free -ge 0 -and $att.Size -gt 0 -and ($free - $att.Size) -lt ($ReserveMB * 1MB)) {
-                    throw "not enough disk: $(Format-Bytes $att.Size) needed, $(Format-Bytes $free) free, ${ReserveMB}MB reserve"
-                }
-
-                Write-Log "$docPrefix - $state $name ($(Format-Bytes $att.Size)) - downloading"
-                $local = Save-AttachmentFile -DocId $srcId -AttachmentId $att.Id -FileName $name -Destination $WorkDir
-                $record.SizeBytes = $local.Size
-
-                # Straight onto the target document. One call, no staging, and no
-                # intermediate state - which is why there is no ATTACH mode any more.
-                Write-Log "$docPrefix - attaching to document $tgtId"
-                $up = Send-DocumentAttachment -TargetDocId $tgtId -LocalPath $local.Path -FileName $local.Name
-                $record.Status  = 'ATTACHED'
-                $record.Message = "attachment $($up.AttachmentId) v$($up.Version)"
-                $moved += $local.Size
-                $stat.Attached++
-                # Confirm the attach with what Vault gave back. Without this the log
-                # shows "attaching..." and then silence, so success is only visible as
-                # the absence of an error, and the new attachment id never appears
-                # anywhere but the CSV.
-                Write-Log "$docPrefix - OK $($local.Name) attached as $($up.AttachmentId) v$($up.Version) ($(Format-Bytes $local.Size))" 'OK'
+            if ($ValidateMode -eq 'DEEP') {
+                # Hash what each vault actually hands back, rather than trusting either
+                # one's recorded checksum. Sequential on purpose: source, hash, delete,
+                # then target - so only one file is ever on disk.
+                $s1 = Get-AttachmentMd5 -Side Source -DocId $srcId -AttachmentId $att.Id -FileName $name -Size $att.Size
+                $s2 = Get-AttachmentMd5 -Side Target -DocId $tgtId -AttachmentId $have.Id -FileName $name -Size $have.Size
+                $record.SourceMd5  = $s1.Md5
+                $record.TargetMd5  = $s2.Md5
+                $record.SourceSize = $s1.Size
+                $record.TargetSize = $s2.Size
+                $checked += $s1.Size + $s2.Size
             }
             else {
-                $record.Status  = 'WHATIF'
-                $record.Message = "would deliver $(Format-Bytes $att.Size)"
-                Write-Log "$docPrefix - WhatIf: would deliver $name"
+                $record.SourceMd5 = $att.Checksum
+                $record.TargetMd5 = $have.Checksum
+            }
+
+            if (-not $record.SourceMd5 -or -not $record.TargetMd5) {
+                $record.Status  = 'NO_CHECKSUM'
+                $record.Message = 'one side recorded no MD5 - run Mode = DEEP to hash the bytes'
+                $stat.NoChecksum++
+                Write-Log "$prefix - NO_CHECKSUM" 'WARN'
+            }
+            elseif ($record.SourceMd5 -ieq $record.TargetMd5) {
+                $record.Status = 'MATCH'
+                $stat.Match++
+                Write-Log "$prefix - MATCH $($record.SourceMd5)" 'OK'
+            }
+            else {
+                $record.Status  = 'MISMATCH'
+                $record.Message = "source $($record.SourceMd5) vs target $($record.TargetMd5)"
+                $stat.Mismatch++
+                Write-Log "$prefix - MISMATCH source $($record.SourceMd5) target $($record.TargetMd5)" 'ERROR'
             }
         }
         catch {
             $record.Status  = 'ERROR'
             $record.Message = "$_"
-            Write-Log "$docPrefix - ERROR on $name : $_" 'ERROR'
-        }
-        finally {
-            if ($local -and (Test-Path -LiteralPath $local.Path)) {
-                try {
-                    Remove-Item -LiteralPath $local.Path -Force -WhatIf:$false
-                    $freeNow = Get-FreeSpace -Path $WorkDir
-                    $freeTxt = if ($freeNow -ge 0) { ", $(Format-Bytes $freeNow) free" } else { '' }
-                    Write-Log "$docPrefix - scratch file deleted ($(Format-Bytes $local.Size)$freeTxt)"
-                }
-                catch { Write-Log "Could not delete $($local.Path): $_" 'WARN' }
-            }
+            $stat.Errors++
+            Write-Log "$prefix - ERROR: $_" 'ERROR'
         }
 
-        $record.FinishedUtc = (Get-Date).ToUniversalTime().ToString('s')
-        [void]$results.Add($record)
-        Save-Results
+        [void]$results.Add($record); Save-Results
 
         if ($Test) {
-            $reconciled = if ($Mode -eq 'REPORT') { $stat.Missing } else { $stat.Attached }
-            if ($reconciled -ge $TestCount) {
-                $what = if ($Mode -eq 'REPORT') { 'missing attachment(s) found' } else { 'attachment(s) reconciled' }
-                Write-Log "TEST: $reconciled $what after $i document(s) - stopping" 'OK'
+            $done2 = $stat.Match + $stat.Mismatch + $stat.NoChecksum
+            if ($done2 -ge $TestCount) {
+                Write-Log "TEST: $done2 attachment(s) compared after $i document(s) - stopping" 'OK'
                 $script:TestStopped = $true
                 break documents
             }
         }
     }
-}
 
-Write-Log '----------------------------------------------------------------'
-Write-Log ("source attachments {0}   already present {1}   missing {2}   same name different MD5 {3}" -f `
-            $stat.Src, $stat.Present, $stat.Missing, $stat.Differs)
-Write-Log ("documents with no attachments {0}" -f $stat.NoAtt)
-if ($script:TestStopped) {
-    Write-Log "TEST run - stopped early after $i of $($pending.Count) document(s). These totals are NOT the whole set." 'WARN'
+    # The other direction. Missing is reported whichever side it is missing from: a
+    # file only on the target is not necessarily wrong - it may predate the migration -
+    # but a validator that only looked one way would never show it.
+    foreach ($t in $tgtAtt) {
+        if ($matchedTargets.ContainsKey($t.Name.ToLowerInvariant())) { continue }
+        $stat.MissingOnSource++
+        [void]$results.Add([pscustomobject][ordered]@{
+            Key = "$srcId`:extra:$($t.Id)"; SourceDocId = $srcId; TargetDocId = $tgtId
+            Name = $t.Name
+            SourceAttachmentId = ''; TargetAttachmentId = $t.Id
+            SourceSize = ''; TargetSize = $t.Size
+            SourceMd5 = ''; TargetMd5 = $t.Checksum
+            Method = $ValidateMode
+            Status = 'MISSING_ON_SOURCE'; Message = 'on the target, no attachment of this name on the source'
+            CheckedUtc = (Get-Date).ToUniversalTime().ToString('s')
+        })
+        Save-Results
+    }
 }
-if ($Mode -ne 'REPORT') { Write-Log ("attached {0}" -f $stat.Attached) }
 
 # Scratch should be empty. Anything still here is a file a crash or a kill left
 # behind, and it will sit there consuming disk until someone notices.
@@ -1298,23 +1219,22 @@ if ($leftovers.Count) {
 # STAGED, ATTACHED, ERROR, WHATIF. They were still looking for SUCCESS and LISTED, left
 # over from before this became a reconcile - so every compared attachment counted as a
 # failure, and a REPORT that worked perfectly ended "361 failed" and exited 1.
-$ok     = @($results | Where-Object { $_.Status -eq 'ATTACHED' }).Count
-$bad    = @($results | Where-Object { $_.Status -eq 'ERROR' }).Count
+$bad = $stat.Mismatch + $stat.Errors
 
 Write-Log '----------------------------------------------------------------'
-if ($Mode -eq 'REPORT') {
-    $missing = @($results | Where-Object { $_.Status -eq 'MISSING' })
-    $bytes   = 0
-    if ($missing.Count) { $bytes = ($missing | Measure-Object -Property SizeBytes -Sum).Sum }
-    Write-Log "REPORT only - nothing was moved." 'OK'
-    Write-Log "$($missing.Count) attachment(s) to deliver, $(Format-Bytes $bytes)"
-    if ($bad) { Write-Log "$bad error(s) - see the rows marked ERROR" 'WARN' }
-    Write-Log 'Set Mode = SYNC and run with -Test when the numbers look right.'
+Write-Log ("{0} attachment(s) compared by {1}" -f ($stat.Match + $stat.Mismatch + $stat.NoChecksum), $ValidateMode)
+Write-Log ("  MATCH              {0}" -f $stat.Match) 'OK'
+if ($stat.Mismatch)        { Write-Log ("  MISMATCH           {0}  - same name, DIFFERENT bytes" -f $stat.Mismatch) 'ERROR' }
+if ($stat.MissingOnTarget) { Write-Log ("  MISSING_ON_TARGET  {0}  - on the source, not on the target" -f $stat.MissingOnTarget) 'WARN' }
+if ($stat.MissingOnSource) { Write-Log ("  MISSING_ON_SOURCE  {0}  - on the target, not on the source" -f $stat.MissingOnSource) 'WARN' }
+if ($stat.NoChecksum)      { Write-Log ("  NO_CHECKSUM        {0}  - re-run with Mode = DEEP" -f $stat.NoChecksum) 'WARN' }
+if ($stat.Errors)          { Write-Log ("  ERROR              {0}" -f $stat.Errors) 'ERROR' }
+if ($ValidateMode -eq 'DEEP')      { Write-Log ("  {0} downloaded and hashed from both vaults" -f (Format-Bytes $checked)) }
+if ($script:TestStopped)   { Write-Log "TEST run - stopped early after $i of $($pending.Count) document(s). NOT the whole set." 'WARN' }
+if ($stat.Mismatch -eq 0 -and $stat.Errors -eq 0 -and $stat.MissingOnTarget -eq 0 -and $stat.MissingOnSource -eq 0) {
+    Write-Log 'Every attachment compared is byte-identical on both vaults.' 'OK'
 }
-else {
-    Write-Log "Attached $ok attachment(s), $bad failed, $(Format-Bytes $moved) transferred" $(if ($bad) { 'WARN' } else { 'OK' })
 
-}
 Write-Log "Results : $ResultsCsv"
 Write-Log "Log     : $TranscriptLog"
 
