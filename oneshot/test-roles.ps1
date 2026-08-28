@@ -268,6 +268,59 @@ $script:qCalls.Clear()
 [void](Get-DocumentsByQuery -Context $ctxQ -Where "SELECT id FROM documents WHERE id > 5")
 eq 'a full SELECT is left alone' ($script:qCalls[0].Body -match '^q=SELECT%20id%20FROM%20documents%20WHERE%20id%20%3E%205$') $true
 
+Write-Host "`n== Get-Directory pages users by start, and never asks for a limit Vault refuses =="
+# The live vault rejected limit=1000 with INVALID_DATA, "The 'limit' parameter must be
+# < 500", and this endpoint has no responseDetails.next_page - it pages by limit/start.
+# Reading it the VQL way stopped at the first 200 users in silence.
+$script:dCalls = New-Object System.Collections.ArrayList
+function Invoke-Api {
+  param($VaultHost, $ApiVersion, $Method, $Path, $Body, $ContentType, $TimeoutSec, $MaxRetries)
+  [void]$script:dCalls.Add($Path)
+  if ($Path -like '/objects/groups*') {
+    return ([pscustomobject]@{ responseStatus = 'SUCCESS'
+      groups = @([pscustomobject]@{ group = [pscustomobject]@{ id = 11; name__v = 'biz_admin__c'; label__v = 'Business Administrators' } }) })
+  }
+  # 250 users: a full page of 200, then a short page of 50.
+  $start = 0
+  if ($Path -match 'start=(\d+)') { $start = [int]$Matches[1] }
+  $n = if ($start -eq 0) { 200 } elseif ($start -eq 200) { 50 } else { 0 }
+  $users = @(0..([math]::Max($n - 1, 0)) | Where-Object { $n -gt 0 } | ForEach-Object {
+    $id = $start + $_ + 1
+    [pscustomobject]@{ user = [pscustomobject]@{ id = $id; user_name__v = "u$id@x.com" } }
+  })
+  return ([pscustomobject]@{ responseStatus = 'SUCCESS'; users = $users })
+}
+$script:Directory = $null
+$ctxD = [pscustomobject]@{ VaultHost = 'x.veevavault.com'; Api = 'v26.2' }
+$built = Get-Directory -Context $ctxD
+
+$userCalls = @($script:dCalls | Where-Object { $_ -like '/objects/users*' })
+eq 'both user pages read'  $userCalls.Count 2
+eq 'first page start=0'    ($userCalls[0] -match 'start=0') $true
+eq 'second page start=200' ($userCalls[1] -match 'start=200') $true
+eq 'limit under 500'       (@($userCalls | Where-Object { $_ -match 'limit=(\d+)' -and [int]$Matches[1] -ge 500 }).Count) 0
+eq 'all 250 users kept'    (@($built.ById.Keys | Where-Object { $_ -like 'user:*' }).Count) 250
+eq 'a page-2 user resolves' (Get-DisplayName -Directory $built -Kind 'user' -Id '250') 'u250@x.com'
+eq 'groups need no paging' (@($script:dCalls | Where-Object { $_ -like '/objects/groups*' }).Count) 1
+eq 'group label indexed'   (Resolve-NameToId -Directory $built -Kind 'group' -Name 'Business Administrators') '11'
+eq 'group api name too'    (Resolve-NameToId -Directory $built -Kind 'group' -Name 'biz_admin__c') '11'
+
+Write-Host "`n== a users endpoint that ignores start stops instead of spinning =="
+$script:dCalls.Clear()
+function Invoke-Api {
+  param($VaultHost, $ApiVersion, $Method, $Path, $Body, $ContentType, $TimeoutSec, $MaxRetries)
+  [void]$script:dCalls.Add($Path)
+  if ($Path -like '/objects/groups*') { return ([pscustomobject]@{ responseStatus = 'SUCCESS'; groups = @() }) }
+  # Always hands back the same full page, whatever start says.
+  $users = @(1..200 | ForEach-Object { [pscustomobject]@{ user = [pscustomobject]@{ id = $_; user_name__v = "u$_@x.com" } } })
+  return ([pscustomobject]@{ responseStatus = 'SUCCESS'; users = $users })
+}
+$script:Directory = $null
+$built2 = Get-Directory -Context $ctxD
+eq 'stops on no new entries' (@($script:dCalls | Where-Object { $_ -like '/objects/users*' }).Count) 2
+eq 'kept the one page'       (@($built2.ById.Keys | Where-Object { $_ -like 'user:*' }).Count) 200
+$script:Directory = $null
+
 Remove-Item -LiteralPath $tmp -Recurse -Force
 Write-Host ''
 Write-Host "$pass passed, $fail failed" -ForegroundColor $(if ($fail) { 'Red' } else { 'Green' })

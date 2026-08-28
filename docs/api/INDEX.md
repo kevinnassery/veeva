@@ -333,6 +333,17 @@ workflows), authentication, file staging, jobs, VQL, vault objects, Vault Loader
 - [Upload to a Session](vault-api/api-reference/26.2/file-staging/resumable-upload-sessions/upload-to-a-session.md)
 - [Update Folder or File](vault-api/api-reference/26.2/file-staging/update-folder-or-file.md)
 
+## Platform — groups
+
+- [Groups](vault-api/api-reference/26.2/groups.md)
+- [Create Group](vault-api/api-reference/26.2/groups/create-group.md)
+- [Delete Group](vault-api/api-reference/26.2/groups/delete-group.md)
+- [Retrieve All Groups](vault-api/api-reference/26.2/groups/retrieve-all-groups.md)
+- [Retrieve Auto Managed Groups](vault-api/api-reference/26.2/groups/retrieve-auto-managed-groups.md)
+- [Retrieve Group](vault-api/api-reference/26.2/groups/retrieve-group.md)
+- [Retrieve Group Metadata](vault-api/api-reference/26.2/groups/retrieve-group-metadata.md)
+- [Update Group](vault-api/api-reference/26.2/groups/update-group.md)
+
 ## Platform — jobs
 
 - [Cancel Job](vault-api/api-reference/26.2/jobs/cancel-job.md)

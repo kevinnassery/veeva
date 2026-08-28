@@ -182,7 +182,7 @@ param(
     [pscredential]$Credential
 )
 
-$ScriptVersion = '2026.08.28-5'
+$ScriptVersion = '2026.08.28-6'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -289,11 +289,17 @@ function Resolve-Settings {
     $vaultHost = Get-HostName (Read-Setting -Label 'Vault' -Value $Vault -Parameter 'Vault')
     if (-not $vaultHost) { throw 'A vault is required.' }
 
-    # -Where names the documents itself, so there is nothing to ask about. Otherwise a
-    # file already sitting in the folder is almost always the one meant, so offer it
-    # rather than making someone type a path they can see from where they are standing.
+    # Nothing is asked for that the run does not need.
+    #
+    #   -Where     names the documents itself.
+    #   -Probe     writes nothing, so it can survey a sample of the vault on its own. Made
+    #              to demand a spreadsheet, the one step that is meant to cost nothing
+    #              becomes the one step you have to prepare for.
+    #
+    # Otherwise a file already sitting in the folder is almost always the one meant, so
+    # offer it rather than making someone type a path they can see from where they stand.
     $mapPath = ''
-    if (-not $Where) {
+    if (-not $Where -and -not ($Probe -and -not $Map)) {
         $mapDefault = ''
         foreach ($guess in @('attachments-map.csv', 'map.csv')) {
             if (Test-Path -LiteralPath (Join-Path (Get-Location).ProviderPath $guess)) { $mapDefault = $guess; break }
@@ -643,10 +649,19 @@ function Get-DocumentsByQuery {
     # document of this subtype" - cases where maintaining a spreadsheet of ids would be
     # busywork. Only the WHERE clause is taken, so the query cannot quietly select
     # something other than document ids.
-    param([Parameter(Mandatory)]$Context, [Parameter(Mandatory)][string]$Where)
+    param(
+        [Parameter(Mandatory)]$Context,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Where,
+        # Stop paging once this many are in hand. 0 means every page. A survey needs
+        # twenty-five documents, and paging a 500,000-document vault to the end to throw
+        # away all but twenty-five is five hundred calls spent on nothing.
+        [int]$Stop = 0
+    )
 
     $w = $Where.Trim()
-    $vql = if ($w -match '^\s*SELECT\s') { $w } else { "SELECT id FROM documents WHERE $w" }
+    $vql = if (-not $w)                  { 'SELECT id FROM documents' }
+           elseif ($w -match '^\s*SELECT\s') { $w }
+           else                          { "SELECT id FROM documents WHERE $w" }
     Write-Log "Enumerating: $vql"
 
     $out  = New-Object System.Collections.ArrayList
@@ -672,10 +687,12 @@ function Get-DocumentsByQuery {
             $seen[$id] = $true
             [void]$out.Add([pscustomobject]@{ TargetId = $id; SourceId = '' })
         }
+        if ($Stop -gt 0 -and $out.Count -ge $Stop) { break }
         $path = "$(Get-Field (Get-Field $r 'responseDetails' $null) 'next_page' '')"
     }
 
     if ($out.Count -eq 0) { throw "The query matched no documents: $vql" }
+    if ($Stop -gt 0 -and $out.Count -gt $Stop) { $out = @($out | Select-Object -First $Stop) }
     Write-Log "$($out.Count) document(s) from the query" 'OK'
     return @($out)
 }
@@ -722,25 +739,43 @@ function Get-Directory {
         }
     }
 
-    foreach ($spec in @(
-        @{ Kind = 'user';  Path = '/objects/users?limit=1000';  Envelope = 'users';  Wrapper = 'user'
-           Fields = @('user_name__v', 'user_email__v', 'name__v') },
-        @{ Kind = 'group'; Path = '/objects/groups?limit=1000'; Envelope = 'groups'; Wrapper = 'group'
-           Fields = @('label__v', 'name__v') }
-    )) {
-        $path = $spec.Path
-        $pages = 0
-        while ($path -and $pages -lt 200) {
-            $pages++
-            $r = Invoke-Api -VaultHost $Context.VaultHost -ApiVersion $Context.Api -Method GET -Path $path
-            foreach ($rec in @(Get-Field $r $spec.Envelope @())) {
-                Add-Entry -Record $rec -Wrapper $spec.Wrapper -NameFields $spec.Fields -Kind $spec.Kind
-            }
-            $path = "$(Get-Field (Get-Field $r 'responseDetails' $null) 'next_page' '')"
-        }
+    # Groups come back whole - Retrieve All Groups documents no pagination parameters at
+    # all - so one call is the whole set.
+    $r = Invoke-Api -VaultHost $Context.VaultHost -ApiVersion $Context.Api -Method GET -Path '/objects/groups'
+    foreach ($rec in @(Get-Field $r 'groups' @())) {
+        Add-Entry -Record $rec -Wrapper 'group' -NameFields @('label__v', 'name__v') -Kind 'group'
     }
 
-    Write-Log "Directory: $(@($byId.Keys | Where-Object { $_ -like 'user:*' }).Count) user(s), $(@($byId.Keys | Where-Object { $_ -like 'group:*' }).Count) group(s)"
+    # Users page by limit and start, NOT by responseDetails.next_page - that field is a
+    # VQL thing and this endpoint does not return it. Reading the page-1 response for a
+    # next_page that is never there stops silently at the first 200 users, and a user the
+    # directory has never heard of resolves to nothing, which quietly shrinks a role.
+    #
+    # 200 is the documented default. Anything from 500 up is rejected outright:
+    # INVALID_DATA, "The 'limit' parameter must be < 500."
+    $pageSize = 200
+    $start    = 0
+    $pages    = 0
+    while ($pages -lt 2000) {
+        $pages++
+        $before = $byId.Count
+        $r = Invoke-Api -VaultHost $Context.VaultHost -ApiVersion $Context.Api -Method GET `
+                -Path "/objects/users?limit=$pageSize&start=$start"
+        $batch = @(Get-Field $r 'users' @())
+        foreach ($rec in $batch) {
+            Add-Entry -Record $rec -Wrapper 'user' -NameFields @('user_name__v', 'user_email__v', 'name__v') -Kind 'user'
+        }
+        # Two independent stop conditions, because either alone can fail. A short page
+        # means the end; no NEW entries means the endpoint ignored `start` and is handing
+        # back page one for ever, which would otherwise spin until the page cap.
+        if ($batch.Count -lt $pageSize) { break }
+        if ($byId.Count -eq $before)    { break }
+        $start += $pageSize
+    }
+
+    $users  = @($byId.Keys | Where-Object { $_ -like 'user:*' }).Count
+    $groups = @($byId.Keys | Where-Object { $_ -like 'group:*' }).Count
+    Write-Log "Directory: $users user(s), $groups group(s)"
     $script:Directory = [pscustomobject]@{ ById = $byId; ByName = $byName }
     return $script:Directory
 }
@@ -1211,7 +1246,7 @@ function Invoke-Probe {
     #
     # It writes the discovered subtype/role/groups table out as a starter defaults file,
     # so the answer to (2) can be checked against the Admin screen side by side.
-    param([Parameter(Mandatory)]$Context, [Parameter(Mandatory)][array]$Documents, [int]$Sample = 25)
+    param([Parameter(Mandatory)]$Context, [Parameter(Mandatory)][array]$Documents)
 
     $c   = $Context
     $dir = Get-Directory -Context $c
@@ -1220,12 +1255,14 @@ function Invoke-Probe {
     try { $rules = Get-RoleAssignmentRule -Context $c -Directory $dir }
     catch { Write-Log "Could not read the lifecycle role assignment rules: $_" 'WARN' }
 
+    # Everything handed in, unless -Limit says otherwise. The scope was decided before
+    # this function was called; it does not get to second-guess it.
     $docs = $Documents
-    $take = if ($Limit -gt 0) { $Limit } else { $Sample }
-    if ($docs.Count -gt $take) {
-        Write-Log "Sampling the first $take of $($docs.Count) document(s) - pass -Limit to change that"
-        $docs = @($docs | Select-Object -First $take)
+    if ($Limit -gt 0 -and $docs.Count -gt $Limit) {
+        Write-Log "Limit $Limit - surveying the first $Limit of $($docs.Count) document(s)" 'WARN'
+        $docs = @($docs | Select-Object -First $Limit)
     }
+    Write-Log "$($docs.Count) document(s) to survey - two reads each"
 
     # subtypeKey -> role name -> what was seen
     $seen    = [ordered]@{}
@@ -1343,7 +1380,7 @@ function Invoke-Probe {
     if ($out.Count) { $out | Export-Csv -LiteralPath $defaultsPath -NoTypeInformation -Encoding UTF8 -WhatIf:$false }
 
     Write-Log '----------------------------------------------------------------'
-    Write-Log "$($docs.Count) document(s) sampled, $($seen.Count) subtype(s)"
+    Write-Log "$($docs.Count) document(s) surveyed, $($seen.Count) subtype(s)"
     foreach ($sk in $seen.Keys) {
         $b = $seen[$sk]
         Write-Log ''
@@ -1657,8 +1694,27 @@ try {
     # Log in up front. Failing here costs seconds; failing an hour in costs the hour.
     [void](Get-SessionId -VaultHost $ctx.VaultHost -ApiVersion $ctx.Api)
 
-    $documents = if ($Where) { Get-DocumentsByQuery -Context $ctx -Where $Where }
-                 else        { Import-TargetIds -Path $ctx.MapPath }
+    # Scope is capped only where THIS SCRIPT guessed it, never where it was given. A probe
+    # over a named scope surveys all of it: a survey that looked at twenty-five of 577
+    # documents can miss a subtype entirely and then report that everything is consistent,
+    # which is worse than not having run it. -Limit still cuts it down on request.
+    $documents =
+        if ($ctx.MapPath) { Import-TargetIds -Path $ctx.MapPath }
+        elseif ($Where)   { Get-DocumentsByQuery -Context $ctx -Where $Where }
+        elseif ($Probe)   {
+            # Bare -Probe named no scope, so the script picks one - and that is the one
+            # case where a cap is honest. Arbitrary order, said out loud: a subtype that
+            # does not appear in the first 200 has not been ruled out.
+            Write-Log 'No -Map or -Where given, so sampling the vault in whatever order it returns.'
+            Write-Log 'This can miss a subtype entirely. Pass -Map or -Where to survey a real scope.' 'WARN'
+            Get-DocumentsByQuery -Context $ctx -Where '' -Stop $(if ($Limit -gt 0) { $Limit } else { 200 })
+        }
+        else {
+            # Assign and plan never default to "the whole vault". A probe writes nothing,
+            # so guessing its scope costs an operator some time; guessing the scope of a
+            # run that grants people access costs a great deal more.
+            throw 'No documents named. Pass -Map <csv> or -Where "<VQL condition>".'
+        }
 
     if ($Probe) {
         $exitCode = Invoke-Probe -Context $ctx -Documents $documents

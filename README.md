@@ -1,6 +1,6 @@
 # Veeva Vault — migration tools
 
-*Updated 2026-08-28 13:27 EDT*
+*Updated 2026-08-28 13:33 EDT*
 
 Two jobs, each safe to run repeatedly because each compares before it acts:
 
@@ -132,7 +132,13 @@ for /f %S in ('curl.exe -s -H "Accept: application/vnd.github.sha" https://api.g
 `veeva-roles.ps1 -Version` prints what you have, so "which version am I running" is
 answerable on sight.
 
-It asks for the vault, the map CSV and your login. The map is the same
+`-Probe` asks only for the vault and your login — it writes nothing, so it will survey a
+sample of the vault on its own if you give it no scope. Give it one and it surveys all of
+it, because a survey that looked at 25 of 577 documents can miss a subtype entirely and
+then report that everything is consistent.
+
+`-Plan` and the assign run always need a scope; neither will ever default to "the whole
+vault". The map is the same
 `attachments-map.csv`; its **target** id column names the documents to repair. Two rows
 pointing at the same target are one document, not two.
 
@@ -188,7 +194,7 @@ already there, and which rule was applied.
 | --- | --- |
 | `-Where "…"` | enumerate from the vault instead of a map |
 | `-Version` | print the version, no vault or login needed |
-| `-Limit 5` | cap the documents examined |
+| `-Limit 5` | cap the documents examined — off by default |
 | `-Test 5` | stop once 5 documents have been changed |
 | `-Role viewer__v` | only this role |
 | `-ExcludeRole owner__v` | leave this role alone |

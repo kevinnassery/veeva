@@ -199,6 +199,14 @@ https://general.veevavault.dev/vault-api/api-reference/26.2/file-staging/resumab
 https://general.veevavault.dev/vault-api/api-reference/26.2/file-staging/resumable-upload-sessions/list-upload-sessions/
 https://general.veevavault.dev/vault-api/api-reference/26.2/file-staging/resumable-upload-sessions/upload-to-a-session/
 https://general.veevavault.dev/vault-api/api-reference/26.2/file-staging/update-folder-or-file/
+https://general.veevavault.dev/vault-api/api-reference/26.2/groups/
+https://general.veevavault.dev/vault-api/api-reference/26.2/groups/create-group/
+https://general.veevavault.dev/vault-api/api-reference/26.2/groups/delete-group/
+https://general.veevavault.dev/vault-api/api-reference/26.2/groups/retrieve-all-groups/
+https://general.veevavault.dev/vault-api/api-reference/26.2/groups/retrieve-auto-managed-groups/
+https://general.veevavault.dev/vault-api/api-reference/26.2/groups/retrieve-group-metadata/
+https://general.veevavault.dev/vault-api/api-reference/26.2/groups/retrieve-group/
+https://general.veevavault.dev/vault-api/api-reference/26.2/groups/update-group/
 https://general.veevavault.dev/vault-api/api-reference/26.2/jobs/
 https://general.veevavault.dev/vault-api/api-reference/26.2/jobs/cancel-job/
 https://general.veevavault.dev/vault-api/api-reference/26.2/jobs/retrieve-job-histories/
