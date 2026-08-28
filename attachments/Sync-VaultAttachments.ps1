@@ -135,7 +135,7 @@ param(
     [int]    $MaxRetries = 4
 )
 
-$ScriptVersion = '2026.08.27-28'
+$ScriptVersion = '2026.08.27-29'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -1229,6 +1229,11 @@ $script:TestStopped = $false
                 $record.Message = "attachment $($up.AttachmentId) v$($up.Version)"
                 $moved += $local.Size
                 $stat.Attached++
+                # Confirm the attach with what Vault gave back. Without this the log
+                # shows "attaching..." and then silence, so success is only visible as
+                # the absence of an error, and the new attachment id never appears
+                # anywhere but the CSV.
+                Write-Log "$docPrefix - OK $($local.Name) attached as $($up.AttachmentId) v$($up.Version) ($(Format-Bytes $local.Size))" 'OK'
             }
             else {
                 $record.Status  = 'WHATIF'
