@@ -359,6 +359,41 @@ eq 'no members is empty'   ($withMembers.Members['12'] -join ',') ''
 eq 'label still indexed'   (Resolve-NameToId -Directory $withMembers -Kind 'group' -Name 'Document Users') '11'
 $script:Directory = $null
 
+Write-Host "`n== the validator reads current state through doc_role__sys, not the roles endpoint =="
+# Deliberately a different path from the one the assign run used. A validator that reads
+# back through the code it is checking agrees with itself whatever Vault actually holds.
+$script:vCalls = New-Object System.Collections.ArrayList
+function Invoke-Api {
+  param($VaultHost, $ApiVersion, $Method, $Path, $Body, $ContentType, $TimeoutSec, $MaxRetries)
+  [void]$script:vCalls.Add([pscustomobject]@{ Path = $Path; Body = $Body })
+  return ([pscustomobject]@{ responseStatus = 'SUCCESS'; data = @(
+    [pscustomobject]@{ document_id = 771; role_name__sys = 'editor__v';   group__sys = 11 },
+    [pscustomobject]@{ document_id = 771; role_name__sys = 'editor__v';   group__sys = 12 },
+    [pscustomobject]@{ document_id = 772; role_name__sys = 'consumer__v'; group__sys = 16 }
+  ) })
+}
+$ctxV = [pscustomobject]@{ VaultHost = 'x.veevavault.com'; Api = 'v26.2' }
+$cur  = Get-AssignedGroupsBulk -Context $ctxV -DocIds @('771', '772')
+eq 'queried doc_role__sys' ($script:vCalls[0].Body -match 'doc_role__sys') $true
+eq 'not the roles endpoint' (@($script:vCalls | Where-Object { $_.Path -like '*/roles' }).Count) 0
+eq 'bulk path used'        $cur.Bulk $true
+eq 'two groups on 771'     (($cur.ByKey['771|editor'].Keys | Sort-Object) -join ',') '11,12'
+eq 'one group on 772'      (($cur.ByKey['772|consumer'].Keys | Sort-Object) -join ',') '16'
+eq 'a role with none is absent' ($cur.ByKey.ContainsKey('772|editor')) $false
+
+Write-Host "`n== a vault that refuses the bulk query falls back rather than checking nothing =="
+$script:vCalls.Clear()
+function Invoke-Api {
+  param($VaultHost, $ApiVersion, $Method, $Path, $Body, $ContentType, $TimeoutSec, $MaxRetries)
+  [void]$script:vCalls.Add([pscustomobject]@{ Path = $Path; Body = $Body })
+  if ($Path -eq '/query') { throw 'MALFORMED_QUERY: doc_role__sys does not support that' }
+  return ([pscustomobject]@{ responseStatus = 'SUCCESS'; documentRoles = @(
+    [pscustomobject]@{ name = 'editor__v'; assignedGroups = @(11, 13) }) })
+}
+$cur2 = Get-AssignedGroupsBulk -Context $ctxV -DocIds @('771')
+eq 'fell back, did not give up' $cur2.Bulk $false
+eq 'and still read the state'   (($cur2.ByKey['771|editor'].Keys | Sort-Object) -join ',') '11,13'
+
 Write-Host "`n== document type default security is read out of the MDL component =="
 # Admin > Document Types > (subtype) > Security > "Default Settings for New Documents"
 # is role_defaulting_editors / _viewers / _consumers on the Doctype MDL component. A real

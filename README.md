@@ -1,6 +1,6 @@
 # Veeva Vault — migration tools
 
-*Updated 2026-08-28 14:21 EDT*
+*Updated 2026-08-28 19:40 EDT*
 
 Two jobs, each safe to run repeatedly because each compares before it acts:
 
@@ -197,6 +197,7 @@ Three steps, in order. Nothing is written to Vault until the third.
 
 | | |
 | --- | --- |
+| `-Validate` | prove what a run assigned is actually there. Writes nothing |
 | `-Survey` | exactly what is in scope, by type and subtype, in ~5 seconds. Writes nothing |
 | `-Probe` | roles and where the defaults come from, per document. Writes nothing |
 | `-Plan` | exactly who would be added to which role, per document. Writes nothing |
@@ -249,6 +250,26 @@ check it against the Admin screen before using it.
 assignment outlives the group, so taking someone out of the group later does not take
 away their access. `-Assign Groups` writes only the groups and leaves membership to do
 its job.
+
+### Proving it worked
+
+`-Validate` reads `role-results.csv`, takes every row recorded as `ASSIGNED`, and checks
+Vault actually holds those groups — reading through `doc_role__sys`, deliberately *not*
+the endpoint the run used. A validator that reads back through the code it is checking
+agrees with itself whatever happened.
+
+```
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File veeva-roles.ps1 -Validate
+```
+
+This is not the same as re-running `-Plan`. A re-plan recomputes the desired state with
+the same code that computed it the first time; agreement proves consistency, not that
+anything landed. It matters because Vault documents that it "ignores and does not
+process" ids it cannot grant — **a document can report SUCCESS with a group silently
+dropped**, and only reading the result back catches it.
+
+`MISSING` rows in `validate-roles.csv` are exactly that case. Re-running will not fix
+them; check whether the account may grant those groups.
 
 Assignment is additive and it never removes anyone, so a second run over the same map is
 a no-op. Per document and role, `role-results.csv` records what was assigned, what was
