@@ -225,7 +225,7 @@ param(
     [pscredential]$Credential
 )
 
-$ScriptVersion = '2026.08.28-15'
+$ScriptVersion = '2026.08.28-17'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -2022,6 +2022,7 @@ function Invoke-Roles {
             [void]$groups[$sig].Add($it)
         }
 
+        Write-Log "Writing $($pending.Count) document(s) to Vault"
         foreach ($sig in $groups.Keys) {
             $items   = @($groups[$sig])
             $columns = @($sig -split '\|')
@@ -2190,7 +2191,12 @@ function Invoke-Roles {
             if ($missingUsers.Count)  { $parts += "users $($row.MissingUsers)" }
             if ($missingGroups.Count) { $parts += "groups $($row.MissingGroups)" }
             [void]$summary.Add("$label ($($parts -join ', '))")
-            Write-Log "$prefix  $name  + $($parts -join ' + ')"
+            # "needs", not "+". This line is printed when the gap is WORKED OUT, and the
+            # write happens on the next batch flush - up to BatchSize documents later. A
+            # line reading like an action, an hour before Vault has seen it, sent someone
+            # to check a document in the UI and find nothing there. The confirmation is
+            # the separate "assigned" line from Submit-Pending.
+            Write-Log "$prefix  $name  needs $($parts -join ' + ')"
 
             if ($missingUsers.Count)  { $cells["$name.users"]  = $missingUsers }
             if ($missingGroups.Count) { $cells["$name.groups"] = $missingGroups }
