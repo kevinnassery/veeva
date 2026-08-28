@@ -138,7 +138,7 @@ param(
     [int]    $MaxRetries = 4
 )
 
-$ScriptVersion = '2026.08.27-33'
+$ScriptVersion = '2026.08.27-34'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -1227,7 +1227,13 @@ $script:TestStopped = $false
                 # Straight onto the target document. One call, no staging, and no
                 # intermediate state - which is why there is no ATTACH mode any more.
                 Write-Log "$docPrefix - attaching to document $tgtId"
-                $up = Send-DocumentAttachment -TargetDocId $tgtId -LocalPath $local.Path -FileName $local.Name
+                # Vault's ORIGINAL name, not $local.Name. The local copy has to have
+                # characters like : * ? scrubbed out to be a legal Windows filename,
+                # but uploading under the scrubbed name means the target ends up with
+                # "RE_ [EXTERNAL]..." where the source has "RE: [EXTERNAL]...". The
+                # names then never match again, so every later run sees it as missing
+                # and uploads another copy - duplicates without limit.
+                $up = Send-DocumentAttachment -TargetDocId $tgtId -LocalPath $local.Path -FileName $name
                 $record.Status  = 'ATTACHED'
                 $record.Message = "attachment $($up.AttachmentId) v$($up.Version)"
                 $moved += $local.Size
@@ -1236,7 +1242,7 @@ $script:TestStopped = $false
                 # shows "attaching..." and then silence, so success is only visible as
                 # the absence of an error, and the new attachment id never appears
                 # anywhere but the CSV.
-                Write-Log "$docPrefix - OK $($local.Name) attached as $($up.AttachmentId) v$($up.Version) ($(Format-Bytes $local.Size))" 'OK'
+                Write-Log "$docPrefix - OK $name attached as $($up.AttachmentId) v$($up.Version) ($(Format-Bytes $local.Size))" 'OK'
             }
             else {
                 $record.Status  = 'WHATIF'
