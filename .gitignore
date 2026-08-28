@@ -37,3 +37,12 @@ validate-work/
 old-*/
 .run-*.lock
 .vault-session.json
+
+# veeva-roles.ps1 run artifacts
+role-results.csv
+role-results-*.csv
+probe-report.csv
+discovered-defaults.csv
+verify-results.csv
+verify-results-*.csv
+veeva-roles-*.log

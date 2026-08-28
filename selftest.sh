@@ -27,8 +27,20 @@ else
   ok "check-scripts ($($PS -NoProfile -File check-scripts.ps1 2>&1 | grep -c '^OK') scripts)"
 fi
 
+echo "== veeva-roles logic that does not need a vault =="
+if $PS -NoProfile -File test-roles.ps1 >/tmp/veeva-test-roles.out 2>&1; then
+  ok "test-roles ($(grep -c '^  PASS' /tmp/veeva-test-roles.out) assertions)"
+else
+  grep '^  FAIL' /tmp/veeva-test-roles.out | sed 's/^/  /'
+  bad "test-roles"
+fi
+
 echo "== every version stamp matches =="
-n=$(grep -h -E "^\\\$ScriptVersion|^REM VERSION" ./*.bat ./*/*/*.ps1 ./*/*/*.bat 2>/dev/null \
+#  The file set here must be the one bump-version.sh stamps, not a hand-written glob.
+#  The old glob was ./*.bat ./*/*/*.ps1 ./*/*/*.bat, which silently missed every
+#  top-level .ps1 and all of VaultKit/ - so vault.ps1 could drift and nothing said so.
+n=$( { find . -name '*.ps1' -not -path './docs/*' -exec grep -h -E '^\$ScriptVersion' {} + ;
+       find . -name '*.bat' -not -path './docs/*' -exec grep -h -E '^REM VERSION' {} + ; } 2>/dev/null \
       | sed "s/.*= *'//;s/'.*//;s/^REM VERSION //" | sort -u | wc -l | tr -d ' ')
 if [ "$n" = "1" ]; then ok "one version across all files"; else bad "$n different versions in the tree"; fi
 
