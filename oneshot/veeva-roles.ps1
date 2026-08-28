@@ -225,7 +225,7 @@ param(
     [pscredential]$Credential
 )
 
-$ScriptVersion = '2026.08.28-17'
+$ScriptVersion = '2026.08.28-18'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -2084,7 +2084,7 @@ function Invoke-Roles {
                 AssignedUsers = ''; AssignedGroups = ''; MissingUsers = ''; MissingGroups = ''
                 Status = 'ERROR'; Message = "$_"; CheckedUtc = (Get-Date).ToUniversalTime().ToString('s')
             })
-            Save-Results -Results $res
+            if (($i % $BatchSize) -eq 0) { Save-Results -Results $res }
             continue
         }
         if (-not $roles.Count) {
@@ -2207,14 +2207,19 @@ function Invoke-Roles {
 
         if (-not $docNeedsWork) {
             $stat.InStep++
-            Save-Results -Results $res
+        # Saved on a cadence, never per document. Save-Results rewrites the WHOLE file,
+        # so a save per document is quadratic: a verification pass, where every document
+        # is in step, would rewrite a 110,000-row file 15,752 times. The point of saving
+        # often is that an interrupted run leaves a usable file, and one save per batch
+        # keeps that while costing a bounded amount.
+            if (($i % $BatchSize) -eq 0) { Save-Results -Results $res }
             continue
         }
         $stat.NeedWork++
 
         if ($Plan -or $c.WhatIf) {
             foreach ($row in $rows) { [void]$res.Rows.Add($row) }
-            Save-Results -Results $res
+            if (($i % $BatchSize) -eq 0) { Save-Results -Results $res }
         }
         else {
             [void]$pending.Add([pscustomobject]@{
