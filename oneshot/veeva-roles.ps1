@@ -115,6 +115,18 @@
     is not stated in the documentation. -Probe reports whether the two agree on a live
     vault, so the choice is made on evidence rather than on a reading of the docs.
 
+.PARAMETER Assign
+    What to write. Default: Both.
+
+    Both    Users and groups, exactly as the configuration names them.
+    Groups  Groups only. Use this when the direct user assignments turn out to be the
+            membership of those same groups: a direct assignment outlives the group, so
+            taking someone out of the group later does not take away their access.
+    Users   Users only.
+
+    -Plan reports how many of the user assignments are already covered by group
+    membership, so this can be decided on the numbers rather than on a hunch.
+
 .PARAMETER Probe
     Read-only survey of the target vault. Reports the subtypes the map spans, the roles
     each has, what Vault calls their defaults, and whether those defaults exceed the
@@ -184,6 +196,7 @@ param(
     [string]$Map = '',
     [string]$Where = '',
     [ValidateSet('Lifecycle', 'Document', 'Table')][string]$DesiredFrom = 'Lifecycle',
+    [ValidateSet('Both', 'Groups', 'Users')][string]$Assign = 'Both',
     [string]$Defaults = '',
     [string]$Api = 'v26.2',
     [string]$OutputRoot = '',
@@ -202,7 +215,7 @@ param(
     [pscredential]$Credential
 )
 
-$ScriptVersion = '2026.08.28-9'
+$ScriptVersion = '2026.08.28-10'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -896,8 +909,9 @@ function Get-Directory {
     param([Parameter(Mandatory)]$Context)
     if ($script:Directory) { return $script:Directory }
 
-    $byId   = @{}
-    $byName = @{}
+    $byId      = @{}
+    $byName    = @{}
+    $byMembers = @{}   # group id -> the user ids in it
 
     # Both listings come back wrapped - users: [ { user: {...} } ] - but not every Vault
     # release wraps them, so unwrap defensively rather than assuming either shape.
@@ -914,6 +928,11 @@ function Get-Directory {
         }
         $display = if ($names.Count) { $names[0] } else { $id }
         $byId["$Kind`:$id"] = $display
+        # Group membership, so a run can say whether the users it is about to assign
+        # directly are simply the people already in the groups it is assigning.
+        if ($Kind -eq 'group') {
+            $byMembers[$id] = @(@(Get-Field $r 'members__v' @()) | ForEach-Object { "$_" })
+        }
         foreach ($n in $names) {
             $k = "$Kind`:$(ConvertTo-Key $n)"
             if (-not $byName.ContainsKey($k)) { $byName[$k] = $id }
@@ -957,7 +976,7 @@ function Get-Directory {
     $users  = @($byId.Keys | Where-Object { $_ -like 'user:*' }).Count
     $groups = @($byId.Keys | Where-Object { $_ -like 'group:*' }).Count
     Write-Log "Directory: $users user(s), $groups group(s)"
-    $script:Directory = [pscustomobject]@{ ById = $byId; ByName = $byName }
+    $script:Directory = [pscustomobject]@{ ById = $byId; ByName = $byName; Members = $byMembers }
     return $script:Directory
 }
 
@@ -1644,7 +1663,8 @@ function Invoke-Roles {
 
     $res = New-Results -Path (Join-Path $c.Out 'role-results.csv')
 
-    $stat = @{ Docs = 0; InStep = 0; NeedWork = 0; Changed = 0; Users = 0; Groups = 0; Errors = 0; NoRoles = 0 }
+    $stat = @{ Docs = 0; InStep = 0; NeedWork = 0; Changed = 0; Users = 0; Groups = 0
+               Errors = 0; NoRoles = 0; RedundantUsers = 0 }
     $pending = New-Object System.Collections.ArrayList   # documents waiting for a batch
     $i = 0
     $stopped = $false
@@ -1762,6 +1782,20 @@ function Invoke-Roles {
             $missingUsers  = @($want.Users  | Where-Object { $assignedUsers  -notcontains $_ } | Select-Object -Unique)
             $missingGroups = @($want.Groups | Where-Object { $assignedGroups -notcontains $_ } | Select-Object -Unique)
 
+            # How many of those direct user assignments are just the membership of the
+            # groups going on at the same time. A direct assignment outlives the group -
+            # take someone out of the group and they keep the access - so writing hundreds
+            # of thousands of them by accident is a mess that is hard to unpick later.
+            foreach ($g in $want.Groups) {
+                if (-not $dir.Members.ContainsKey($g)) { continue }
+                foreach ($m in $dir.Members[$g]) {
+                    if ($missingUsers -contains $m) { $stat.RedundantUsers++ }
+                }
+            }
+
+            if ($Assign -eq 'Groups') { $missingUsers  = @() }
+            if ($Assign -eq 'Users')  { $missingGroups = @() }
+
             $row = [pscustomobject][ordered]@{
                 Key = "$docId`:$name"; DocId = $docId; SourceDocId = $doc.SourceId
                 Lifecycle = $(if ($info) { $info.Lifecycle } else { '' })
@@ -1848,6 +1882,14 @@ function Invoke-Roles {
     if ($Plan -or $c.WhatIf) {
         $what = if ($Plan) { 'PLAN' } else { 'WhatIf' }
         Write-Log "$what only - nothing was assigned. $($stat.Users) user and $($stat.Groups) group assignment(s) would be." 'OK'
+        if ($stat.RedundantUsers -gt 0 -and $Assign -ne 'Groups') {
+            Write-Log ''
+            Write-Log "$($stat.RedundantUsers) of those $($stat.Users) user assignment(s) are people who are ALREADY" 'WARN'
+            Write-Log 'members of a group being assigned on the same document. Assigning them directly as' 'WARN'
+            Write-Log 'well outlives the group - take someone out of the group later and they keep the' 'WARN'
+            Write-Log 'access, because the direct assignment is still there. -Assign Groups writes only the' 'WARN'
+            Write-Log 'groups and leaves membership to do its job.' 'WARN'
+        }
         # Errors are reported in every mode. A plan that could not read half the documents
         # is not a plan, and saying only "0 would be assigned" reads as good news rather
         # than as a run that never got off the ground.

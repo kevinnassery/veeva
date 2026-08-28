@@ -1,6 +1,6 @@
 # Veeva Vault — migration tools
 
-*Updated 2026-08-28 13:51 EDT*
+*Updated 2026-08-28 13:53 EDT*
 
 Two jobs, each safe to run repeatedly because each compares before it acts:
 
@@ -225,12 +225,19 @@ that matches nothing in the vault stops the run rather than quietly shrinking a 
 `-Probe` writes `discovered-defaults.csv` in exactly this shape as a starting point —
 check it against the Admin screen before using it.
 
+`-Plan` also reports how many of the direct user assignments it would write are people
+*already in a group it is assigning on the same document*. That number matters: a direct
+assignment outlives the group, so taking someone out of the group later does not take
+away their access. `-Assign Groups` writes only the groups and leaves membership to do
+its job.
+
 Assignment is additive and it never removes anyone, so a second run over the same map is
 a no-op. Per document and role, `role-results.csv` records what was assigned, what was
 already there, and which rule was applied.
 
 | | |
 | --- | --- |
+| `-Assign Groups` | write only groups, not direct user assignments |
 | `-Logout` | delete the cached session |
 | `-Where "…"` | enumerate from the vault instead of a map |
 | `-Version` | print the version, no vault or login needed |

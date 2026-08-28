@@ -339,6 +339,26 @@ eq 'stops on no new entries' (@($script:dCalls | Where-Object { $_ -like '/objec
 eq 'kept the one page'       (@($built2.ById.Keys | Where-Object { $_ -like 'user:*' }).Count) 200
 $script:Directory = $null
 
+Write-Host "`n== group membership is captured, so redundant direct assignments can be counted =="
+$script:dCalls = New-Object System.Collections.ArrayList
+function Invoke-Api {
+  param($VaultHost, $ApiVersion, $Method, $Path, $Body, $ContentType, $TimeoutSec, $MaxRetries)
+  [void]$script:dCalls.Add($Path)
+  if ($Path -like '/objects/groups*') {
+    return ([pscustomobject]@{ responseStatus = 'SUCCESS'; groups = @(
+      [pscustomobject]@{ group = [pscustomobject]@{ id = 11; label__v = 'Document Users'; members__v = @(101, 102, 103) } },
+      [pscustomobject]@{ group = [pscustomobject]@{ id = 12; label__v = 'Empty Group' } }
+    ) })
+  }
+  return ([pscustomobject]@{ responseStatus = 'SUCCESS'; users = @() })
+}
+$script:Directory = $null
+$withMembers = Get-Directory -Context ([pscustomobject]@{ VaultHost = 'x'; Api = 'v26.2' })
+eq 'members captured'      ($withMembers.Members['11'] -join ',') '101,102,103'
+eq 'no members is empty'   ($withMembers.Members['12'] -join ',') ''
+eq 'label still indexed'   (Resolve-NameToId -Directory $withMembers -Kind 'group' -Name 'Document Users') '11'
+$script:Directory = $null
+
 Write-Host "`n== the cached vault host is offered back, newest session first =="
 $script:SessionPath = Join-Path $tmp '.vault-session.json'
 eq 'no file, no default' (Get-CachedVaultHost) ''
