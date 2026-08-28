@@ -135,7 +135,7 @@ param(
     [int]    $MaxRetries = 4
 )
 
-$ScriptVersion = '2026.08.27-27'
+$ScriptVersion = '2026.08.27-28'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -1143,7 +1143,7 @@ function Save-Results {
 
 $i = 0
 $moved     = [long]0
-$stat      = @{ Src = 0; Present = 0; Missing = 0; Differs = 0; Staged = 0; Attached = 0; NoMap = 0; NoAtt = 0 }
+$stat      = @{ Src = 0; Present = 0; Missing = 0; Differs = 0; Attached = 0; NoMap = 0; NoAtt = 0 }
 $script:TestStopped = $false
 
 :documents foreach ($srcId in $pending) {
@@ -1276,7 +1276,7 @@ Write-Log ("documents with no attachments {0}" -f $stat.NoAtt)
 if ($script:TestStopped) {
     Write-Log "TEST run - stopped early after $i of $($pending.Count) document(s). These totals are NOT the whole set." 'WARN'
 }
-if ($Mode -ne 'REPORT') { Write-Log ("staged {0}   attached {1}" -f $stat.Staged, $stat.Attached) }
+if ($Mode -ne 'REPORT') { Write-Log ("attached {0}" -f $stat.Attached) }
 
 # Scratch should be empty. Anything still here is a file a crash or a kill left
 # behind, and it will sit there consuming disk until someone notices.
