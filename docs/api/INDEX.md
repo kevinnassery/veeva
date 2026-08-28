@@ -188,6 +188,17 @@ workflows), authentication, file staging, jobs, VQL, vault objects, Vault Loader
 - [Retrieve Lifecycle Role Assignment Rules (Default & Override)](vault-api/api-reference/26.2/document-lifecycle-workflows/lifecycle-role-assignment-rules/retrieve-lifecycle-role-assignment-rules-default-override.md)
 - [Update Lifecycle Role Assignment Rules (Default & Override)](vault-api/api-reference/26.2/document-lifecycle-workflows/lifecycle-role-assignment-rules/update-lifecycle-role-assignment-rules-default-override.md)
 
+## Platform — MDL
+
+- [Metadata Definition Language (MDL)](vault-api/api-reference/26.2/metadata-definition-language-mdl.md)
+- [Retrieve All Component Metadata](vault-api/api-reference/26.2/metadata-definition-language-mdl/retrieve-all-component-metadata.md)
+- [Retrieve Component Records](vault-api/api-reference/26.2/metadata-definition-language-mdl/retrieve-component-records.md)
+- [Retrieve Component Record Collection](vault-api/api-reference/26.2/metadata-definition-language-mdl/retrieve-component-records/retrieve-component-record-collection.md)
+- [Retrieve Component Record (MDL)](vault-api/api-reference/26.2/metadata-definition-language-mdl/retrieve-component-records/retrieve-component-record-mdl.md)
+- [Retrieve Component Record (XML/JSON)](vault-api/api-reference/26.2/metadata-definition-language-mdl/retrieve-component-records/retrieve-component-record-xmljson.md)
+- [Doctype component](mdl/component-types/doctype.md) - role_defaulting_editors / _viewers / _consumers
+- [Docparticipantrule component](mdl/component-types/docparticipantrule.md)
+
 ## Platform — documents
 
 - [Create Documents](vault-api/api-reference/26.2/documents/create-documents.md)

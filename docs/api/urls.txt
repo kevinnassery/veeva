@@ -1,3 +1,5 @@
+https://general.veevavault.dev/mdl/component-types/docparticipantrule/
+https://general.veevavault.dev/mdl/component-types/doctype/
 https://general.veevavault.dev/regulatory/vault-api/api-reference/26.2/
 https://general.veevavault.dev/regulatory/vault-api/api-reference/26.2/rim-submissions-archive/
 https://general.veevavault.dev/regulatory/vault-api/api-reference/26.2/rim-submissions-archive/cancel-submission/
@@ -214,6 +216,12 @@ https://general.veevavault.dev/vault-api/api-reference/26.2/jobs/retrieve-job-mo
 https://general.veevavault.dev/vault-api/api-reference/26.2/jobs/retrieve-job-status/
 https://general.veevavault.dev/vault-api/api-reference/26.2/jobs/retrieve-sdk-job-tasks/
 https://general.veevavault.dev/vault-api/api-reference/26.2/jobs/start-job/
+https://general.veevavault.dev/vault-api/api-reference/26.2/metadata-definition-language-mdl/
+https://general.veevavault.dev/vault-api/api-reference/26.2/metadata-definition-language-mdl/retrieve-all-component-metadata/
+https://general.veevavault.dev/vault-api/api-reference/26.2/metadata-definition-language-mdl/retrieve-component-records/
+https://general.veevavault.dev/vault-api/api-reference/26.2/metadata-definition-language-mdl/retrieve-component-records/retrieve-component-record-collection/
+https://general.veevavault.dev/vault-api/api-reference/26.2/metadata-definition-language-mdl/retrieve-component-records/retrieve-component-record-mdl/
+https://general.veevavault.dev/vault-api/api-reference/26.2/metadata-definition-language-mdl/retrieve-component-records/retrieve-component-record-xmljson/
 https://general.veevavault.dev/vault-api/api-reference/26.2/users/
 https://general.veevavault.dev/vault-api/api-reference/26.2/users/api-access-tokens/
 https://general.veevavault.dev/vault-api/api-reference/26.2/users/api-access-tokens/generate-api-access-token/

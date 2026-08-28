@@ -216,7 +216,7 @@ param(
     [pscredential]$Credential
 )
 
-$ScriptVersion = '2026.08.28-12'
+$ScriptVersion = '2026.08.28-13'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -1135,13 +1135,25 @@ function Get-DocTypeRoleDefault {
         if ($subName) { $component = "Doctype.$typeName.$subName" }
     }
 
+    # Two endpoints return this, and they are shaped differently on purpose:
+    #
+    #   GET /api/{version}/configuration/{Type}.{name}   JSON, versioned
+    #   GET /api/mdl/components/{Type}.{name}            MDL source, NOT versioned
+    #
+    # The second has no version segment at all. Building it as /api/v26.2/mdl/... earns a
+    # 404 MALFORMED_URL, which is exactly how the first attempt at this failed.
     $r = $null
-    try {
-        $r = Invoke-Api -VaultHost $Context.VaultHost -ApiVersion $Context.Api -Method GET `
-                -Path "/mdl/components/$component" -MaxRetries 1
+    $why = ''
+    foreach ($path in @("/configuration/$component", "/api/mdl/components/$component")) {
+        try {
+            $r = Invoke-Api -VaultHost $Context.VaultHost -ApiVersion $Context.Api -Method GET `
+                    -Path $path -MaxRetries 1
+            break
+        }
+        catch { if (-not $why) { $why = "$_" } }
     }
-    catch {
-        Write-Log "Could not read $component - type defaults for '$SubtypeLabel' will NOT be applied: $_" 'ERROR'
+    if ($null -eq $r) {
+        Write-Log "Could not read $component - type defaults for '$SubtypeLabel' will NOT be applied: $why" 'ERROR'
         return $empty
     }
 
