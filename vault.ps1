@@ -20,10 +20,23 @@ param(
     [Parameter(Position = 1)][string]$Subcommand = '',
     [string]$ConfigFile = '',
     [string]$OutputRoot = '',
-    [switch]$NoPrompt
+    [switch]$NoPrompt,
+
+    # Work out what would happen and report it, changing nothing.
+    [switch]$Plan,
+    # Stop once this many items are genuinely done - not this many examined. Most
+    # documents carry no attachments, so capping by document can prove nothing.
+    [int]$Test = 0,
+    # Cap the input examined.
+    [int]$Limit = 0,
+    # FAST compares the MD5 each vault records; DEEP downloads both copies and hashes.
+    [ValidateSet('FAST', 'DEEP')][string]$Depth = 'DEEP',
+    # Send a same-name attachment whose bytes differ, as a new version.
+    [switch]$ReplaceDiffering,
+    [ValidateSet('Prompt', 'Resume', 'Fresh')][string]$Existing = 'Resume'
 )
 
-$ScriptVersion = '2026.08.28-3'
+$ScriptVersion = '2026.08.28-5'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -33,7 +46,7 @@ $ProgressPreference    = 'SilentlyContinue'
 $here = $PSScriptRoot
 if (-not $here) { $here = (Get-Location).ProviderPath }
 
-foreach ($part in @('Log', 'Config', 'Auth', 'Http')) {
+foreach ($part in @('Log', 'Config', 'Auth', 'Http', 'Ids', 'Run', 'Attachments')) {
     $f = Join-Path (Join-Path $here 'VaultKit') "$part.ps1"
     if (-not (Test-Path -LiteralPath $f)) { throw "VaultKit\$part.ps1 is missing next to vault.ps1" }
     . $f
@@ -60,6 +73,29 @@ function Initialize-VaultRun {
     $script:Out = $root
 
     if ($LogName) { [void](Start-VaultLog -Directory $root -Name $LogName) }
+}
+
+function New-VaultContext {
+    # Everything a workflow needs, resolved once. Passed as one object so a command
+    # signature stays readable and nothing reaches for a script-scope global.
+    param([Parameter(Mandatory)][string]$MapKey, [string]$MapSection = '')
+    $map = $null
+    if ($MapKey) {
+        $file = Get-VaultSetting -Config $script:Cfg -Section $MapSection -Key $MapKey -Default ''
+        if (-not $file) { throw "[$MapSection] $MapKey is not set in $($script:CfgPath)" }
+        $map = Import-VaultIdMap -Path $file -LegacyNames @('map.csv')
+    }
+    return [pscustomobject]@{
+        Api        = $script:Api
+        SourceHost = $script:SourceHost
+        TargetHost = $script:TargetHost
+        Out        = $script:Out
+        Scratch    = (New-VaultScratch -Root $script:Out -Name 'scratch')
+        Map        = $map
+        ReserveMB  = [int](Get-VaultSetting -Config $script:Cfg -Section limits -Key reserve -Default 2048)
+        Existing   = $Existing
+        WhatIf     = [bool]$WhatIfPreference
+    }
 }
 
 function Get-ConfiguredHosts {
@@ -151,6 +187,41 @@ function Invoke-Probe {
     Write-VaultLog "Log: $script:VaultLogFile"
 }
 
+function Invoke-Attachments {
+    param([string]$Action)
+    switch ($Action) {
+        'sync' {
+            Initialize-VaultRun -LogName 'attachments-sync'
+            Start-VaultLock -Name 'attachments'
+            try {
+                Write-VaultLog "vault $ScriptVersion - attachments sync"
+                $ctx = New-VaultContext -MapSection 'attachments' -MapKey 'map'
+                $bad = Invoke-VaultAttachmentsSync -Context $ctx -Plan:$Plan `
+                          -ReplaceDiffering:$ReplaceDiffering -TestCount $Test -Limit $Limit
+                Write-VaultLog "Log: $script:VaultLogFile"
+                if ($bad -gt 0) { exit 1 }
+            }
+            finally { Stop-VaultLock }
+        }
+        'verify' {
+            Initialize-VaultRun -LogName 'attachments-verify'
+            Start-VaultLock -Name 'attachments'
+            try {
+                Write-VaultLog "vault $ScriptVersion - attachments verify ($Depth)"
+                $ctx = New-VaultContext -MapSection 'attachments' -MapKey 'map'
+                $bad = Invoke-VaultAttachmentsVerify -Context $ctx -Depth $Depth -TestCount $Test -Limit $Limit
+                Write-VaultLog "Log: $script:VaultLogFile"
+                if ($bad -gt 0) { exit 1 }
+            }
+            finally { Stop-VaultLock }
+        }
+        default {
+            Write-Host "vault attachments <sync|verify>" -ForegroundColor Red
+            exit 2
+        }
+    }
+}
+
 function Invoke-Help {
     $v = $ScriptVersion
     Write-Host @"
@@ -161,6 +232,9 @@ vault $v
   vault whoami             Who each cached session belongs to, and its age
   vault logout             Delete the cached sessions
   vault probe              Read-only survey of each vault. Changes nothing
+
+  vault attachments sync   Deliver document attachments the target is missing
+  vault attachments verify Prove both vaults hold the same bytes
   vault version            Print the version
   vault help               This
 
@@ -168,6 +242,13 @@ Options
   -ConfigFile <path>       Default: vault.ini beside this script
   -OutputRoot <path>       Overrides [paths] output
   -NoPrompt                Fail instead of asking for credentials
+  -Plan                    Report what would happen, change nothing
+  -Test <n>                Stop once n items are genuinely done (not n examined)
+  -Limit <n>               Cap the input examined
+  -Depth FAST|DEEP         verify: recorded MD5, or download both and hash
+  -ReplaceDiffering        sync: send same-name attachments whose bytes differ
+  -Existing Resume|Fresh   Keep earlier results, or rotate them aside
+  -WhatIf                  Withhold every write to Vault
 
 Config is vault.ini, sectioned:
 
@@ -183,8 +264,8 @@ Sessions are cached in .vault-session.json beside this script, keyed by vault
 host. It holds live tokens: treat it like a password, and run vault logout when
 you are finished.
 
-Not yet ported from legacy\: attachments sync and verify, documents transfer,
-submissions import, object record pull.
+Not yet ported from legacy\: documents transfer, submissions import, and the
+object record pull that get-attachments.bat does today.
 
 "@
 }
@@ -201,6 +282,7 @@ switch ($verb) {
     'whoami'  { Invoke-Whoami }
     'logout'  { Invoke-Logout }
     'probe'   { Invoke-Probe }
+    'attachments' { Invoke-Attachments -Action $sub }
     'version' { Write-Host $ScriptVersion }
     'help'    { Invoke-Help }
     ''        { Invoke-Help }
