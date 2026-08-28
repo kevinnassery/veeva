@@ -66,6 +66,18 @@
     Print the version and exit. Needs no vault and no login - it is here because this file
     is fetched by URL, so "which copy am I holding" is a real question.
 
+.PARAMETER Logout
+    Delete the cached session and exit.
+
+    The session id is cached in .vault-session.json beside this script and reused by the
+    next run, so probing, planning and assigning over the same vault do not each stop for
+    a credential prompt. It is checked against the vault before being trusted, and a dead
+    one just means logging in again.
+
+    That file is a bearer token: whoever holds it acts as you until Vault expires it. It
+    is ACL'd to the current user where Windows allows it, but it is not encrypted. Treat
+    it like a password, and -Logout when you are done.
+
 .PARAMETER DesiredFrom
     Where "who should be in this role" comes from. Default: Lifecycle.
 
@@ -158,7 +170,8 @@
     changes nothing. That plus the read-then-compare makes this safe to run repeatedly -
     a second run over the same map is a no-op.
 
-    The session is held in memory for the life of the run and never written to disk.
+    The session id is cached in .vault-session.json beside this script; -Logout removes
+    it. The password itself never touches disk.
 
     API: GET /objects/documents/{id}/roles, POST /objects/documents/roles/batch.
     Mirrored offline in the repo at
@@ -176,6 +189,7 @@ param(
     [string]$OutputRoot = '',
 
     [switch]$Version,
+    [switch]$Logout,
     [switch]$Probe,
     [switch]$Plan,
     [string[]]$Role = @(),
@@ -188,7 +202,7 @@ param(
     [pscredential]$Credential
 )
 
-$ScriptVersion = '2026.08.28-7'
+$ScriptVersion = '2026.08.28-8'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -353,11 +367,96 @@ function Resolve-Settings {
 
 
 # ======================================================================================
-#  Authentication - in memory, for the life of this run
+#  Authentication
+#
+#  The session is cached in .vault-session.json beside this script and reused by the next
+#  run, keyed by vault host. Probing, planning and assigning are three runs over the same
+#  vault minutes apart, and making each one stop for a credential prompt is a tax on
+#  exactly the careful, iterative use this tool is built around.
+#
+#  It is a bearer token: whoever holds that file acts as you until Vault expires it. The
+#  file is ACL'd to the current user where Windows allows it, but it is NOT encrypted.
+#  Treat it like a password, and -Logout deletes it.
 # ======================================================================================
 
-$script:Sessions = @{}
-$script:Cred     = $null
+$script:Sessions    = @{}
+$script:Cred        = $null
+$script:SessionPath = ''
+$script:SessionsRead = $false
+
+function Get-SessionPath {
+    if ($script:SessionPath) { return $script:SessionPath }
+    $here = $PSScriptRoot
+    if (-not $here) { $here = (Get-Location).ProviderPath }
+    $script:SessionPath = Join-Path $here '.vault-session.json'
+    return $script:SessionPath
+}
+
+function Read-Sessions {
+    # Hydrate once. An unreadable or half-written file is not a reason to stop - it only
+    # means logging in again, which is what would have happened without it anyway.
+    if ($script:SessionsRead) { return }
+    $script:SessionsRead = $true
+    $path = Get-SessionPath
+    if (-not (Test-Path -LiteralPath $path)) { return }
+    try {
+        $json = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+        foreach ($p in $json.PSObject.Properties) {
+            $sid = "$(Get-Field $p.Value 'sessionId' '')"
+            if (-not $sid) { continue }
+            $script:Sessions[$p.Name] = $sid
+            $age = ''
+            try {
+                $t = [datetime]::Parse("$(Get-Field $p.Value 'obtained' '')").ToUniversalTime()
+                $age = ' ({0:N0} min old)' -f ((Get-Date).ToUniversalTime() - $t).TotalMinutes
+            } catch { }
+            Write-Log "Reusing the cached session for $($p.Name)$age - -Logout to discard it"
+        }
+    }
+    catch { Write-Log "Session file unreadable, ignoring it: $_" 'WARN' }
+}
+
+function Write-Sessions {
+    param([Parameter(Mandatory)][string]$VaultHost, [Parameter(Mandatory)]$Entry)
+    $path = Get-SessionPath
+    $all  = [ordered]@{}
+    if (Test-Path -LiteralPath $path) {
+        try {
+            $json = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+            foreach ($p in $json.PSObject.Properties) { $all[$p.Name] = $p.Value }
+        } catch { }
+    }
+    $all[$VaultHost] = $Entry
+    try {
+        # -WhatIf:$false throughout. -WhatIf means "write nothing to VAULT"; suppressing
+        # the session cache would only make a rehearsal ask for credentials again.
+        ($all | ConvertTo-Json -Depth 5) | Set-Content -LiteralPath $path -Encoding UTF8 -WhatIf:$false
+    }
+    catch { Write-Log "Could not write the session file: $_" 'WARN'; return }
+
+    # Restrict to the current user. Windows only; elsewhere this is a no-op and the file
+    # inherits the directory's permissions.
+    try {
+        $acl = Get-Acl -LiteralPath $path
+        $acl.SetAccessRuleProtection($true, $false)
+        foreach ($r in @($acl.Access)) { [void]$acl.RemoveAccessRule($r) }
+        $me   = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+        $rule = New-Object Security.AccessControl.FileSystemAccessRule($me, 'FullControl', 'Allow')
+        $acl.SetAccessRule($rule)
+        Set-Acl -LiteralPath $path -AclObject $acl
+    }
+    catch { }
+}
+
+function Clear-Sessions {
+    $path = Get-SessionPath
+    $script:Sessions = @{}
+    if (Test-Path -LiteralPath $path) {
+        Remove-Item -LiteralPath $path -Force -WhatIf:$false
+        return $true
+    }
+    return $false
+}
 
 function Get-VaultCredential {
     param([string]$Message = 'Vault credentials')
@@ -391,19 +490,47 @@ function Connect-Vault {
     }
 
     $script:Sessions[$VaultHost] = $sid
+    Write-Sessions -VaultHost $VaultHost -Entry ([pscustomobject]@{
+        sessionId = $sid
+        userId    = "$(Get-Field $r 'userId' '')"
+        vaultId   = "$(Get-Field $r 'vaultId' '')"
+        api       = $ApiVersion
+        obtained  = (Get-Date).ToUniversalTime().ToString('s') + 'Z'
+    })
     Write-Log "$VaultHost - authenticated (vaultId $(Get-Field $r 'vaultId' '?'), userId $(Get-Field $r 'userId' '?'))" 'OK'
     return $sid
 }
 
 function Get-SessionId {
     param([Parameter(Mandatory)][string]$VaultHost, [Parameter(Mandatory)][string]$ApiVersion)
+    Read-Sessions
     if ($script:Sessions.ContainsKey($VaultHost)) { return $script:Sessions[$VaultHost] }
     return (Connect-Vault -VaultHost $VaultHost -ApiVersion $ApiVersion)
 }
 
+function Test-Session {
+    # Prove a cached session before leaning on it. Vault expires sessions on idle, so the
+    # one in the file is often dead - and finding that out on the first call of a long run
+    # is fine, but finding it out AFTER the enumeration and the directory build is a
+    # minute of someone's life spent to learn they have to log in.
+    param([Parameter(Mandatory)][string]$VaultHost, [Parameter(Mandatory)][string]$ApiVersion)
+    Read-Sessions
+    if (-not $script:Sessions.ContainsKey($VaultHost)) { return }
+    try {
+        [void](Invoke-Api -VaultHost $VaultHost -ApiVersion $ApiVersion -Method GET `
+                  -Path '/objects/users/me' -MaxRetries 1)
+    }
+    catch {
+        Write-Log "The cached session for $VaultHost is no longer good - logging in again" 'WARN'
+        $script:Sessions.Remove($VaultHost)
+        [void](Connect-Vault -VaultHost $VaultHost -ApiVersion $ApiVersion)
+    }
+}
+
 function Reset-Session {
     # Vault rejected the session mid-run. Re-authenticate from the credential held in
-    # memory so a long job outlives its session instead of stopping at hour three.
+    # memory so a long job outlives its session instead of stopping at hour three. With
+    # nothing in memory - a session that came from the file - this prompts once.
     param([Parameter(Mandatory)][string]$VaultHost, [Parameter(Mandatory)][string]$ApiVersion)
     Write-Log "$VaultHost - session expired, re-authenticating" 'WARN'
     $script:Sessions.Remove($VaultHost)
@@ -1715,6 +1842,12 @@ try {
     # answer "which copy of this file am I holding" without a vault or a login.
     if ($Version) { Write-Host $ScriptVersion; exit 0 }
 
+    if ($Logout) {
+        if (Clear-Sessions) { Write-Host "Deleted $(Get-SessionPath)" }
+        else                { Write-Host 'No session file to delete.' }
+        exit 0
+    }
+
     if ($Map -and $Where) {
         throw '-Map and -Where both name the documents to repair. Pass one.'
     }
@@ -1728,8 +1861,10 @@ try {
     Write-Log "  output   $($ctx.Out)"
     if ($ctx.WhatIf) { Write-Log '  -WhatIf: nothing will be written to Vault' 'WARN' }
 
-    # Log in up front. Failing here costs seconds; failing an hour in costs the hour.
+    # Log in up front, and PROVE a cached session rather than assuming it. Failing here
+    # costs seconds; failing an hour in costs the hour.
     [void](Get-SessionId -VaultHost $ctx.VaultHost -ApiVersion $ctx.Api)
+    Test-Session -VaultHost $ctx.VaultHost -ApiVersion $ctx.Api
 
     # Scope is capped only where THIS SCRIPT guessed it, never where it was given. A probe
     # over a named scope surveys all of it: a survey that looked at twenty-five of 577
@@ -1799,10 +1934,9 @@ catch {
     $exitCode = 1
 }
 finally {
-    # The session was never written to disk, so there is nothing to clean up but the copy
-    # in memory - which goes when the process does.
-    $script:Sessions = @{}
-    $script:Cred     = $null
+    # The password never touches disk. The SESSION does, on purpose, so the next run does
+    # not stop to ask - so it is deliberately left alone here. -Logout removes it.
+    $script:Cred = $null
 }
 
 exit $exitCode

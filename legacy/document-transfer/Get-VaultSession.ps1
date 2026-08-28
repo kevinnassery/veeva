@@ -27,7 +27,7 @@ param(
     [switch] $Clear
 )
 
-$ScriptVersion = '2026.08.28-7'
+$ScriptVersion = '2026.08.28-8'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
