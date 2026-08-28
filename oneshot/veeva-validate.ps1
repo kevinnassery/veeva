@@ -87,7 +87,7 @@ param(
     [switch]$Logout
 )
 
-$ScriptVersion = '2026.08.28-20'
+$ScriptVersion = '2026.08.28-21'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -399,6 +399,51 @@ function Get-CurrentGroups {
 }
 
 
+function Get-CurrentFacts {
+    # type, subtype and lifecycle for a set of documents, in bulk.
+    #
+    # These are the INPUTS the run's decision rested on: the lifecycle picks the rule, the
+    # type and subtype pick the MDL component. Confirming them checks the premises without
+    # re-running the reasoning - which is the line this tool tries to hold. Re-deriving
+    # what SHOULD be on a document would just be the same logic agreeing with itself.
+    param([Parameter(Mandatory)][string]$VaultHost, [Parameter(Mandatory)][array]$DocIds)
+
+    $byId  = @{}
+    $chunk = 200
+    for ($off = 0; $off -lt $DocIds.Count; $off += $chunk) {
+        $slice = @($DocIds[$off..([math]::Min($off + $chunk - 1, $DocIds.Count - 1))])
+        $vql = "SELECT id, type__v, subtype__v, lifecycle__v FROM documents WHERE id CONTAINS ($($slice -join ','))"
+        $path = '/query'
+        $body = "q=$([Uri]::EscapeDataString($vql))"
+        $pages = 0
+        try {
+            while ($path -and $pages -lt 500) {
+                $pages++
+                $r = if ($pages -eq 1) {
+                        Invoke-Api -VaultHost $VaultHost -Method POST -Path $path -Body $body `
+                            -ContentType 'application/x-www-form-urlencoded' -MaxRetries 1
+                     } else {
+                        Invoke-Api -VaultHost $VaultHost -Method GET -Path $path -MaxRetries 1
+                     }
+                foreach ($row in @(Get-Field $r 'data' @())) {
+                    $id = "$(Get-Field $row 'id' '')"
+                    if (-not $id) { continue }
+                    $sub = "$(Get-Field $row 'subtype__v' '')"
+                    $ty  = "$(Get-Field $row 'type__v' '')"
+                    if (-not $sub) { $sub = $ty }
+                    $byId[$id] = [pscustomobject]@{ Type = $ty; Subtype = $sub; Lifecycle = "$(Get-Field $row 'lifecycle__v' '')" }
+                }
+                $path = "$(Get-Field (Get-Field $r 'responseDetails' $null) 'next_page' '')"
+            }
+        }
+        catch {
+            Write-Log "Could not read document facts, so type and lifecycle go unchecked: $_" 'WARN'
+            return @{}
+        }
+    }
+    return $byId
+}
+
 # ======================================================================================
 #  Run
 # ======================================================================================
@@ -452,9 +497,12 @@ try {
         $groups = "$(Get-Field $row 'MissingGroups' '')"
         if (-not $groups) { continue }
         [void]$claims.Add([pscustomobject]@{
-            DocId  = "$(Get-Field $row 'DocId' '')"
-            Role   = "$(Get-Field $row 'Role' '')"
-            Groups = @($groups -split ';' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+            DocId     = "$(Get-Field $row 'DocId' '')"
+            Role      = "$(Get-Field $row 'Role' '')"
+            Lifecycle = "$(Get-Field $row 'Lifecycle' '')"
+            Type      = "$(Get-Field $row 'Type' '')"
+            Subtype   = "$(Get-Field $row 'Subtype' '')"
+            Groups    = @($groups -split ';' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
         })
     }
     Write-Log "$($rows.Count) row(s): $((($statuses.Keys | Sort-Object) | ForEach-Object { "$_=$($statuses[$_])" }) -join ', ')"
@@ -482,51 +530,142 @@ try {
 
     $groups  = Get-GroupIndex -VaultHost $vaultHost
     $current = Get-CurrentGroups -VaultHost $vaultHost -DocIds $docIds
+    $facts   = Get-CurrentFacts  -VaultHost $vaultHost -DocIds $docIds
+
+    # One row per DOCUMENT, not per claim. A claim-level file for this scope runs to
+    # hundreds of thousands of rows that nobody can scan; a document is the thing you
+    # filter to a work list and then go and open in the UI. The detail is not lost - the
+    # groups that failed are named in the row.
+    $byDoc = @{}
+    foreach ($claim in $claims) {
+        if (-not $byDoc.ContainsKey($claim.DocId)) { $byDoc[$claim.DocId] = New-Object System.Collections.ArrayList }
+        [void]$byDoc[$claim.DocId].Add($claim)
+    }
 
     $out  = New-Object System.Collections.ArrayList
-    $stat = @{ Confirmed = 0; Missing = 0; Unresolved = 0 }
+    $stat = @{ Documents = 0; Clean = 0; Missing = 0; Unresolved = 0
+               LifecycleMismatch = 0; TypeMismatch = 0; NotChecked = 0
+               ClaimsConfirmed = 0; ClaimsMissing = 0 }
 
-    foreach ($claim in $claims) {
-        $k    = "$($claim.DocId)|$(Get-FoldedName $claim.Role)"
-        $have = if ($current.ByKey.ContainsKey($k)) { $current.ByKey[$k] } else { @{} }
-        foreach ($gName in $claim.Groups) {
-            $gid = ''
-            $fk  = Get-FoldedName $gName
-            if ($groups.ByName.ContainsKey($fk)) { $gid = $groups.ByName[$fk] }
-            elseif ($gName -match '^\d+$')       { $gid = $gName }
+    foreach ($docId in ($byDoc.Keys | Sort-Object)) {
+        $stat.Documents++
+        $docClaims = @($byDoc[$docId])
 
-            $status = if (-not $gid)                  { $stat.Unresolved++; 'UNRESOLVED_NAME' }
-                      elseif ($have.ContainsKey($gid)) { $stat.Confirmed++;  'CONFIRMED' }
-                      else                             { $stat.Missing++;    'MISSING' }
+        $confirmed = 0
+        $missing   = New-Object System.Collections.ArrayList
+        $unres     = New-Object System.Collections.ArrayList
+        $roles     = New-Object System.Collections.ArrayList
 
-            if ($status -ne 'CONFIRMED') {
-                Write-Log "  doc $($claim.DocId) $($claim.Role) - $status : $gName" `
-                          $(if ($status -eq 'MISSING') { 'ERROR' } else { 'WARN' })
+        foreach ($claim in $docClaims) {
+            if ($roles -notcontains $claim.Role) { [void]$roles.Add($claim.Role) }
+            $k    = "$docId|$(Get-FoldedName $claim.Role)"
+            $have = if ($current.ByKey.ContainsKey($k)) { $current.ByKey[$k] } else { @{} }
+            foreach ($gName in $claim.Groups) {
+                $gid = ''
+                $fk  = Get-FoldedName $gName
+                if ($groups.ByName.ContainsKey($fk)) { $gid = $groups.ByName[$fk] }
+                elseif ($gName -match '^\d+$')       { $gid = $gName }
+
+                if (-not $gid)                   { [void]$unres.Add("$($claim.Role): $gName") }
+                elseif ($have.ContainsKey($gid)) { $confirmed++ }
+                else                             { [void]$missing.Add("$($claim.Role): $gName") }
             }
-            [void]$out.Add([pscustomobject][ordered]@{
-                DocId = $claim.DocId; Role = $claim.Role; Group = $gName; GroupId = $gid
-                Status = $status; CheckedUtc = (Get-Date).ToUniversalTime().ToString('s')
-            })
         }
+        $stat.ClaimsConfirmed += $confirmed
+        $stat.ClaimsMissing   += $missing.Count
+        if ($unres.Count) { $stat.Unresolved++ }
+
+        # The dimensions the run's decision rested on. Blank where the run did not record
+        # them - older results files carry no Type or Subtype - which is reported as
+        # NOT_RECORDED rather than quietly passing.
+        $recLc  = "$($docClaims[0].Lifecycle)"
+        $recTy  = "$($docClaims[0].Type)"
+        $recSub = "$($docClaims[0].Subtype)"
+        $now    = if ($facts.ContainsKey($docId)) { $facts[$docId] } else { $null }
+
+        function Compare-Dimension {
+            param([string]$Recorded, $Now, [string]$Field)
+            if (-not $Recorded)  { return 'NOT_RECORDED' }
+            if ($null -eq $Now)  { return 'NOT_CHECKED' }
+            $current = "$(Get-Field $Now $Field '')"
+            if (-not $current)   { return 'NOT_CHECKED' }
+            if ((Get-FoldedName $Recorded) -eq (Get-FoldedName $current)) { return 'CONFIRMED' }
+            return 'CHANGED'
+        }
+
+        $lcState  = Compare-Dimension -Recorded $recLc  -Now $now -Field 'Lifecycle'
+        $tyState  = Compare-Dimension -Recorded $recTy  -Now $now -Field 'Type'
+        $subState = Compare-Dimension -Recorded $recSub -Now $now -Field 'Subtype'
+
+        if ($lcState -eq 'CHANGED') { $stat.LifecycleMismatch++ }
+        if ($tyState -eq 'CHANGED' -or $subState -eq 'CHANGED') { $stat.TypeMismatch++ }
+        if ($lcState -eq 'NOT_CHECKED') { $stat.NotChecked++ }
+
+        $status =
+            if ($missing.Count)                                  { $stat.Missing++; 'GROUPS_MISSING' }
+            elseif ($lcState -eq 'CHANGED' -or $tyState -eq 'CHANGED' -or $subState -eq 'CHANGED') { 'DIMENSION_CHANGED' }
+            elseif ($unres.Count)                                { 'NAMES_UNRESOLVED' }
+            else                                                 { $stat.Clean++; 'CONFIRMED' }
+
+        if ($status -ne 'CONFIRMED') {
+            $why = if ($missing.Count) { ($missing | Select-Object -First 4) -join '; ' }
+                   elseif ($unres.Count) { ($unres | Select-Object -First 4) -join '; ' }
+                   else { "lifecycle $lcState, type $tyState, subtype $subState" }
+            Write-Log "  doc $docId - $status : $why" $(if ($status -eq 'GROUPS_MISSING') { 'ERROR' } else { 'WARN' })
+        }
+
+        [void]$out.Add([pscustomobject][ordered]@{
+            DocId = $docId
+            Status = $status
+            RolesChecked = $roles.Count
+            GroupsClaimed = $confirmed + $missing.Count + $unres.Count
+            GroupsConfirmed = $confirmed
+            GroupsMissing = $missing.Count
+            MissingDetail = ($missing -join '; ')
+            UnresolvedDetail = ($unres -join '; ')
+            LifecycleRecorded = $recLc
+            LifecycleNow = $(if ($now) { $now.Lifecycle } else { '' })
+            LifecycleCheck = $lcState
+            TypeRecorded = $recTy
+            TypeNow = $(if ($now) { $now.Type } else { '' })
+            TypeCheck = $tyState
+            SubtypeRecorded = $recSub
+            SubtypeNow = $(if ($now) { $now.Subtype } else { '' })
+            SubtypeCheck = $subState
+            CheckedUtc = (Get-Date).ToUniversalTime().ToString('s')
+        })
     }
 
     $report = Join-Path (Get-Location).ProviderPath 'validate-roles.csv'
     $out | Export-Csv -LiteralPath $report -NoTypeInformation -Encoding UTF8
 
     Write-Log '----------------------------------------------------------------'
-    Write-Log "$($out.Count) claim(s) checked, read by $($current.Method)"
-    Write-Log ("  CONFIRMED        {0}" -f $stat.Confirmed) 'OK'
+    Write-Log "$($stat.Documents) document(s) checked, assignments read by $($current.Method)"
+    Write-Log ("  CONFIRMED           {0}" -f $stat.Clean) 'OK'
     if ($stat.Missing) {
-        Write-Log ("  MISSING          {0}" -f $stat.Missing) 'ERROR'
+        Write-Log ("  GROUPS_MISSING      {0}  ({1} group assignment(s))" -f $stat.Missing, $stat.ClaimsMissing) 'ERROR'
         Write-Log '  The run recorded these as assigned and the vault does not have them. Vault' 'ERROR'
-        Write-Log '  ignores ids it does not recognise or cannot grant and still reports SUCCESS,' 'ERROR'
-        Write-Log '  so re-running will not fix it. Check whether the account may grant them.' 'ERROR'
+        Write-Log '  ignores ids it cannot grant and still reports SUCCESS, so re-running will not' 'ERROR'
+        Write-Log '  fix it. Check whether the account may grant those groups.' 'ERROR'
+    }
+    if ($stat.LifecycleMismatch) {
+        Write-Log ("  lifecycle changed   {0}  - not what the run saw, so its rule choice no longer holds" -f $stat.LifecycleMismatch) 'WARN'
+    }
+    if ($stat.TypeMismatch) {
+        Write-Log ("  type/subtype changed {0} - the run picked its type defaults from a different one" -f $stat.TypeMismatch) 'WARN'
     }
     if ($stat.Unresolved) {
-        Write-Log ("  UNRESOLVED_NAME  {0}  - recorded under a name no group here answers to" -f $stat.Unresolved) 'WARN'
+        Write-Log ("  NAMES_UNRESOLVED    {0}  - recorded under a name no group here answers to" -f $stat.Unresolved) 'WARN'
     }
-    if (-not $stat.Missing -and -not $stat.Unresolved) {
-        Write-Log 'Every group the run recorded as assigned is on its document.' 'OK'
+    if ($stat.NotChecked) {
+        Write-Log ("  dimensions unchecked {0} - the document facts could not be read" -f $stat.NotChecked) 'WARN'
+    }
+    Write-Log ("  {0} group assignment(s) confirmed in total" -f $stat.ClaimsConfirmed)
+    if ($out.Count -and -not $out[0].TypeRecorded) {
+        Write-Log 'Type and subtype were NOT_RECORDED - this results file predates the run recording them.' 'WARN'
+    }
+    if (-not $stat.Missing -and -not $stat.Unresolved -and -not $stat.LifecycleMismatch -and -not $stat.TypeMismatch) {
+        Write-Log 'Every group the run recorded as assigned is on its document, on the facts it decided from.' 'OK'
     }
     Write-Log "Report: $report"
     Write-Log "Log: $script:LogFile"

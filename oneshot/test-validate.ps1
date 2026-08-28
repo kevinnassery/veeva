@@ -78,6 +78,29 @@ eq 'by label'    $g.ByName[(Get-FoldedName 'Business Administrators')] '11'
 eq 'by api name' $g.ByName[(Get-FoldedName 'business_administrators__c')] '11'
 eq 'id to name'  $g.ById['16'] 'Document Users'
 
+Write-Host "`n== document facts are read in bulk, and a refusal leaves them unchecked =="
+$script:calls.Clear()
+function Invoke-Api {
+  param($VaultHost, $Method, $Path, $Body, $ContentType, $MaxRetries)
+  [void]$script:calls.Add([pscustomobject]@{ Path = $Path; Body = $Body })
+  return ([pscustomobject]@{ responseStatus = 'SUCCESS'; data = @(
+    [pscustomobject]@{ id = 771; type__v = 'Regulatory'; subtype__v = 'Correspondence'; lifecycle__v = 'General Lifecycle' },
+    [pscustomobject]@{ id = 772; type__v = 'Clinical';   subtype__v = '';               lifecycle__v = 'Label Lifecycle'   }
+  ) })
+}
+$facts = Get-CurrentFacts -VaultHost 'x.veevavault.com' -DocIds @('771','772')
+eq 'one query for both'   $script:calls.Count 1
+eq 'lifecycle read'       $facts['771'].Lifecycle 'General Lifecycle'
+eq 'subtype read'         $facts['771'].Subtype 'Correspondence'
+eq 'no subtype falls back to type' $facts['772'].Subtype 'Clinical'
+
+function Invoke-Api {
+  param($VaultHost, $Method, $Path, $Body, $ContentType, $MaxRetries)
+  throw 'INVALID_QUERY'
+}
+$none = Get-CurrentFacts -VaultHost 'x.veevavault.com' -DocIds @('771')
+eq 'a refusal is empty, not wrong' $none.Count 0
+
 Write-Host ''
 Write-Host "$pass passed, $fail failed" -ForegroundColor $(if ($fail) { 'Red' } else { 'Green' })
 if ($fail) { exit 1 }

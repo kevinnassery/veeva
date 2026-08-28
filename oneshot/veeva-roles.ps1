@@ -228,7 +228,7 @@ param(
     [pscredential]$Credential
 )
 
-$ScriptVersion = '2026.08.28-20'
+$ScriptVersion = '2026.08.28-21'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -2082,7 +2082,7 @@ function Invoke-Roles {
             # from the whole file.
             [void]$res.Rows.Add([pscustomobject][ordered]@{
                 Key = "$docId`:-"; DocId = $docId; SourceDocId = $doc.SourceId
-                Lifecycle = ''; Role = ''; RoleLabel = ''
+                Lifecycle = ''; Type = ''; Subtype = ''; Role = ''; RoleLabel = ''
                 RuleApplied = ''; RuleDetail = ''
                 AssignedUsers = ''; AssignedGroups = ''; MissingUsers = ''; MissingGroups = ''
                 Status = 'ERROR'; Message = "$_"; CheckedUtc = (Get-Date).ToUniversalTime().ToString('s')
@@ -2156,7 +2156,11 @@ function Invoke-Roles {
 
             $row = [pscustomobject][ordered]@{
                 Key = "$docId`:$name"; DocId = $docId; SourceDocId = $doc.SourceId
+                # The facts this row's decision rested on. Recorded so veeva-validate.ps1
+                # can confirm the premises later without re-running the reasoning.
                 Lifecycle = $(if ($info) { $info.Lifecycle } else { '' })
+                Type      = $(if ($info) { $info.Type }      else { '' })
+                Subtype   = $(if ($info) { $info.Subtype }   else { '' })
                 Role = $name; RoleLabel = $label
                 RuleApplied = $want.Which; RuleDetail = $want.Message
                 AssignedUsers  = ($assignedUsers  | ForEach-Object { Get-DisplayName -Directory $dir -Kind 'user'  -Id $_ }) -join '; '
