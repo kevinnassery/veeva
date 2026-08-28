@@ -188,7 +188,7 @@ param(
     [pscredential]$Credential
 )
 
-$ScriptVersion = '2026.08.28-6'
+$ScriptVersion = '2026.08.28-7'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -244,6 +244,23 @@ function Test-CanPrompt {
     # task, a pipeline, a CI step. Better to fail naming the parameter that would have
     # answered the question.
     try { return -not [Console]::IsInputRedirected } catch { return $true }
+}
+
+function ConvertTo-NameKey {
+    # A key that survives Vault handing back the NAME in one place and the LABEL in
+    # another for the same thing.
+    #
+    # GET /objects/documents/{id} reports lifecycle__v as "General Lifecycle".
+    # GET /configuration/role_assignment_rule reports it as "general_lifecycle__c".
+    # Keyed literally those are two different lifecycles, so every rule lookup missed,
+    # every role came back "no rule", and an assign run would have read every document in
+    # the vault and written nothing - reporting success while doing so.
+    #
+    # Dropping the __c/__v/__sys suffix before folding makes both spellings converge, and
+    # a label really is the name in title case in every case seen so far.
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Value)
+    $v = $Value -replace '__(c|v|sys)$', ''
+    return ($v -replace '[^a-zA-Z0-9]', '').ToLowerInvariant()
 }
 
 function ConvertTo-Key {
@@ -902,6 +919,8 @@ function Get-DesiredForRole {
     )
     $nameKey  = ConvertTo-Key "$(Get-Field $RoleRecord 'name' '')"
     $labelKey = ConvertTo-Key "$(Get-Field $RoleRecord 'label' '')"
+    # The rules index is keyed name-tolerantly, so the lookup has to be too.
+    $roleNameKey = ConvertTo-NameKey "$(Get-Field $RoleRecord 'name' '')"
 
     switch ($From) {
 
@@ -934,7 +953,7 @@ function Get-DesiredForRole {
                 return [pscustomobject]@{ Users = @(); Groups = @(); Which = 'NO_LIFECYCLE'
                                           Message = 'the document reports no lifecycle' }
             }
-            $key = "$(ConvertTo-Key $DocumentInfo.Lifecycle)|$nameKey"
+            $key = "$(ConvertTo-NameKey $DocumentInfo.Lifecycle)|$roleNameKey"
             if (-not $Rules.ContainsKey($key)) {
                 # Not an error. Most lifecycles configure rules for a few roles only, and
                 # a role with no rule simply has no default - there is nothing to apply.
@@ -1117,7 +1136,7 @@ function Get-RoleAssignmentRule {
             }
         }
 
-        $key = "$(ConvertTo-Key $lc)|$(ConvertTo-Key $role)"
+        $key = "$(ConvertTo-NameKey $lc)|$(ConvertTo-NameKey $role)"
         if (-not $byKey.ContainsKey($key)) {
             $byKey[$key] = [pscustomobject]@{
                 Lifecycle = $lc; Role = $role
@@ -1274,6 +1293,7 @@ function Invoke-Probe {
     $seen    = [ordered]@{}
     $rows    = New-Object System.Collections.ArrayList
     $errors  = 0
+    $lifecyclesSeen = @{}
     $beyond  = 0    # roles whose document defaults exceed the lifecycle rule
     $equal   = 0    # roles whose document defaults match the lifecycle rule exactly
     $i = 0
@@ -1287,6 +1307,7 @@ function Invoke-Probe {
         try { $roles = @(Get-DocumentRole -Context $c -DocId $docId) }
         catch { Write-Log "[$i/$($docs.Count)] doc $docId - ERROR reading roles: $_" 'ERROR'; $errors++; continue }
 
+        if ($info.Lifecycle) { $lifecyclesSeen[$info.Lifecycle] = $true }
         $sk = ConvertTo-Key $info.Subtype
         if (-not $seen.Contains($sk)) {
             $seen[$sk] = [pscustomobject]@{
@@ -1316,7 +1337,7 @@ function Invoke-Probe {
             # would report a false "beyond the rule" on every document an override covers.
             $ruleUsers = @(); $ruleGroups = @(); $overrides = 0; $haveRule = $false
             $which = ''
-            $rk = "$(ConvertTo-Key $info.Lifecycle)|$(ConvertTo-Key $name)"
+            $rk = "$(ConvertTo-NameKey $info.Lifecycle)|$(ConvertTo-NameKey $name)"
             if ($rules.ContainsKey($rk)) {
                 $haveRule  = $true
                 $overrides = $rules[$rk].Overrides.Count
@@ -1420,6 +1441,16 @@ function Invoke-Probe {
         Write-Log 'That is the signature of defaultUsers/defaultGroups carrying ONLY the lifecycle rules.'
         Write-Log 'If the Admin screen shows groups that are not in probe-report.csv, they will NOT be'
         Write-Log 'applied without -Defaults. Transcribe the screen, or start from discovered-defaults.csv.' 'WARN'
+    }
+    else {
+        # Rules were read and documents were read, and not one pair joined. Saying nothing
+        # here once let a probe look like a clean run while the entire rule lookup was
+        # missing - and -DesiredFrom Lifecycle would then have assigned nobody, quietly,
+        # after reading every document in the vault.
+        Write-Log 'NOT ONE role matched a lifecycle rule, though both were read.' 'ERROR'
+        Write-Log "  lifecycles on the documents:  $(($lifecyclesSeen.Keys | Sort-Object) -join ', ')" 'ERROR'
+        Write-Log "  lifecycles in the rules:      $((@($rules.Values | ForEach-Object { $_.Lifecycle }) | Select-Object -Unique | Sort-Object) -join ', ')" 'ERROR'
+        Write-Log '-DesiredFrom Lifecycle would assign NOTHING. Do not run it until these join.' 'ERROR'
     }
     if ($errors) { Write-Log "$errors document(s) could not be read - the figures above are incomplete" 'ERROR' }
     Write-Log ''

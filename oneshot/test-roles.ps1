@@ -143,12 +143,30 @@ function Invoke-Api {
 }
 $ctxR  = [pscustomobject]@{ VaultHost = 'x.veevavault.com'; Api = 'v26.2' }
 $rules = Get-RoleAssignmentRule -Context $ctxR -Directory $dir
-$key   = "$(ConvertTo-Key 'general_lifecycle__c')|$(ConvertTo-Key 'editor__v')"
+$key   = "$(ConvertTo-NameKey 'general_lifecycle__c')|$(ConvertTo-NameKey 'editor__v')"
 eq 'one lifecycle/role entry' $rules.Count 1
 eq 'default users'            ($rules[$key].Users  -join ',') '99'
 eq 'default groups only'      ($rules[$key].Groups -join ',') '11'
 eq 'override kept apart'      $rules[$key].Overrides.Count 1
 eq 'has a default row'        $rules[$key].HasDefault $true
+
+Write-Host "`n== a document's lifecycle LABEL joins the rules' lifecycle NAME =="
+# From a real run: GET /objects/documents/{id} reported lifecycle__v as "General
+# Lifecycle" while /configuration/role_assignment_rule reported "general_lifecycle__c".
+# Keyed literally, all 76 rules matched nothing, every role came back "no rule", and
+# -DesiredFrom Lifecycle would have read the whole vault and assigned nobody.
+eq 'label folds'            (ConvertTo-NameKey 'General Lifecycle')     'generallifecycle'
+eq 'name folds the same'    (ConvertTo-NameKey 'general_lifecycle__c')  'generallifecycle'
+eq 'role label folds'       (ConvertTo-NameKey 'Technical Editor')      'technicaleditor'
+eq 'role name folds same'   (ConvertTo-NameKey 'technical_editor__c')   'technicaleditor'
+eq 'only a trailing suffix' (ConvertTo-NameKey 'a__c_b__v')             'acb'
+
+$byLabelLc = Get-DesiredForRole -From 'Lifecycle' `
+    -RoleRecord ([pscustomobject]@{ name = 'editor__v'; label = 'Editors' }) `
+    -Table $null -Rules $rules -Subtype '' `
+    -DocumentInfo ([pscustomobject]@{ Lifecycle = 'General Lifecycle'; Conditions = @{}; Read = $true })
+eq 'rule found via label'   $byLabelLc.Which 'DEFAULT'
+eq 'and it carries people'  ($byLabelLc.Groups -join ',') '11'
 
 Write-Host "`n== Select-RuleForDocument picks the override only when the document matches =="
 $noMatch = Select-RuleForDocument -Rule $rules[$key] -Conditions @{ product__v = @('0PR9999999'); country__v = @() }
