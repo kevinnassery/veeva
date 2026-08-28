@@ -28,7 +28,7 @@ else
 fi
 
 echo "== veeva-roles logic that does not need a vault =="
-if $PS -NoProfile -File test-roles.ps1 >/tmp/veeva-test-roles.out 2>&1; then
+if $PS -NoProfile -File oneshot/test-roles.ps1 >/tmp/veeva-test-roles.out 2>&1; then
   ok "test-roles ($(grep -c '^  PASS' /tmp/veeva-test-roles.out) assertions)"
 else
   grep '^  FAIL' /tmp/veeva-test-roles.out | sed 's/^/  /'

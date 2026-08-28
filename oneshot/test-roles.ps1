@@ -236,6 +236,38 @@ Write-Host "`n== a comma inside a value stays inside its cell =="
 $csvField = ConvertTo-CsvField 'a,b"c'
 eq 'quoted and doubled' $csvField '"a,b""c"'
 
+Write-Host "`n== Get-DocumentsByQuery pages, dedupes, and only ever selects ids =="
+$script:qCalls = New-Object System.Collections.ArrayList
+function Invoke-Api {
+  param($VaultHost, $ApiVersion, $Method, $Path, $Body, $ContentType, $TimeoutSec, $MaxRetries)
+  [void]$script:qCalls.Add([pscustomobject]@{ Method = $Method; Path = $Path; Body = $Body })
+  if ($script:qCalls.Count -eq 1) {
+    return ([pscustomobject]@{
+      responseStatus = 'SUCCESS'
+      data = @([pscustomobject]@{ id = 771 }, [pscustomobject]@{ id = 772 })
+      responseDetails = [pscustomobject]@{ next_page = '/api/v26.2/query/abc?offset=2' }
+    })
+  }
+  return ([pscustomobject]@{
+    responseStatus = 'SUCCESS'
+    # 772 repeated across the page boundary - it must not become two documents
+    data = @([pscustomobject]@{ id = 772 }, [pscustomobject]@{ id = 773 })
+    responseDetails = [pscustomobject]@{}
+  })
+}
+$ctxQ = [pscustomobject]@{ VaultHost = 'x.veevavault.com'; Api = 'v26.2' }
+$found = Get-DocumentsByQuery -Context $ctxQ -Where "type__v = 'Administrative Information'"
+eq 'paged and deduped'  (($found | ForEach-Object { $_.TargetId }) -join ',') '771,772,773'
+eq 'no source id'       $found[0].SourceId ''
+eq 'first call posts'   $script:qCalls[0].Method 'POST'
+eq 'wrapped as SELECT'  ($script:qCalls[0].Body -match 'SELECT%20id%20FROM%20documents%20WHERE') $true
+eq 'second call gets'   $script:qCalls[1].Method 'GET'
+eq 'follows next_page'  $script:qCalls[1].Path '/api/v26.2/query/abc?offset=2'
+
+$script:qCalls.Clear()
+[void](Get-DocumentsByQuery -Context $ctxQ -Where "SELECT id FROM documents WHERE id > 5")
+eq 'a full SELECT is left alone' ($script:qCalls[0].Body -match '^q=SELECT%20id%20FROM%20documents%20WHERE%20id%20%3E%205$') $true
+
 Remove-Item -LiteralPath $tmp -Recurse -Force
 Write-Host ''
 Write-Host "$pass passed, $fail failed" -ForegroundColor $(if ($fail) { 'Red' } else { 'Green' })

@@ -16,7 +16,7 @@
 
     One file. No folder of scripts, no ini, no refresh step, nothing installed:
 
-        curl.exe -sfL -o veeva-roles.ps1 https://raw.githubusercontent.com/kevinnassery/veeva/main/veeva-roles.ps1
+        curl.exe -sfL -o veeva-roles.ps1 https://raw.githubusercontent.com/kevinnassery/veeva/main/oneshot/veeva-roles.ps1
         powershell.exe -NoProfile -ExecutionPolicy Bypass -File veeva-roles.ps1 -Probe
 
     Three steps, in order. Nothing is written to Vault until the third.
@@ -39,7 +39,26 @@
 .PARAMETER Map
     The same attachments-map.csv the rest of the migration uses. The TARGET id column
     names the documents to repair. Header row, comma/tab/semicolon/pipe - the delimiter
-    and the two id columns are both detected.
+    and the two id columns are both detected. Two rows pointing at the same target are one
+    document to repair, not two.
+
+.PARAMETER Where
+    Enumerate the documents from the vault instead of listing them in a map - a VQL
+    condition, run as SELECT id FROM documents WHERE <condition> and paged through. A
+    full SELECT is accepted too.
+
+        -Where "type__v = 'Administrative Information'"
+        -Where "created_date__v > '2026-08-01T00:00:00.000Z'"
+
+    Prefer -Map when one exists. It says exactly which documents the migration produced,
+    where a query says which documents match a condition today - and the two stop being
+    the same set the moment anyone adds a document by hand. -Where is for when the
+    migration WAS the vault, or when the job really is "every document of this subtype".
+    Mutually exclusive with -Map.
+
+.PARAMETER Version
+    Print the version and exit. Needs no vault and no login - it is here because this file
+    is fetched by URL, so "which copy am I holding" is a real question.
 
 .PARAMETER DesiredFrom
     Where "who should be in this role" comes from. Default: Lifecycle.
@@ -136,18 +155,21 @@
     The session is held in memory for the life of the run and never written to disk.
 
     API: GET /objects/documents/{id}/roles, POST /objects/documents/roles/batch.
-    See docs/api/vault-api/api-reference/26.2/document-binder-roles/document-roles/.
+    Mirrored offline in the repo at
+    docs/api/vault-api/api-reference/26.2/document-binder-roles/document-roles/.
 #>
 
 [CmdletBinding(SupportsShouldProcess = $true)]
 param(
     [string]$Vault = '',
     [string]$Map = '',
+    [string]$Where = '',
     [ValidateSet('Lifecycle', 'Document', 'Table')][string]$DesiredFrom = 'Lifecycle',
     [string]$Defaults = '',
     [string]$Api = 'v26.2',
     [string]$OutputRoot = '',
 
+    [switch]$Version,
     [switch]$Probe,
     [switch]$Plan,
     [string[]]$Role = @(),
@@ -267,13 +289,17 @@ function Resolve-Settings {
     $vaultHost = Get-HostName (Read-Setting -Label 'Vault' -Value $Vault -Parameter 'Vault')
     if (-not $vaultHost) { throw 'A vault is required.' }
 
-    # A file already sitting in the folder is almost always the one meant, so offer it
+    # -Where names the documents itself, so there is nothing to ask about. Otherwise a
+    # file already sitting in the folder is almost always the one meant, so offer it
     # rather than making someone type a path they can see from where they are standing.
-    $mapDefault = ''
-    foreach ($guess in @('attachments-map.csv', 'map.csv')) {
-        if (Test-Path -LiteralPath (Join-Path (Get-Location).ProviderPath $guess)) { $mapDefault = $guess; break }
+    $mapPath = ''
+    if (-not $Where) {
+        $mapDefault = ''
+        foreach ($guess in @('attachments-map.csv', 'map.csv')) {
+            if (Test-Path -LiteralPath (Join-Path (Get-Location).ProviderPath $guess)) { $mapDefault = $guess; break }
+        }
+        $mapPath = Read-Setting -Label 'Map CSV' -Value $Map -Parameter 'Map' -Default $mapDefault
     }
-    $mapPath = Read-Setting -Label 'Map CSV' -Value $Map -Parameter 'Map' -Default $mapDefault
 
     $root = $OutputRoot
     if (-not $root) { $root = (Get-Location).ProviderPath }
@@ -606,6 +632,51 @@ recovered from the file. Re-export with the id columns formatted as Text.
     if ($out.Count -eq 0) { throw "No usable target ids in $($f.Path)" }
 
     Write-Log "$($out.Count) document(s) from $($f.Path) ($($f.Delimiter)-separated, target column '$tgtCol')" 'OK'
+    return @($out)
+}
+
+function Get-DocumentsByQuery {
+    # The documents to repair, enumerated from the vault instead of listed in a map.
+    #
+    # A map says exactly which documents a migration produced, and that is the safer
+    # scope. A query is for when the migration WAS the vault, or when the job is "every
+    # document of this subtype" - cases where maintaining a spreadsheet of ids would be
+    # busywork. Only the WHERE clause is taken, so the query cannot quietly select
+    # something other than document ids.
+    param([Parameter(Mandatory)]$Context, [Parameter(Mandatory)][string]$Where)
+
+    $w = $Where.Trim()
+    $vql = if ($w -match '^\s*SELECT\s') { $w } else { "SELECT id FROM documents WHERE $w" }
+    Write-Log "Enumerating: $vql"
+
+    $out  = New-Object System.Collections.ArrayList
+    $seen = @{}
+    $path  = '/query'
+    $body  = "q=$([Uri]::EscapeDataString($vql))"
+    $pages = 0
+
+    while ($path -and $pages -lt 1000) {
+        $pages++
+        # Page 1 is a POST carrying the query; every page after it is a GET on the URL
+        # Vault hands back, which already has the query baked in.
+        $r = if ($pages -eq 1) {
+                Invoke-Api -VaultHost $Context.VaultHost -ApiVersion $Context.Api -Method POST `
+                    -Path $path -Body $body -ContentType 'application/x-www-form-urlencoded'
+             } else {
+                Invoke-Api -VaultHost $Context.VaultHost -ApiVersion $Context.Api -Method GET -Path $path
+             }
+
+        foreach ($row in @(Get-Field $r 'data' @())) {
+            $id = "$(Get-Field $row 'id' '')"
+            if (-not $id -or $seen.ContainsKey($id)) { continue }
+            $seen[$id] = $true
+            [void]$out.Add([pscustomobject]@{ TargetId = $id; SourceId = '' })
+        }
+        $path = "$(Get-Field (Get-Field $r 'responseDetails' $null) 'next_page' '')"
+    }
+
+    if ($out.Count -eq 0) { throw "The query matched no documents: $vql" }
+    Write-Log "$($out.Count) document(s) from the query" 'OK'
     return @($out)
 }
 
@@ -1566,6 +1637,14 @@ function Invoke-Roles {
 
 $exitCode = 0
 try {
+    # Before anything else, including the prompts: the whole point of -Version is to
+    # answer "which copy of this file am I holding" without a vault or a login.
+    if ($Version) { Write-Host $ScriptVersion; exit 0 }
+
+    if ($Map -and $Where) {
+        throw '-Map and -Where both name the documents to repair. Pass one.'
+    }
+
     $ctx = Resolve-Settings
 
     $mode = if ($Probe) { 'probe' } elseif ($Plan) { 'plan' } else { 'assign' }
@@ -1578,7 +1657,8 @@ try {
     # Log in up front. Failing here costs seconds; failing an hour in costs the hour.
     [void](Get-SessionId -VaultHost $ctx.VaultHost -ApiVersion $ctx.Api)
 
-    $documents = Import-TargetIds -Path $ctx.MapPath
+    $documents = if ($Where) { Get-DocumentsByQuery -Context $ctx -Where $Where }
+                 else        { Import-TargetIds -Path $ctx.MapPath }
 
     if ($Probe) {
         $exitCode = Invoke-Probe -Context $ctx -Documents $documents

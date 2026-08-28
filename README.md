@@ -1,6 +1,6 @@
 # Veeva Vault — migration tools
 
-*Updated 2026-08-28 13:23 EDT*
+*Updated 2026-08-28 13:27 EDT*
 
 Two jobs, each safe to run repeatedly because each compares before it acts:
 
@@ -9,7 +9,7 @@ Two jobs, each safe to run repeatedly because each compares before it acts:
 - **Sharing settings** — fills in the document roles a migration left empty. Documents
   created through the API or Vault Loader do not get users populated into their Sharing
   Settings the way UI-created documents do, so migrated documents arrive with their roles
-  unfilled. [`veeva-roles.ps1`](veeva-roles.ps1) puts them back.
+  unfilled. [`oneshot/veeva-roles.ps1`](oneshot/veeva-roles.ps1) puts them back.
 
 # Attachment sync
 
@@ -103,18 +103,50 @@ attachment, so any run can be stopped and re-run.
 
 # Sharing settings
 
-One file, nothing to install, no ini. Download it and run it:
+One file, nothing to install, no ini, no `refresh.bat`. Fetch it into whatever folder you
+want to work in and run it:
 
 ```
-curl.exe -sfL -o veeva-roles.ps1 https://raw.githubusercontent.com/kevinnassery/veeva/main/veeva-roles.ps1
+cd /d %USERPROFILE%
+```
+
+```
+curl.exe -sfL -o veeva-roles.ps1 https://raw.githubusercontent.com/kevinnassery/veeva/main/oneshot/veeva-roles.ps1
 ```
 
 ```
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File veeva-roles.ps1 -Probe
 ```
 
+The `-ExecutionPolicy Bypass` is not optional — a downloaded `.ps1` will not run without
+it, and double-clicking one opens Notepad.
+
+That URL is the branch tip, which `raw.githubusercontent.com` caches for five minutes.
+Right after a change is pushed it can hand back the previous version, which looks exactly
+like a fix that did not work. To pin to an exact commit instead:
+
+```
+for /f %S in ('curl.exe -s -H "Accept: application/vnd.github.sha" https://api.github.com/repos/kevinnassery/veeva/commits/main') do curl.exe -sfL -o veeva-roles.ps1 https://raw.githubusercontent.com/kevinnassery/veeva/%S/oneshot/veeva-roles.ps1
+```
+
+`veeva-roles.ps1 -Version` prints what you have, so "which version am I running" is
+answerable on sight.
+
 It asks for the vault, the map CSV and your login. The map is the same
-`attachments-map.csv`; its **target** id column names the documents to repair.
+`attachments-map.csv`; its **target** id column names the documents to repair. Two rows
+pointing at the same target are one document, not two.
+
+If there is no map, `-Where` enumerates the documents from the vault instead — a VQL
+condition, run as `SELECT id FROM documents WHERE …` and paged through:
+
+```
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File veeva-roles.ps1 -Probe -Where "type__v = 'Administrative Information'"
+```
+
+Prefer the map where one exists. It says exactly which documents the migration produced;
+a query says which documents match a condition *today*, and the two stop being the same
+set as soon as anyone adds a document by hand. `-Where` is for when the migration was the
+whole vault, or when the job really is "every document of this subtype".
 
 Three steps, in order. Nothing is written to Vault until the third.
 
@@ -154,6 +186,8 @@ already there, and which rule was applied.
 
 | | |
 | --- | --- |
+| `-Where "…"` | enumerate from the vault instead of a map |
+| `-Version` | print the version, no vault or login needed |
 | `-Limit 5` | cap the documents examined |
 | `-Test 5` | stop once 5 documents have been changed |
 | `-Role viewer__v` | only this role |
@@ -166,6 +200,6 @@ already there, and which rule was applied.
 | | |
 | --- | --- |
 | Attachment tools | [`legacy/attachments/`](legacy/attachments/) |
-| Sharing settings | [`veeva-roles.ps1`](veeva-roles.ps1) |
+| Sharing settings | [`oneshot/veeva-roles.ps1`](oneshot/veeva-roles.ps1) |
 | Vault API v26.2, offline | [`docs/api/`](docs/api/INDEX.md) |
 | Document transfer, complete | [`legacy/document-transfer/`](legacy/document-transfer/) |
