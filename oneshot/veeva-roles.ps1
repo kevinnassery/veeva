@@ -216,7 +216,7 @@ param(
     [pscredential]$Credential
 )
 
-$ScriptVersion = '2026.08.28-13'
+$ScriptVersion = '2026.08.28-14'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -1128,56 +1128,97 @@ function Get-DocTypeRoleDefault {
         Write-Log "No document type called '$TypeLabel' - its type defaults cannot be read" 'WARN'
         return $empty
     }
-    $typeName  = $idx.Types[$typeKey]
-    $component = "Doctype.$typeName"
+    $typeName = $idx.Types[$typeKey]
+
+    # Walk the hierarchy, most specific first. The component reference is explicit that
+    # these attributes are inherited: "If none are specified, the default value is
+    # inherited from parent or base." A subtype usually does NOT restate them, which is
+    # why reading only the subtype found nothing while the Admin screen - which shows the
+    # EFFECTIVE value - listed three groups.
+    #
+    # First level that defines a role wins for that role, which is what inheritance means.
+    # Roles are filled independently: a subtype may override Editors while still
+    # inheriting Viewers from its type.
+    $candidates = New-Object System.Collections.ArrayList
     if ($SubtypeLabel -and (ConvertTo-NameKey $SubtypeLabel) -ne $typeKey) {
         $subName = Get-SubtypeName -Context $Context -TypeName $typeName -SubtypeLabel $SubtypeLabel
-        if ($subName) { $component = "Doctype.$typeName.$subName" }
+        if ($subName) { [void]$candidates.Add("Doctype.$typeName.$subName") }
     }
+    [void]$candidates.Add("Doctype.$typeName")
+    [void]$candidates.Add('Doctype.base_document__v')
 
-    # Two endpoints return this, and they are shaped differently on purpose:
-    #
-    #   GET /api/{version}/configuration/{Type}.{name}   JSON, versioned
-    #   GET /api/mdl/components/{Type}.{name}            MDL source, NOT versioned
-    #
-    # The second has no version segment at all. Building it as /api/v26.2/mdl/... earns a
-    # 404 MALFORMED_URL, which is exactly how the first attempt at this failed.
-    $r = $null
-    $why = ''
-    foreach ($path in @("/configuration/$component", "/api/mdl/components/$component")) {
-        try {
-            $r = Invoke-Api -VaultHost $Context.VaultHost -ApiVersion $Context.Api -Method GET `
-                    -Path $path -MaxRetries 1
-            break
+    $out      = @{}
+    $unknown  = New-Object System.Collections.ArrayList
+    $sources  = New-Object System.Collections.ArrayList
+    $lastResp = $null
+    $lastName = ''
+    $why      = ''
+
+    foreach ($component in $candidates) {
+        if ($out.Count -eq 3) { break }   # every role already answered by a nearer level
+
+        # Two endpoints return this, and they are shaped differently on purpose:
+        #
+        #   GET /api/{version}/configuration/{Type}.{name}   JSON, versioned
+        #   GET /api/mdl/components/{Type}.{name}            MDL source, NOT versioned
+        #
+        # The second has no version segment at all. Building it as /api/v26.2/mdl/... earns
+        # a 404 MALFORMED_URL, which is how the first attempt at this failed.
+        $r = $null
+        foreach ($path in @("/configuration/$component", "/api/mdl/components/$component")) {
+            try {
+                $r = Invoke-Api -VaultHost $Context.VaultHost -ApiVersion $Context.Api -Method GET `
+                        -Path $path -MaxRetries 1
+                break
+            }
+            catch { if (-not $why) { $why = "$_" } }
         }
-        catch { if (-not $why) { $why = "$_" } }
-    }
-    if ($null -eq $r) {
-        Write-Log "Could not read $component - type defaults for '$SubtypeLabel' will NOT be applied: $why" 'ERROR'
-        return $empty
-    }
+        if ($null -eq $r) { continue }
+        $lastResp = $r
+        $lastName = $component
 
-    $out     = @{}
-    $unknown = New-Object System.Collections.ArrayList
-    foreach ($pair in @(
-        @{ Role = 'editor__v';   Attr = 'role_defaulting_editors' },
-        @{ Role = 'viewer__v';   Attr = 'role_defaulting_viewers' },
-        @{ Role = 'consumer__v'; Attr = 'role_defaulting_consumers' }
-    )) {
-        $vals = @(Get-MdlAttributeValue -Response $r -Attribute $pair.Attr)
-        if (-not $vals.Count) { continue }
-        $res = ConvertFrom-MdlPrincipalList -Directory $Directory -Values $vals
-        foreach ($u in $res.Unknown) { [void]$unknown.Add($u) }
-        if ($res.Users.Count -or $res.Groups.Count) {
-            $out[$pair.Role] = [pscustomobject]@{ Users = $res.Users; Groups = $res.Groups }
+        foreach ($pair in @(
+            @{ Role = 'editor__v';   Attr = 'role_defaulting_editors' },
+            @{ Role = 'viewer__v';   Attr = 'role_defaulting_viewers' },
+            @{ Role = 'consumer__v'; Attr = 'role_defaulting_consumers' }
+        )) {
+            if ($out.ContainsKey($pair.Role)) { continue }
+            $vals = @(Get-MdlAttributeValue -Response $r -Attribute $pair.Attr)
+            if (-not $vals.Count) { continue }
+            $res = ConvertFrom-MdlPrincipalList -Directory $Directory -Values $vals
+            foreach ($u in $res.Unknown) { [void]$unknown.Add($u) }
+            if ($res.Users.Count -or $res.Groups.Count) {
+                $out[$pair.Role] = [pscustomobject]@{ Users = $res.Users; Groups = $res.Groups }
+                [void]$sources.Add("$($pair.Role) from $component")
+            }
         }
     }
 
     if ($unknown.Count) {
-        Write-Log "$component names $($unknown.Count) principal(s) matching nothing in this vault: $(($unknown | Select-Object -Unique | Select-Object -First 5) -join '; ')" 'WARN'
+        Write-Log "Type defaults name $($unknown.Count) principal(s) matching nothing in this vault: $(($unknown | Select-Object -Unique | Select-Object -First 5) -join '; ')" 'WARN'
     }
-    $shown = if ($out.Count) { ($out.Keys | Sort-Object) -join ', ' } else { 'NONE FOUND' }
-    Write-Log "$component type defaults: $shown"
+
+    if ($out.Count) {
+        Write-Log "Type defaults for '$SubtypeLabel': $(($sources | Sort-Object) -join ', ')"
+    }
+    else {
+        # Nothing found anywhere up the hierarchy. That is either a vault that really has
+        # no type defaults, or a response shaped in a way this does not read - and those
+        # two look identical from the outside, so print what actually came back rather
+        # than leave someone to guess which it was.
+        Write-Log "No type defaults found for '$SubtypeLabel' at any level: $($candidates -join ', ')" 'WARN'
+        if ($why) { Write-Log "  last error: $why" 'WARN' }
+        if ($lastResp) {
+            $props = @()
+            try { $props = @($lastResp.PSObject.Properties | ForEach-Object { $_.Name }) } catch { }
+            Write-Log "  $lastName returned: $($props -join ', ')" 'WARN'
+            $raw = "$(Get-Field $lastResp 'raw' '')"
+            if (-not $raw) { try { $raw = ($lastResp | ConvertTo-Json -Depth 4 -Compress) } catch { } }
+            if ($raw.Length -gt 600) { $raw = $raw.Substring(0, 600) + ' ...' }
+            Write-Log "  $raw" 'WARN'
+        }
+    }
+
     $script:DocTypeDefaults[$cacheKey] = $out
     return $out
 }
