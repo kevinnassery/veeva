@@ -197,6 +197,7 @@ param(
     [string]$Where = '',
     [ValidateSet('Lifecycle', 'Document', 'Table')][string]$DesiredFrom = 'Lifecycle',
     [ValidateSet('Both', 'Groups', 'Users')][string]$Assign = 'Both',
+    [switch]$WithTypeDefaults,
     [string]$Defaults = '',
     [string]$Api = 'v26.2',
     [string]$OutputRoot = '',
@@ -215,7 +216,7 @@ param(
     [pscredential]$Credential
 )
 
-$ScriptVersion = '2026.08.28-11'
+$ScriptVersion = '2026.08.28-12'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -933,9 +934,14 @@ function Get-Directory {
         if ($Kind -eq 'group') {
             $byMembers[$id] = @(@(Get-Field $r 'members__v' @()) | ForEach-Object { "$_" })
         }
+        # Indexed under BOTH foldings. A group arrives here as a label ("Business
+        # Administrators") and is looked up by MDL as a name ("business_administrators__c");
+        # keying only one way means the lookup misses and the group is silently dropped
+        # from a role. That is the same failure the lifecycle join already had.
         foreach ($n in $names) {
-            $k = "$Kind`:$(ConvertTo-Key $n)"
-            if (-not $byName.ContainsKey($k)) { $byName[$k] = $id }
+            foreach ($k in @("$Kind`:$(ConvertTo-Key $n)", "$Kind`:$(ConvertTo-NameKey $n)")) {
+                if (-not $byName.ContainsKey($k)) { $byName[$k] = $id }
+            }
         }
     }
 
@@ -980,6 +986,190 @@ function Get-Directory {
     return $script:Directory
 }
 
+# ======================================================================================
+#  Document type default security
+#
+#  The "Default Settings for New Documents" box on Admin > Document Types > (subtype) >
+#  Security. This is NOT the lifecycle's role assignment rules, and it is NOT in
+#  defaultUsers/defaultGroups on the document roles endpoint - a real vault reported
+#  nothing at all for editor__v while that screen listed three groups for it.
+#
+#  It IS in the MDL component for the doctype, as role_defaulting_editors / _viewers /
+#  _consumers, each a list of "group:Group.name__c" or "user:username". Read once per
+#  subtype rather than once per document, so it costs a handful of calls for a whole run.
+# ======================================================================================
+
+$script:DocTypeNames    = $null
+$script:DocTypeDefaults = @{}
+
+function Get-DocTypeNameIndex {
+    # label -> api name, for document types. A document reports LABELS ("Administrative
+    # Information") while MDL is keyed by NAME, so one has to become the other before
+    # anything can be looked up at all.
+    param([Parameter(Mandatory)]$Context)
+    if ($script:DocTypeNames) { return $script:DocTypeNames }
+
+    $types = @{}
+    $subs  = @{}
+    $r = Invoke-Api -VaultHost $Context.VaultHost -ApiVersion $Context.Api -Method GET `
+            -Path '/metadata/objects/documents/types'
+    foreach ($ty in @(Get-Field $r 'types' @())) {
+        $label = "$(Get-Field $ty 'label' '')"
+        $url   = "$(Get-Field $ty 'value' '')"
+        if (-not $label -or -not $url) { continue }
+        $name = ($url -split '/')[-1]
+        if ($name) { $types[(ConvertTo-NameKey $label)] = $name }
+    }
+    $script:DocTypeNames = [pscustomobject]@{ Types = $types; Subtypes = $subs }
+    return $script:DocTypeNames
+}
+
+function Get-SubtypeName {
+    param(
+        [Parameter(Mandatory)]$Context,
+        [Parameter(Mandatory)][string]$TypeName,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$SubtypeLabel
+    )
+    $idx = Get-DocTypeNameIndex -Context $Context
+    $key = "$TypeName|$(ConvertTo-NameKey $SubtypeLabel)"
+    if ($idx.Subtypes.ContainsKey($key)) { return $idx.Subtypes[$key] }
+    try {
+        $r = Invoke-Api -VaultHost $Context.VaultHost -ApiVersion $Context.Api -Method GET `
+                -Path "/metadata/objects/documents/types/$TypeName"
+        foreach ($st in @(Get-Field $r 'subtypes' @())) {
+            $label = "$(Get-Field $st 'label' '')"
+            $url   = "$(Get-Field $st 'value' '')"
+            if (-not $label -or -not $url) { continue }
+            $nm = ($url -split '/')[-1]
+            if ($nm) { $idx.Subtypes["$TypeName|$(ConvertTo-NameKey $label)"] = $nm }
+        }
+    }
+    catch { Write-Log "  could not list the subtypes of ${TypeName}: $_" 'WARN' }
+    if ($idx.Subtypes.ContainsKey($key)) { return $idx.Subtypes[$key] }
+    return ''
+}
+
+function ConvertFrom-MdlPrincipalList {
+    # "group:Group.business_administrators__c" / "user:jane@example.com" -> ids.
+    param(
+        [Parameter(Mandatory)]$Directory,
+        [Parameter(Mandatory)][AllowEmptyCollection()][array]$Values
+    )
+    $users   = New-Object System.Collections.ArrayList
+    $groups  = New-Object System.Collections.ArrayList
+    $unknown = New-Object System.Collections.ArrayList
+    foreach ($raw in $Values) {
+        $v = "$raw".Trim().Trim("'", '"')
+        if (-not $v) { continue }
+        if ($v -match '^group:\s*(?:Group\.)?(.+)$') {
+            $nm = $Matches[1].Trim()
+            $id = Resolve-NameToId -Directory $Directory -Kind 'group' -Name $nm
+            if ($id) { [void]$groups.Add($id) } else { [void]$unknown.Add("group '$nm'") }
+        }
+        elseif ($v -match '^user:\s*(.+)$') {
+            $nm = $Matches[1].Trim()
+            $id = Resolve-NameToId -Directory $Directory -Kind 'user' -Name $nm
+            if ($id) { [void]$users.Add($id) } else { [void]$unknown.Add("user '$nm'") }
+        }
+    }
+    return [pscustomobject]@{ Users = @($users); Groups = @($groups); Unknown = @($unknown) }
+}
+
+function Get-MdlAttributeValue {
+    # One multi-value attribute out of an MDL component response.
+    #
+    # Three shapes are accepted because this endpoint's is not documented in the mirror: a
+    # JSON component carrying the attribute as a property, one carrying it in an
+    # attributes list, and raw MDL source written as name('a', 'b'). Betting on one and
+    # being wrong would apply no type defaults at all and say nothing - which is precisely
+    # the failure this code exists to fix.
+    param([Parameter(Mandatory)]$Response, [Parameter(Mandatory)][string]$Attribute)
+
+    foreach ($holder in @($Response, (Get-Field $Response 'data' $null), (Get-Field $Response 'component' $null))) {
+        if ($null -eq $holder) { continue }
+        $v = Get-Field $holder $Attribute $null
+        if ($null -ne $v) { return @($v) }
+        foreach ($listName in @('attributes', 'properties')) {
+            foreach ($a in @(Get-Field $holder $listName @())) {
+                if ("$(Get-Field $a 'name' '')" -eq $Attribute) {
+                    $av = Get-Field $a 'value' $null
+                    if ($null -ne $av) { return @($av) }
+                }
+            }
+        }
+    }
+
+    $raw = "$(Get-Field $Response 'raw' '')"
+    if ($raw -and $raw -match ($Attribute + '\s*\(([^)]*)\)')) {
+        return @($Matches[1] -split ',' | ForEach-Object { $_.Trim().Trim("'", '"') } | Where-Object { $_ })
+    }
+    return @()
+}
+
+function Get-DocTypeRoleDefault {
+    # editor__v / viewer__v / consumer__v defaults for one subtype, from its MDL component.
+    # Cached, so a run over 15,000 documents of six subtypes makes six of these calls.
+    param(
+        [Parameter(Mandatory)]$Context,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$TypeLabel,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$SubtypeLabel,
+        [Parameter(Mandatory)]$Directory
+    )
+    $cacheKey = "$TypeLabel|$SubtypeLabel"
+    if ($script:DocTypeDefaults.ContainsKey($cacheKey)) { return $script:DocTypeDefaults[$cacheKey] }
+
+    $empty = @{}
+    $script:DocTypeDefaults[$cacheKey] = $empty
+    if (-not $TypeLabel) { return $empty }
+
+    $idx     = Get-DocTypeNameIndex -Context $Context
+    $typeKey = ConvertTo-NameKey $TypeLabel
+    if (-not $idx.Types.ContainsKey($typeKey)) {
+        Write-Log "No document type called '$TypeLabel' - its type defaults cannot be read" 'WARN'
+        return $empty
+    }
+    $typeName  = $idx.Types[$typeKey]
+    $component = "Doctype.$typeName"
+    if ($SubtypeLabel -and (ConvertTo-NameKey $SubtypeLabel) -ne $typeKey) {
+        $subName = Get-SubtypeName -Context $Context -TypeName $typeName -SubtypeLabel $SubtypeLabel
+        if ($subName) { $component = "Doctype.$typeName.$subName" }
+    }
+
+    $r = $null
+    try {
+        $r = Invoke-Api -VaultHost $Context.VaultHost -ApiVersion $Context.Api -Method GET `
+                -Path "/mdl/components/$component" -MaxRetries 1
+    }
+    catch {
+        Write-Log "Could not read $component - type defaults for '$SubtypeLabel' will NOT be applied: $_" 'ERROR'
+        return $empty
+    }
+
+    $out     = @{}
+    $unknown = New-Object System.Collections.ArrayList
+    foreach ($pair in @(
+        @{ Role = 'editor__v';   Attr = 'role_defaulting_editors' },
+        @{ Role = 'viewer__v';   Attr = 'role_defaulting_viewers' },
+        @{ Role = 'consumer__v'; Attr = 'role_defaulting_consumers' }
+    )) {
+        $vals = @(Get-MdlAttributeValue -Response $r -Attribute $pair.Attr)
+        if (-not $vals.Count) { continue }
+        $res = ConvertFrom-MdlPrincipalList -Directory $Directory -Values $vals
+        foreach ($u in $res.Unknown) { [void]$unknown.Add($u) }
+        if ($res.Users.Count -or $res.Groups.Count) {
+            $out[$pair.Role] = [pscustomobject]@{ Users = $res.Users; Groups = $res.Groups }
+        }
+    }
+
+    if ($unknown.Count) {
+        Write-Log "$component names $($unknown.Count) principal(s) matching nothing in this vault: $(($unknown | Select-Object -Unique | Select-Object -First 5) -join '; ')" 'WARN'
+    }
+    $shown = if ($out.Count) { ($out.Keys | Sort-Object) -join ', ' } else { 'NONE FOUND' }
+    Write-Log "$component type defaults: $shown"
+    $script:DocTypeDefaults[$cacheKey] = $out
+    return $out
+}
+
 function Get-RedundantUserCount {
     # How many of these users are already in at least one of these groups.
     #
@@ -1013,8 +1203,9 @@ function Resolve-NameToId {
     $n = $Name.Trim()
     if (-not $n) { return '' }
     if ($n -match '^\d+$') { return $n }      # already an id
-    $k = "$Kind`:$(ConvertTo-Key $n)"
-    if ($Directory.ByName.ContainsKey($k)) { return $Directory.ByName[$k] }
+    foreach ($k in @("$Kind`:$(ConvertTo-Key $n)", "$Kind`:$(ConvertTo-NameKey $n)")) {
+        if ($Directory.ByName.ContainsKey($k)) { return $Directory.ByName[$k] }
+    }
     return ''
 }
 
@@ -1673,7 +1864,7 @@ function Invoke-Roles {
     # document's own lifecycle and on the product/country/study an override turns on. A
     # subtype-keyed table needs the same read. Nothing else does, so nothing else pays.
     $needSubtype = ($From -eq 'Table') -and ($null -ne $Table) -and (@($Table | Where-Object { $_.Subtype }).Count -gt 0)
-    $needInfo    = ($From -eq 'Lifecycle') -or $needSubtype
+    $needInfo    = ($From -eq 'Lifecycle') -or $needSubtype -or $WithTypeDefaults
 
     $docs = $Documents
     if ($Limit -gt 0 -and $docs.Count -gt $Limit) {
@@ -1799,6 +1990,24 @@ function Invoke-Roles {
             $assignedGroups = @(@(Get-Field $r 'assignedGroups' @()) | ForEach-Object { "$_" })
             $want = Get-DesiredForRole -From $From -RoleRecord $r -Table $Table -Rules $Rules `
                         -Subtype $subtype -DocumentInfo $info
+
+            # Document type default security is a SECOND source, not an alternative one.
+            # The lifecycle rules and the type's "Default Settings for New Documents" are
+            # two different screens, both of which the UI applies when it creates a
+            # document - so repairing only one of them leaves the job half done.
+            if ($WithTypeDefaults -and $info) {
+                $td = Get-DocTypeRoleDefault -Context $c -TypeLabel $info.Type `
+                          -SubtypeLabel $info.Subtype -Directory $dir
+                if ($td.ContainsKey($name)) {
+                    $want = [pscustomobject]@{
+                        Users   = @(@($want.Users)  + @($td[$name].Users)  | Select-Object -Unique)
+                        Groups  = @(@($want.Groups) + @($td[$name].Groups) | Select-Object -Unique)
+                        Which   = $(if ($want.Which -in @('NO_RULE_FOR_ROLE', 'NO_RULES', '')) { 'TYPE_DEFAULT' }
+                                    else { "$($want.Which)+TYPE_DEFAULT" })
+                        Message = $want.Message
+                    }
+                }
+            }
 
             $missingUsers  = @($want.Users  | Where-Object { $assignedUsers  -notcontains $_ } | Select-Object -Unique)
             $missingGroups = @($want.Groups | Where-Object { $assignedGroups -notcontains $_ } | Select-Object -Unique)

@@ -359,6 +359,47 @@ eq 'no members is empty'   ($withMembers.Members['12'] -join ',') ''
 eq 'label still indexed'   (Resolve-NameToId -Directory $withMembers -Kind 'group' -Name 'Document Users') '11'
 $script:Directory = $null
 
+Write-Host "`n== document type default security is read out of the MDL component =="
+# Admin > Document Types > (subtype) > Security > "Default Settings for New Documents"
+# is role_defaulting_editors / _viewers / _consumers on the Doctype MDL component. A real
+# vault reported NOTHING for editor__v on the roles endpoint while that screen listed
+# three groups, so this is the only source that has them.
+$mdlDir = [pscustomobject]@{
+  ById = @{}; Members = @{}
+  ByName = @{
+    'group:businessadministrators' = '11'; 'group:labelauthors'    = '12'
+    'group:labeleditors'           = '13'; 'group:regulatoryusers' = '14'
+    'group:submissionmanagers'     = '15'; 'group:documentusers'   = '16'
+    'user:janeexamplecom'          = '99'
+  }
+}
+$mdlText = [pscustomobject]@{ raw = @"
+Doctype base_document__v.administrative_information__c (
+  label('Administrative Information'),
+  role_defaulting_editors('group:Group.business_administrators__c', 'group:Group.label_authors__c', 'group:Group.label_editors__c'),
+  role_defaulting_viewers('group:Group.regulatory_users__c', 'group:Group.submission_managers__c'),
+  role_defaulting_consumers('group:Group.document_users__c', 'user:jane@example.com')
+);
+"@ }
+eq 'editors from MDL text'  ((Get-MdlAttributeValue -Response $mdlText -Attribute 'role_defaulting_editors') -join '|') 'group:Group.business_administrators__c|group:Group.label_authors__c|group:Group.label_editors__c'
+eq 'absent attribute empty' (@(Get-MdlAttributeValue -Response $mdlText -Attribute 'role_defaulting_nobody').Count) 0
+
+$mdlJson = [pscustomobject]@{ data = [pscustomobject]@{
+    role_defaulting_viewers = @('group:Group.regulatory_users__c', 'group:Group.submission_managers__c') } }
+eq 'same value from JSON'   ((Get-MdlAttributeValue -Response $mdlJson -Attribute 'role_defaulting_viewers') -join '|') 'group:Group.regulatory_users__c|group:Group.submission_managers__c'
+
+$mdlAttrs = [pscustomobject]@{ data = [pscustomobject]@{ attributes = @(
+    [pscustomobject]@{ name = 'role_defaulting_consumers'; value = @('group:Group.document_users__c') }) } }
+eq 'and from an attribute list' ((Get-MdlAttributeValue -Response $mdlAttrs -Attribute 'role_defaulting_consumers') -join '|') 'group:Group.document_users__c'
+
+$parsed = ConvertFrom-MdlPrincipalList -Directory $mdlDir -Values @(
+  'group:Group.business_administrators__c', 'group:Group.label_authors__c',
+  'user:jane@example.com', 'group:Group.no_such_group__c')
+eq 'groups resolved'        ($parsed.Groups -join ',') '11,12'
+eq 'users resolved'         ($parsed.Users  -join ',') '99'
+eq 'unknown named, not silent' ($parsed.Unknown.Count) 1
+eq 'the Group. prefix is optional' ((ConvertFrom-MdlPrincipalList -Directory $mdlDir -Values @('group:document_users__c')).Groups -join ',') '16'
+
 Write-Host "`n== a user in two assigned groups is counted once, not twice =="
 # A real run reported "1449 of those 1430 user assignment(s) are already members of a
 # group" - a subset bigger than its superset, because membership rows were counted rather

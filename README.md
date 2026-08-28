@@ -1,6 +1,6 @@
 # Veeva Vault — migration tools
 
-*Updated 2026-08-28 13:53 EDT*
+*Updated 2026-08-28 14:06 EDT*
 
 Two jobs, each safe to run repeatedly because each compares before it acts:
 
@@ -207,6 +207,24 @@ over the default, as it does in Vault. Two overrides matching equally well is re
 `UNRESOLVED` and left alone rather than guessed at — and so is a document that could not
 be read.
 
+### Document type default security
+
+Admin > Document Types > (subtype) > Security > **Default Settings for New Documents** is
+a *different screen* from the lifecycle's role assignment rules, and the UI applies both
+when it creates a document. It is not in `defaultUsers`/`defaultGroups` — a real vault
+reported nothing at all for `editor__v` while that screen listed three groups for it.
+
+It is in the doctype's MDL component, as `role_defaulting_editors`, `_viewers` and
+`_consumers`. `-WithTypeDefaults` reads it — once per subtype, not per document — and
+adds it to whatever `-DesiredFrom` found:
+
+```
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File veeva-roles.ps1 -Plan -Where "subtype__v = 'Administrative Information'" -DesiredFrom Document -Assign Groups -WithTypeDefaults
+```
+
+Without it, Editors and Viewers are left unrepaired. `role-results.csv` records
+`TYPE_DEFAULT` in `RuleApplied` for anything that came from this source.
+
 `-Probe` also answers the question the API documentation does not: whether the
 `defaultUsers`/`defaultGroups` Vault reports per document carry the document **type's**
 default security as well as the lifecycle's rules. It compares the two on live data and
@@ -237,6 +255,7 @@ already there, and which rule was applied.
 
 | | |
 | --- | --- |
+| `-WithTypeDefaults` | also apply the document type's Security screen |
 | `-Assign Groups` | write only groups, not direct user assignments |
 | `-Logout` | delete the cached session |
 | `-Where "…"` | enumerate from the vault instead of a map |
