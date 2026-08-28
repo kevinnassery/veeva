@@ -180,7 +180,7 @@ Or `git clone https://github.com/kevinnassery/veeva.git`
 never a second copy to keep in sync.
 
 ```ini
-VaultDNS          = sb-endo-endo-rim-sbx.veevavault.com
+VaultDNS          = your-target-vault.veevavault.com
 SourceStagingPath = /SubmissionsArchive/e157135
 OutputRoot        = C:\Users\Sarah.Nassery
 
