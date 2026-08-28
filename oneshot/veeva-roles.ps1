@@ -202,7 +202,7 @@ param(
     [pscredential]$Credential
 )
 
-$ScriptVersion = '2026.08.28-8'
+$ScriptVersion = '2026.08.28-9'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -307,6 +307,10 @@ function Read-Setting {
     )
     if ($Value) { return $Value }
     if (-not (Test-CanPrompt)) {
+        # A default is an answer, not a suggestion, when there is nobody to ask. Throwing
+        # here with a perfectly good cached value in hand would break the unattended run
+        # for no reason.
+        if ($Default) { return $Default }
         throw "$Label was not given and there is nobody here to ask. Pass -$Parameter."
     }
     $suffix = if ($Default) { " [$Default]" } else { '' }
@@ -323,7 +327,8 @@ function Resolve-Settings {
     Write-Host "veeva-roles $ScriptVersion" -ForegroundColor Cyan
     Write-Host ''
 
-    $vaultHost = Get-HostName (Read-Setting -Label 'Vault' -Value $Vault -Parameter 'Vault')
+    $vaultHost = Get-HostName (Read-Setting -Label 'Vault' -Value $Vault -Parameter 'Vault' `
+                                            -Default (Get-CachedVaultHost))
     if (-not $vaultHost) { throw 'A vault is required.' }
 
     # Nothing is asked for that the run does not need.
@@ -446,6 +451,32 @@ function Write-Sessions {
         Set-Acl -LiteralPath $path -AclObject $acl
     }
     catch { }
+}
+
+function Get-CachedVaultHost {
+    # The host of the most recently obtained session, for the prompt's default.
+    #
+    # Deliberately does NOT log or use the hydrated cache: this runs before the log file
+    # exists, because the answer is needed to work out where the log file goes.
+    #
+    # Offered as a default rather than used outright. It is one keystroke, and it puts the
+    # vault about to be written to on the screen before anything happens - which for a
+    # tool that grants people access is worth the keystroke.
+    $path = Get-SessionPath
+    if (-not (Test-Path -LiteralPath $path)) { return '' }
+    try {
+        $json  = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+        $best  = ''
+        $bestT = [datetime]::MinValue
+        foreach ($p in $json.PSObject.Properties) {
+            if (-not "$(Get-Field $p.Value 'sessionId' '')") { continue }
+            $t = [datetime]::MinValue
+            try { $t = [datetime]::Parse("$(Get-Field $p.Value 'obtained' '')") } catch { }
+            if (-not $best -or $t -gt $bestT) { $best = $p.Name; $bestT = $t }
+        }
+        return $best
+    }
+    catch { return '' }
 }
 
 function Clear-Sessions {

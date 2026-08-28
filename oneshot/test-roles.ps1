@@ -339,6 +339,22 @@ eq 'stops on no new entries' (@($script:dCalls | Where-Object { $_ -like '/objec
 eq 'kept the one page'       (@($built2.ById.Keys | Where-Object { $_ -like 'user:*' }).Count) 200
 $script:Directory = $null
 
+Write-Host "`n== the cached vault host is offered back, newest session first =="
+$script:SessionPath = Join-Path $tmp '.vault-session.json'
+eq 'no file, no default' (Get-CachedVaultHost) ''
+
+Set-Content -LiteralPath $script:SessionPath -Encoding UTF8 -Value (@{
+  'old.veevavault.com' = @{ sessionId = 'a'; obtained = '2026-08-01T00:00:00Z' }
+  'sb-endo-endo-rim-sbx.veevavault.com' = @{ sessionId = 'b'; obtained = '2026-08-28T12:45:00Z' }
+  'nosession.veevavault.com' = @{ obtained = '2026-08-29T00:00:00Z' }
+} | ConvertTo-Json -Depth 5)
+eq 'newest with a session wins' (Get-CachedVaultHost) 'sb-endo-endo-rim-sbx.veevavault.com'
+
+Set-Content -LiteralPath $script:SessionPath -Value 'not json at all' -Encoding UTF8
+eq 'garbage file is not fatal' (Get-CachedVaultHost) ''
+Remove-Item -LiteralPath $script:SessionPath -Force
+$script:SessionPath = ''
+
 Remove-Item -LiteralPath $tmp -Recurse -Force
 Write-Host ''
 Write-Host "$pass passed, $fail failed" -ForegroundColor $(if ($fail) { 'Red' } else { 'Green' })

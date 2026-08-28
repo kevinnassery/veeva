@@ -1,6 +1,6 @@
 # Veeva Vault — migration tools
 
-*Updated 2026-08-28 13:47 EDT*
+*Updated 2026-08-28 13:51 EDT*
 
 Two jobs, each safe to run repeatedly because each compares before it acts:
 
@@ -121,10 +121,11 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File veeva-roles.ps1 -Probe
 The `-ExecutionPolicy Bypass` is not optional — a downloaded `.ps1` will not run without
 it, and double-clicking one opens Notepad.
 
-The first run asks for your Vault login and caches the session in
+The first run asks for the vault and your Vault login, and caches both in
 `.vault-session.json` beside the script, so probing, planning and assigning do not each
-stop to ask. It is checked against the vault before being trusted, and a dead one just
-means logging in again. **That file is a bearer token** — whoever holds it acts as you
+stop to ask. Later runs offer the cached host back as the prompt default, so the vault
+you are about to write to is on screen and Enter accepts it. The session is checked
+against the vault before being trusted, and a dead one just means logging in again. **That file is a bearer token** — whoever holds it acts as you
 until Vault expires it. It is ACL'd to your account, but it is not encrypted. Run
 `veeva-roles.ps1 -Logout` when you are done.
 

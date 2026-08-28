@@ -36,7 +36,7 @@ param(
     [ValidateSet('Prompt', 'Resume', 'Fresh')][string]$Existing = 'Resume'
 )
 
-$ScriptVersion = '2026.08.28-8'
+$ScriptVersion = '2026.08.28-9'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
