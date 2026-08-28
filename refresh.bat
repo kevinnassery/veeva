@@ -1,5 +1,5 @@
 @echo off
-REM VERSION 2026.08.27-34
+REM VERSION 2026.08.28-1
 setlocal
 
 REM ============================================================================
@@ -66,10 +66,10 @@ call :retire Transfer-VaultAttachments.ps1
 echo Refreshing from %B%
 echo.
 
-call :get attachments/attachments.bat                     attachments.bat
-call :get attachments/Sync-VaultAttachments.ps1           Sync-VaultAttachments.ps1
-call :get attachments/validator.bat                      validator.bat
-call :get attachments/Validate-VaultAttachments.ps1      Validate-VaultAttachments.ps1
+call :get legacy/attachments/attachments.bat                     attachments.bat
+call :get legacy/attachments/Sync-VaultAttachments.ps1           Sync-VaultAttachments.ps1
+call :get legacy/attachments/validator.bat                      validator.bat
+call :get legacy/attachments/Validate-VaultAttachments.ps1      Validate-VaultAttachments.ps1
 call :get starting-cleanup.bat                            starting-cleanup.bat
 call :get refresh.bat                                     refresh.bat
 call :get README.md                                       README.md
@@ -77,10 +77,11 @@ call :get README.md                                       README.md
 if not exist "%D%attachments.ini" (
   echo.
   echo   NOTE: no attachments.ini here. Fetch one with:
-  echo         curl.exe -sLO %B%/attachments/attachments.ini
+  echo         curl.exe -sLO %B%/legacy/attachments/attachments.ini
 )
-REM  The document transfer is complete - those scripts are no longer shipped. They
-REM  are still in the repo under document-transfer/ if they are ever needed again.
+REM  The standalone tools now live under legacy/ in the repo. They still land in this
+REM  folder flat, so nothing on this machine moves. The unified vault tool replaces
+REM  them one command at a time; until then these are what runs.
 
 echo.
 if defined SKEW (

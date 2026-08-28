@@ -19,4 +19,21 @@ documents-*.log
 probe-output.txt
 products.csv
 sourcedocids.txt
+documents-ids.txt
+attachments-map.csv
+map.csv
 session.txt
+
+# Run outputs, in case OutputRoot ever points at a clone
+attachment-results.csv
+attachment-results-*.csv
+validate-results.csv
+validate-results-*.csv
+attachments-*.log
+validate-*.log
+transfer-work/
+attachment-work/
+validate-work/
+old-*/
+.run-*.lock
+.vault-session.json

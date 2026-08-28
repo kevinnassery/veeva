@@ -73,7 +73,7 @@ param(
 
     # CSV mapping source document id to target document id, with a header row. Column
     # names are detected from the usual spellings; set them explicitly if yours differ.
-    [string] $IdMap            = 'map.csv',
+    [string] $IdMap            = 'attachments-map.csv',
     [string] $MapSourceColumn  = '',
     [string] $MapTargetColumn  = '',
 
@@ -135,7 +135,7 @@ param(
     [int]    $MaxRetries = 4
 )
 
-$ScriptVersion = '2026.08.27-34'
+$ScriptVersion = '2026.08.28-1'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -543,7 +543,7 @@ function Import-IdMap {
     # this file comes from whatever produced the load and its headers are not ours to
     # choose. An unguessable header is an error naming what was found, not a silent
     # mis-read of the first two columns.
-    param([Parameter(Mandatory)][string]$Path)
+    param([Parameter(Mandatory)][string]$Path, [string]$LegacyName = 'map.csv')
 
     # Relative names resolve against the WORKING directory - where the .bat was run
     # from - which is where the map is expected to be dropped. Falling back to the
@@ -552,6 +552,21 @@ function Import-IdMap {
     $resolved = $Path
     if (-not (Test-Path -LiteralPath $resolved)) {
         $resolved = [IO.Path]::GetFullPath([IO.Path]::Combine((Get-Location).ProviderPath, $Path))
+    }
+
+    # Fall back to the previous name rather than failing. These were renamed so each
+    # input says which workflow it feeds; a machine mid-job still has the old file.
+    if (-not (Test-Path -LiteralPath $resolved) -and $LegacyName) {
+        foreach ($try in @(
+            [IO.Path]::GetFullPath([IO.Path]::Combine((Get-Location).ProviderPath, $LegacyName)),
+            $(if ($PSScriptRoot) { Join-Path $PSScriptRoot $LegacyName } else { $null })
+        )) {
+            if ($try -and (Test-Path -LiteralPath $try)) {
+                Write-Log "Using $LegacyName - rename it to $(Split-Path -Leaf $Path) when convenient" 'WARN'
+                $resolved = $try
+                break
+            }
+        }
     }
     if (-not (Test-Path -LiteralPath $resolved)) {
         $mapHere = $PSScriptRoot

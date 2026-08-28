@@ -1,6 +1,6 @@
 # Veeva Vault — attachment sync
 
-*Updated 2026-08-27 19:22 EDT*
+*Updated 2026-08-28 12:08 EDT*
 
 Copies document attachments from one Vault to another. It compares both sides first and
 delivers only what the target is missing, so it is safe to run repeatedly.
@@ -20,10 +20,10 @@ refresh.bat
 ```
 
 ```
-curl.exe -sLO https://raw.githubusercontent.com/kevinnassery/veeva/main/attachments/attachments.ini
+curl.exe -sLO https://raw.githubusercontent.com/kevinnassery/veeva/main/legacy/attachments/attachments.ini
 ```
 
-Put `map.csv` in the same folder — a header row plus the old and new document id columns,
+Put `attachments-map.csv` in the same folder — a header row plus the old and new document id columns,
 exported from Excel. It defines which documents are in scope.
 
 In `attachments.ini` fill in `SourceVaultDNS`, `TargetVaultDNS` and `OutputRoot`.
@@ -97,6 +97,6 @@ attachment, so any run can be stopped and re-run.
 
 | | |
 | --- | --- |
-| Scripts and config | [`attachments/`](attachments/) |
+| Attachment tools | [`legacy/attachments/`](legacy/attachments/) |
 | Vault API v26.2, offline | [`docs/api/`](docs/api/INDEX.md) |
-| Document transfer, complete | [`document-transfer/`](document-transfer/) |
+| Document transfer, complete | [`legacy/document-transfer/`](legacy/document-transfer/) |

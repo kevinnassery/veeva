@@ -69,7 +69,7 @@ param(
     [string] $ApiVersion = 'v26.2',
 
     # ---- What to move ----
-    [string] $IdFile     = 'sourcedocids.txt',
+    [string] $IdFile     = 'documents-ids.txt',
     [string] $OutputRoot = '',
 
     # Where the in-flight file lands. Defaults to a work folder under OutputRoot.
@@ -108,7 +108,7 @@ param(
     [int]    $MaxRetries = 4
 )
 
-$ScriptVersion = '2026.08.27-34'
+$ScriptVersion = '2026.08.28-1'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -629,6 +629,18 @@ if (-not (Test-Path -LiteralPath $IdFile)) {
     if (-not $here2) { $here2 = (Get-Location).ProviderPath }
     $beside = Join-Path $here2 $IdFile
     if (Test-Path -LiteralPath $beside) { $IdFile = $beside }
+}
+if (-not (Test-Path -LiteralPath $IdFile)) {
+    # Previous name. Renamed so each input says which workflow it feeds, but a machine
+    # part way through a job still has the old file sitting there.
+    foreach ($try in @('sourcedocids.txt')) {
+        $legacy = [IO.Path]::GetFullPath([IO.Path]::Combine((Get-Location).ProviderPath, $try))
+        if (Test-Path -LiteralPath $legacy) {
+            Write-Log "Using $try - rename it to documents-ids.txt when convenient" 'WARN'
+            $IdFile = $legacy
+            break
+        }
+    }
 }
 if (-not (Test-Path -LiteralPath $IdFile)) { throw "IdFile not found: $IdFile" }
 

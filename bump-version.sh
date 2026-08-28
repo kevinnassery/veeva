@@ -10,18 +10,18 @@ if [ $# -ge 1 ]; then
   V="$1"
 else
   today=$(date '+%Y.%m.%d')
-  cur=$(grep -ho "ScriptVersion = '$today-[0-9]*'" ./*.ps1 ./*/*.ps1 2>/dev/null | tr -d "'" | sed 's/.*-//' | sort -n | tail -1 || true)
+  cur=$(find . -name '*.ps1' -not -path './docs/*' -exec grep -ho "ScriptVersion = '$today-[0-9]*'" {} + 2>/dev/null | tr -d "'" | sed 's/.*-//' | sort -n | tail -1 || true)
   V="$today-$(( ${cur:-0} + 1 ))"
 fi
 
-for f in ./*.ps1 ./*/*.ps1; do
+for f in $(find . -name '*.ps1' -not -path './docs/*'); do
   if grep -q "^\$ScriptVersion" "$f"; then
     sed -i '' "s|^\$ScriptVersion = '.*'|\$ScriptVersion = '$V'|" "$f"
   else
     echo "  no version line in $f" >&2
   fi
 done
-for f in ./*.bat ./*/*.bat; do
+for f in $(find . -name '*.bat' -not -path './docs/*'); do
   if grep -q '^REM VERSION' "$f"; then
     sed -i '' "s|^REM VERSION .*|REM VERSION $V|" "$f"
   else
