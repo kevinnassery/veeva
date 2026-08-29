@@ -154,6 +154,40 @@ function New-VaultResults {
     }
 }
 
+function ConvertTo-VaultUniformRows {
+    # Every row given every column, before anything is exported.
+    #
+    # Export-Csv takes its header from the FIRST object it is handed and then writes only
+    # those properties for every row after it. Results files outlive the version that
+    # wrote them: a resumed run merges rows from before a column existed with rows from
+    # after, and if an older row happens to come first, the newer column is dropped from
+    # the whole file. Silently, with an exit code of zero.
+    #
+    # Columns keep first-seen order, so a file's shape stays recognisable and anything
+    # added later appears at the end.
+    param([Parameter(Mandatory)][AllowEmptyCollection()]$Rows)
+    $all = @($Rows)
+    if (-not $all.Count) { return $all }
+
+    $cols = New-Object System.Collections.ArrayList
+    foreach ($r in $all) {
+        foreach ($p in $r.PSObject.Properties) {
+            if (-not $cols.Contains($p.Name)) { [void]$cols.Add($p.Name) }
+        }
+    }
+
+    $out = New-Object System.Collections.ArrayList
+    foreach ($r in $all) {
+        $flat = [ordered]@{}
+        foreach ($c in $cols) {
+            $prop = $r.PSObject.Properties[$c]
+            $flat[$c] = if ($prop) { $prop.Value } else { '' }
+        }
+        [void]$out.Add([pscustomobject]$flat)
+    }
+    return $out
+}
+
 function Save-VaultResults {
     param([Parameter(Mandatory)]$Results)
     $current = @{}
@@ -170,7 +204,8 @@ function Save-VaultResults {
         $key = "$(Get-VaultField $r $Results.KeyColumn '')"
         if (-not $written.ContainsKey($key)) { [void]$out.Add($r) }
     }
-    $out | Export-Csv -LiteralPath $Results.Path -NoTypeInformation -Encoding UTF8 -WhatIf:$false
+    (ConvertTo-VaultUniformRows -Rows $out) |
+        Export-Csv -LiteralPath $Results.Path -NoTypeInformation -Encoding UTF8 -WhatIf:$false
 }
 
 function Format-VaultDuration {

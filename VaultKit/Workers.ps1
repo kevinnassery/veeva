@@ -232,7 +232,8 @@ function Invoke-VaultShardedRun {
         foreach ($key in $fresh.Keys) {
             if (-not $written.ContainsKey("$key")) { [void]$merged.Add($fresh[$key]) }
         }
-        $merged | Export-Csv -LiteralPath $resultsPath -NoTypeInformation -Encoding UTF8 -WhatIf:$false
+        (ConvertTo-VaultUniformRows -Rows $merged) |
+            Export-Csv -LiteralPath $resultsPath -NoTypeInformation -Encoding UTF8 -WhatIf:$false
 
         # Counted from the merged rows rather than from each worker, because a rename is
         # a property of the result and the supervisor only ever sees the workers' output.

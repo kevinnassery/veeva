@@ -153,6 +153,15 @@ T 'real latin-1 is left alone' { Eq (Get-VaultAttachmentName -Header "attachment
 T 'no header gives nothing'    { Eq (Get-VaultAttachmentName -Header '') '' 'empty' }
 T 'no filename gives nothing'  { Eq (Get-VaultAttachmentName -Header 'attachment') '' 'none' }
 
+Write-Host "== Mixed-schema results =="
+$oldRow = [pscustomobject]@{ Id='1'; Name='a.pdf'; Status='SUCCESS' }
+$newRow = [pscustomobject]@{ Id='2'; Name='b.pdf'; Status='SUCCESS'; StagedName='b.pdf'; Renamed=$false }
+$uni = ConvertTo-VaultUniformRows -Rows @($oldRow, $newRow)
+T 'older row first keeps new cols' { Eq (($uni[0].PSObject.Properties.Name) -join ',') 'Id,Name,Status,StagedName,Renamed' 'cols' }
+T 'missing value becomes empty'    { Eq $uni[0].StagedName '' 'blank' }
+T 'existing values survive'        { Eq $uni[1].StagedName 'b.pdf' 'kept' }
+T 'empty input is safe'            { Eq (@(ConvertTo-VaultUniformRows -Rows @()).Count) 0 'empty' }
+
 Write-Host "== Results snapshot =="
 $snapDir = Join-Path $tmp ('vk3-'+[guid]::NewGuid().ToString('N')); New-Item -ItemType Directory -Force $snapDir|Out-Null
 $canon = Join-Path $snapDir 'document-results.csv'
