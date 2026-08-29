@@ -83,13 +83,18 @@ spaces, over-long names and Windows device names are touched; colons, parenthese
 apostrophes are left as Vault has them.
 
 Every such change is reported: a warning per document as it happens, a count at the end
-of the run, and both names in the results — `Name` is what Vault calls it, `StagedName`
-is what was written. To list them:
+of the run, and three columns in the results — `Name` is what Vault calls it,
+`StagedName` is what was written, and `Renamed` says whether they differ. To list them:
 
 ```
-Import-Csv document-results.csv | Where-Object { $_.StagedName -and $_.Name -cne $_.StagedName } |
+Import-Csv document-results.csv | Where-Object { $_.Renamed -eq 'True' } |
     Select-Object Id, Name, StagedName, TargetPath
 ```
+
+The validator carries the same column, but reads it against `filename__v`, which Vault
+leaves empty for some documents. `Renamed` is **blank** there rather than `False` when
+there is no filename to compare — with nothing to compare, "no" is a claim it cannot
+make. The transfer's own results are the authoritative list.
 
 Each document gets its own folder under `[documents] path`, named for its **source id** —
 two documents called `Cover Letter.pdf` are common, and one overwriting the other after a

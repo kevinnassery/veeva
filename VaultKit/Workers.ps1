@@ -240,8 +240,14 @@ function Invoke-VaultShardedRun {
         # and under StrictMode reaching for a missing property is a terminating error.
         $renamed = 0
         if ($ReportRenames) { $renamed = @($merged | Where-Object {
-            $sn = "$(Get-VaultField $_ 'StagedName' '')"
-            $sn -and ($sn -cne "$(Get-VaultField $_ 'Name' '')")
+            # The row's own answer where it has one. Rows written before the column
+            # existed fall back to the comparison it was derived from.
+            $flag = "$(Get-VaultField $_ 'Renamed' '')"
+            if ($flag) { $flag -eq 'True' }
+            else {
+                $sn = "$(Get-VaultField $_ 'StagedName' '')"
+                $sn -and ($sn -cne "$(Get-VaultField $_ 'Name' '')")
+            }
         }).Count }
         if ($renamed) {
             Write-VaultLog "$renamed document(s) were written under a changed name - the rows where Name and StagedName differ" 'WARN'

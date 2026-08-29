@@ -327,7 +327,7 @@ Uploading into Inbox is not neutral - it creates Staged documents.
         $i++
         $prefix = "[$i/$($ids.Count)] doc $id"
         $record = [ordered]@{
-            Id = $id; Name = ''; StagedName = ''; SizeBytes = 0; DeclaredBytes = 0; TargetPath = ''; Parts = 0
+            Id = $id; Name = ''; StagedName = ''; Renamed = $false; SizeBytes = 0; DeclaredBytes = 0; TargetPath = ''; Parts = 0
             Status = ''; Message = ''
             StartedUtc = (Get-Date).ToUniversalTime().ToString('s'); FinishedUtc = ''
         }
@@ -388,7 +388,10 @@ Uploading into Inbox is not neutral - it creates Staged documents.
                 # share.
                 $stagedName = ConvertTo-VaultStagingName $local.OriginalName
                 $record.StagedName = $stagedName
-                if ($stagedName -cne $local.OriginalName) {
+                # Case-sensitive. PowerShell compares strings case-insensitively by
+                # default, and a name differing only in case is still a different file.
+                $record.Renamed = ($stagedName -cne $local.OriginalName)
+                if ($record.Renamed) {
                     $renamed++
                     # Said out loud, in the results and the log. A file quietly landing
                     # under a name nobody chose is how "it is not there" gets reported
@@ -626,7 +629,10 @@ function Invoke-VaultDocumentsVerify {
             # where it was looked for. Replaced with the file's full path the moment one
             # is found, which is what `stage` writes and what can be pasted into a
             # staging listing or a load.
-            Id = $id; Name = ''; Title = ''; StagedName = ''; SourceBytes = 0; TargetBytes = 0; TargetPath = $folder
+            # Renamed starts blank, not False. Vault leaves filename__v empty for some
+            # documents, and with nothing to compare against, "no" is a claim this cannot
+            # make - blank says so, where False would assert it.
+            Id = $id; Name = ''; Title = ''; StagedName = ''; Renamed = ''; SourceBytes = 0; TargetBytes = 0; TargetPath = $folder
             SourceMd5 = ''; TargetMd5 = ''; Method = $Depth; Status = ''; Message = ''
         }
         $srcFile = $null; $tgtFile = $null; $work = ''
@@ -708,8 +714,11 @@ function Invoke-VaultDocumentsVerify {
                 $row.TargetBytes = $match.Size
                 $row.TargetPath  = $match.Path
                 $row.StagedName  = $match.Name
-                if ($srcName -and ($match.Name -cne $srcName)) {
-                    $row.Message = (@($row.Message, "source calls it '$srcName'") | Where-Object { $_ }) -join ' | '
+                if ($srcName) {
+                    $row.Renamed = ($match.Name -cne $srcName)
+                    if ($row.Renamed) {
+                        $row.Message = (@($row.Message, "source calls it '$srcName'") | Where-Object { $_ }) -join ' | '
+                    }
                 }
 
                 if ($Depth -eq 'DEEP') {
