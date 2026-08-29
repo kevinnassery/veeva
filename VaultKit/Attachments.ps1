@@ -156,6 +156,20 @@ function Invoke-VaultAttachmentsSync {
     }
     Write-VaultLog "$($ids.Count) mapped document(s) to examine"
 
+    # Sharded by DOCUMENT, because that is what the map keys are and what a worker can be
+    # handed. The rows it produces are per attachment, which is why the supervisor is
+    # told not to treat one as the other.
+    if ($c.Workers -gt 1 -and $ids.Count -gt 1 -and $TestCount -le 0 -and -not ($Plan -or $c.WhatIf)) {
+        $pairs = @($ids | ForEach-Object { [pscustomobject]@{ Source = $_; Target = $map[$_] } })
+        $extra = @()
+        if ($ReplaceDiffering) { $extra += '-ReplaceDiffering' }
+        return Invoke-VaultShardedRun -Context $c -Pending $pairs -Workers $c.Workers `
+                   -Command @('attachments', 'sync') -LogPattern 'attachments-sync-*.log' `
+                   -ResultsName 'attachment-results.csv' -KeyColumn 'Key' `
+                   -SuccessStatus 'ATTACHED' -Verb 'Attached' -ShardKind 'map' `
+                   -RowsAreItems $false -ExtraArgs $extra
+    }
+
     $res = New-VaultResults -Path (Join-Path $c.Out 'attachment-results.csv') -KeyColumn 'Key' `
               -DoneStatuses @('ATTACHED') -Existing $c.Existing
 
@@ -215,6 +229,7 @@ function Invoke-VaultAttachmentsSync {
             }
 
             $local = $null
+            $work  = ''
             try {
                 # $c.WhatIf rather than $PSCmdlet.ShouldProcess: $PSCmdlet only exists
                 # inside an advanced function, and these are plain functions dot-sourced
@@ -222,9 +237,14 @@ function Invoke-VaultAttachmentsSync {
                 if (-not $c.WhatIf) {
                     Assert-VaultDiskBudget -Path $c.Scratch -Needed $att.Size -ReserveMB $c.ReserveMB
                     Write-VaultLog "$prefix - $state $($att.Name) ($(Format-VaultBytes $att.Size)) - downloading"
+                    # A folder per document. Attachment names repeat across documents far
+                    # more than document filenames do - "Cover Letter.pdf" on a hundred
+                    # documents is ordinary - so one flat scratch folder means one
+                    # document's leftover file is the path the next one tries to create.
+                    $work  = New-VaultScratch -Root $c.Scratch -Name $srcId
                     $local = Save-VaultFile -VaultHost $c.SourceHost -ApiVersion $c.Api `
                                 -Path "/objects/documents/$srcId/attachments/$($att.Id)/file" `
-                                -Destination $c.Scratch -FileName $att.Name
+                                -Destination $work -FileName $att.Name
                     $row.SizeBytes = $local.Size
 
                     # Vault's ORIGINAL name, not the scrubbed local one. Uploading under a
@@ -249,7 +269,10 @@ function Invoke-VaultAttachmentsSync {
                 $row.Status = 'ERROR'; $row.Message = "$_"; $stat.Errors++
                 Write-VaultLog "$prefix - ERROR on $($att.Name): $_" 'ERROR'
             }
-            finally { Remove-VaultScratchFile -File $local -Scratch $c.Scratch -Prefix "$prefix -" }
+            finally {
+                Remove-VaultScratchFile -File $local -Scratch $c.Scratch -Prefix "$prefix -"
+                if ($work) { Remove-VaultScratchDir -Path $work }
+            }
 
             $row.FinishedUtc = (Get-Date).ToUniversalTime().ToString('s')
             Add-VaultResult -Results $res -Row $row
@@ -301,7 +324,16 @@ function Invoke-VaultAttachmentsVerify {
 
     # Nothing is skipped on a re-run: the point of a check is the CURRENT state, and a
     # MATCH recorded yesterday says nothing about today.
-    $res = New-VaultResults -Path (Join-Path $c.Out 'verify-results.csv') -KeyColumn 'Key' -Existing $c.Existing
+    if ($c.Workers -gt 1 -and $ids.Count -gt 1 -and $TestCount -le 0) {
+        $pairs = @($ids | ForEach-Object { [pscustomobject]@{ Source = $_; Target = $map[$_] } })
+        return Invoke-VaultShardedRun -Context $c -Pending $pairs -Workers $c.Workers `
+                   -Command @('attachments', 'verify') -LogPattern 'attachments-verify-*.log' `
+                   -ResultsName 'attachment-validate-results.csv' -KeyColumn 'Key' `
+                   -SuccessStatus 'MATCH' -Verb 'Checked' -ShardKind 'map' `
+                   -RowsAreItems $false -ExtraArgs @('-Depth', $Depth)
+    }
+
+    $res = New-VaultResults -Path (Join-Path $c.Out 'attachment-validate-results.csv') -KeyColumn 'Key' -Existing $c.Existing
 
     $stat = @{ Match = 0; Mismatch = 0; MissingOnTarget = 0; MissingOnSource = 0; NoChecksum = 0; Errors = 0 }
     $hashed = [long]0
@@ -311,14 +343,18 @@ function Invoke-VaultAttachmentsVerify {
     function Get-Md5 {
         param([string]$VaultHostName, [string]$DocId, [string]$AttId, [string]$Name, [long]$Size)
         Assert-VaultDiskBudget -Path $c.Scratch -Needed $Size -ReserveMB $c.ReserveMB
+        $work = New-VaultScratch -Root $c.Scratch -Name "$VaultHostName-$DocId"
         $f = $null
         try {
             $f = Save-VaultFile -VaultHost $VaultHostName -ApiVersion $c.Api `
                     -Path "/objects/documents/$DocId/attachments/$AttId/file" `
-                    -Destination $c.Scratch -FileName "$VaultHostName-$AttId-$Name"
+                    -Destination $work -FileName "$VaultHostName-$AttId-$Name"
             return [pscustomobject]@{ Md5 = (Get-FileHash -LiteralPath $f.Path -Algorithm MD5).Hash; Size = $f.Size }
         }
-        finally { Remove-VaultScratchFile -File $f -Scratch $c.Scratch }
+        finally {
+            Remove-VaultScratchFile -File $f -Scratch $c.Scratch
+            if ($work) { Remove-VaultScratchDir -Path $work }
+        }
     }
 
     :documents foreach ($srcId in $ids) {

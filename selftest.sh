@@ -73,7 +73,8 @@ fi
 
 echo "== gitignore covers the operator's input and output files =="
 for f in attachments-map.csv documents-ids.txt session.txt validate-results.csv \
-         attachment-results.csv document-results.csv document-validate-results.csv \
+         attachment-results.csv attachment-validate-results.csv \
+         document-results.csv document-validate-results.csv \
          .vault-session.json; do
   if git check-ignore -q "$f"; then ok "ignored: $f"; else bad "NOT ignored: $f"; fi
 done

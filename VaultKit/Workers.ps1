@@ -72,6 +72,15 @@ function Invoke-VaultShardedRun {
         [Parameter(Mandatory)][string]$LogPattern,    # e.g. 'documents-stage-*.log'
         [Parameter(Mandatory)][string]$ResultsName,   # e.g. 'document-results.csv'
         [string]$KeyColumn = 'Id',
+        # What a shard file is. The transfer works from a list of ids; the attachment
+        # sync works from a map of source id to target id, and handing a worker half a
+        # map as a list of ids loses the half that says where things go.
+        [ValidateSet('ids', 'map')][string]$ShardKind = 'ids',
+        # Whether one item produces one result row. It does for documents. It does not
+        # for attachments, where a shard is documents and the rows are attachments - so
+        # progress against a document count would read 500/200 and an ETA computed from
+        # it would be wrong rather than merely coarse.
+        [bool]$RowsAreItems = $true,
         # What a good row looks like for this workflow. The transfer records SUCCESS and
         # the validator records MATCH, and a supervisor that only knows one of them
         # counts every row of the other as a failure.
@@ -151,8 +160,19 @@ function Invoke-VaultShardedRun {
         for ($w = 1; $w -le $count; $w++) {
             $wDir = Join-Path $root "w$w"
             if (-not (Test-Path -LiteralPath $wDir)) { New-Item -ItemType Directory -Path $wDir -Force -WhatIf:$false | Out-Null }
-            $shardFile = Join-Path $wDir 'ids.txt'
-            Set-Content -LiteralPath $shardFile -Value ($shards[$w] -join "`r`n") -Encoding ASCII -WhatIf:$false
+            if ($ShardKind -eq 'map') {
+                $shardFile = Join-Path $wDir 'map.csv'
+                $lines = New-Object System.Collections.ArrayList
+                [void]$lines.Add('source,target')
+                foreach ($pair in $shards[$w]) { [void]$lines.Add(('{0},{1}' -f $pair.Source, $pair.Target)) }
+                Set-Content -LiteralPath $shardFile -Value $lines -Encoding ASCII -WhatIf:$false
+                $inputArg = '-MapFile'
+            }
+            else {
+                $shardFile = Join-Path $wDir 'ids.txt'
+                Set-Content -LiteralPath $shardFile -Value ($shards[$w] -join "`r`n") -Encoding ASCII -WhatIf:$false
+                $inputArg = '-IdFile'
+            }
 
             # -Existing Fresh, because the worker folder is this run's alone and a
             # previous run's rows in it would be counted twice at merge time.
@@ -162,7 +182,7 @@ function Invoke-VaultShardedRun {
             $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$($c.ScriptPath)`"") +
                        $Command +
                        @('-ConfigFile', "`"$($c.ConfigPath)`"",
-                         '-IdFile',     "`"$shardFile`"",
+                         $inputArg,     "`"$shardFile`"",
                          '-OutputRoot', "`"$wDir`"",
                          '-Worker',
                          '-Workers', '1', '-Existing', 'Fresh', '-NoPrompt', '-Yes')
@@ -193,7 +213,12 @@ function Invoke-VaultShardedRun {
             }
             $elapsed = ((Get-Date) - $started).TotalSeconds
             $alive   = @($procs | Where-Object { -not $_.HasExited }).Count
-            if ($moved -gt 0 -and $elapsed -gt 0) {
+            if (-not $RowsAreItems) {
+                $rate = if ($elapsed -gt 0) { $moved / $elapsed } else { 0 }
+                Write-VaultLog ("progress {0:N0} row(s) at {1:N2}/s overall, {2} of {3} worker(s) alive" -f `
+                                $moved, $rate, $alive, $count)
+            }
+            elseif ($moved -gt 0 -and $elapsed -gt 0) {
                 $rate = $moved / $elapsed
                 $left = $Pending.Count - $moved
                 $eta  = (Get-Date).AddSeconds($left / [math]::Max($rate, 0.0001))
@@ -268,7 +293,8 @@ function Invoke-VaultShardedRun {
 
         $secs = ((Get-Date) - $started).TotalSeconds
         Write-VaultLog '----------------------------------------------------------------'
-        Write-VaultLog ("$Verb $ok of $($Pending.Count) item(s), $bad not $SuccessStatus, in $(Format-VaultDuration $secs) across $count worker(s)") $(if ($bad) { 'WARN' } else { 'OK' })
+        $of = if ($RowsAreItems) { " of $($Pending.Count)" } else { '' }
+        Write-VaultLog ("$Verb $ok$of item(s), $bad not $SuccessStatus, in $(Format-VaultDuration $secs) across $count worker(s)") $(if ($bad) { 'WARN' } else { 'OK' })
         Write-VaultLog "Results     : $resultsPath"
         $snap = Copy-VaultResultsSnapshot -Path $resultsPath
         if ($snap) { Write-VaultLog "This run    : $snap" }

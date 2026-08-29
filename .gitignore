@@ -33,6 +33,10 @@ documents-*.log
 # Run outputs, in case OutputRoot ever points at a clone
 attachment-results.csv
 attachment-results-*.csv
+attachment-validate-results.csv
+attachment-validate-results-*.csv
+verify-results.csv
+attachments-*.log
 validate-results.csv
 validate-results-*.csv
 attachments-*.log

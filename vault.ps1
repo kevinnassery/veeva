@@ -67,6 +67,8 @@ param(
     # ---- Set by the supervisor on the workers it launches ----
     # Overrides the id list named in the config, so a worker reads only its own shard.
     [string]$IdFile = '',
+    # The same, for workflows whose input is a map rather than a list.
+    [string]$MapFile = '',
     # Marks a worker. A worker must not write the session file it shares with the
     # supervisor and its siblings: several processes rewriting one JSON file the moment
     # their sessions expire is how a torn file gets written.
@@ -79,7 +81,7 @@ param(
     [int]$Workers = 0
 )
 
-$ScriptVersion = '2026.08.29-25'
+$ScriptVersion = '2026.08.29-26'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -160,7 +162,8 @@ function New-VaultContext {
     $map = $null
     $ids = @()
     if ($MapKey) {
-        $file = Get-VaultSetting -Config $script:Cfg -Section $Section -Key $MapKey -Default ''
+        $file = $MapFile
+        if (-not $file) { $file = Get-VaultSetting -Config $script:Cfg -Section $Section -Key $MapKey -Default '' }
         if (-not $file) { throw "[$Section] $MapKey is not set in $($script:CfgPath)" }
         $map = Import-VaultIdMap -Path $file -LegacyNames @('map.csv')
     }
