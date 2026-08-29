@@ -91,10 +91,28 @@ merged into and overwritten; the stamped one is the record of what a given run d
 A separate command, run whenever you want — including long after the transfer, and by
 someone who did not do it.
 
+First, what is actually there:
+
 ```
-.\vault.ps1 documents verify              downloads both copies and compares the bytes
+.\vault.ps1 documents list
+```
+
+Read-only. Counts the document folders and files under `[documents] path`, their total
+size, and flags folders holding **no** file (a transfer that made the folder and then
+failed) or **more than one** (an earlier run landed a different filename).
+
+Then check them:
+
+```
+.\vault.ps1 documents verify -Staged      only what is on the target
+.\vault.ps1 documents verify              every id in the list
 .\vault.ps1 documents verify -Depth FAST  compares name and size only
 ```
+
+`-Staged` takes its list from the target vault rather than `documents-ids.txt`. Use it
+part way through a wave: verifying the whole input list when only some of it has been
+sent reports every document not yet moved as `MISSING_ON_TARGET`, and thousands of rows
+saying "not done yet" bury the handful that mean something.
 
 Per document in `document-validate-results.csv`: `MATCH`, `MISMATCH`,
 `MISSING_ON_TARGET`, `MISSING_ON_SOURCE`. File Staging's listing reports no checksum of

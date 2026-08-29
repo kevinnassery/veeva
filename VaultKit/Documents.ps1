@@ -368,17 +368,103 @@ function Get-VaultStagingItems {
     return $items
 }
 
+function Get-VaultStagedDocumentIds {
+    # What is on the target, according to the target - not according to our own results
+    # file. Each per-document folder under the wave path is named for its SOURCE document
+    # id, which is what makes this answerable in one listing.
+    #
+    # recursive=false on purpose: this wants the folder names, and enumerating every file
+    # inside 15,000 of them to count the folders would be thousands of pages of response
+    # to answer a question the folder names already answer.
+    param([Parameter(Mandatory)]$Context)
+    $ids = New-Object System.Collections.ArrayList
+    $odd = New-Object System.Collections.ArrayList
+    $next = "/services/file_staging/items/$(ConvertTo-VaultStagingPath $Context.TargetPath)?recursive=false&limit=1000"
+    while ($next) {
+        $r = Invoke-VaultApi -VaultHost $Context.TargetHost -ApiVersion $Context.Api -Method GET -Path $next
+        foreach ($d in @(Get-VaultField $r 'data' @())) {
+            $name = "$(Get-VaultField $d 'name' '')"
+            if ("$(Get-VaultField $d 'kind' '')" -ne 'folder') {
+                if ($name) { [void]$odd.Add($name) }
+                continue
+            }
+            if ($name -match '^\d+$') { [void]$ids.Add($name) }
+            elseif ($name) { [void]$odd.Add($name) }
+        }
+        $next = "$(Get-VaultField (Get-VaultField $r 'responseDetails' $null) 'next_page' '')"
+    }
+    if ($odd.Count) {
+        Write-VaultLog "$($odd.Count) item(s) under $($Context.TargetPath) are not document folders: $(($odd | Select-Object -First 5) -join ', ')" 'WARN'
+    }
+    return @($ids)
+}
+
+function Invoke-VaultDocumentsList {
+    # How much is already on the target, and whether it looks right.
+    param([Parameter(Mandatory)]$Context)
+    $c = $Context
+    if (-not $c.TargetPath) { throw 'No target staging path is set. See [documents] path in the config.' }
+    Write-VaultLog "$($c.TargetHost)$($c.TargetPath)"
+
+    $ids = Get-VaultStagedDocumentIds -Context $c
+    Write-VaultLog "$($ids.Count) document folder(s) on the target" 'OK'
+    if (-not $ids.Count) { return 0 }
+
+    # Now the files, which needs the recursive listing. Reported per document so a folder
+    # holding none - a transfer that made the folder and then failed - is visible rather
+    # than averaged away.
+    $files = 0; $bytes = [long]0
+    $perDoc = @{}
+    $next = "/services/file_staging/items/$(ConvertTo-VaultStagingPath $c.TargetPath)?recursive=true&limit=1000"
+    while ($next) {
+        $r = Invoke-VaultApi -VaultHost $c.TargetHost -ApiVersion $c.Api -Method GET -Path $next
+        foreach ($d in @(Get-VaultField $r 'data' @())) {
+            if ("$(Get-VaultField $d 'kind' '')" -ne 'file') { continue }
+            $files++
+            $bytes += [long]"$(Get-VaultField $d 'size' 0)"
+            $path = "$(Get-VaultField $d 'path' '')"
+            $rel  = $path.Substring([math]::Min($path.Length, $c.TargetPath.TrimEnd('/').Length)).Trim('/')
+            $docId = ($rel -split '/')[0]
+            if ($docId) { $perDoc[$docId] = 1 + [int]$perDoc[$docId] }
+        }
+        $next = "$(Get-VaultField (Get-VaultField $r 'responseDetails' $null) 'next_page' '')"
+    }
+
+    $empty = @($ids | Where-Object { -not $perDoc.ContainsKey($_) })
+    $multi = @($perDoc.Keys | Where-Object { $perDoc[$_] -gt 1 })
+
+    Write-VaultLog "$files file(s), $(Format-VaultBytes $bytes)" 'OK'
+    if ($empty.Count) {
+        Write-VaultLog "$($empty.Count) folder(s) hold no file - a transfer made the folder and did not finish: $(($empty | Select-Object -First 5) -join ', ')" 'WARN'
+    }
+    if ($multi.Count) {
+        Write-VaultLog "$($multi.Count) folder(s) hold more than one file - an earlier run landed a different filename: $(($multi | Select-Object -First 5) -join ', ')" 'WARN'
+    }
+    Write-VaultLog 'Check these with: documents verify -Staged'
+    return 0
+}
+
 function Invoke-VaultDocumentsVerify {
     param(
         [Parameter(Mandatory)]$Context,
         [ValidateSet('FAST', 'DEEP')][string]$Depth = 'DEEP',
         [int]$TestCount = 0,
-        [int]$Limit = 0
+        [int]$Limit = 0,
+        [switch]$Staged
     )
     $c = $Context
     if (-not $c.TargetPath) { throw 'No target staging path is set. See [documents] path in the config.' }
 
-    $ids = @($c.Ids)
+    if ($Staged) {
+        # Check what is actually there, rather than what was asked for. Verifying the
+        # whole input list after moving part of it reports every document not yet sent
+        # as MISSING_ON_TARGET, which buries the real failures in thousands of rows
+        # saying nothing more than "not done yet".
+        $ids = Get-VaultStagedDocumentIds -Context $c
+        Write-VaultLog "-Staged: checking the $($ids.Count) document(s) on the target, not the $(@($c.Ids).Count) in the id list"
+        if (-not $ids.Count) { Write-VaultLog "Nothing is staged under $($c.TargetPath)" 'WARN'; return 0 }
+    }
+    else { $ids = @($c.Ids) }
     if ($Limit -gt 0 -and $ids.Count -gt $Limit) {
         Write-VaultLog "Limit $Limit - checking the first $Limit of $($ids.Count) document(s)" 'WARN'
         $ids = @($ids | Select-Object -First $Limit)

@@ -53,6 +53,8 @@ param(
     # documents: the folder on the target vault's File Staging to upload into.
     # Overrides [documents] path.
     [string]$TargetPath = '',
+    # verify: check what is on the target, rather than everything in the id list.
+    [switch]$Staged,
     # update: go ahead even though a run is holding a lock.
     [switch]$Force,
     # update: fetch this exact commit instead of whatever main points at. Pins a known
@@ -77,7 +79,7 @@ param(
     [int]$Workers = 0
 )
 
-$ScriptVersion = '2026.08.29-8'
+$ScriptVersion = '2026.08.29-9'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -610,14 +612,22 @@ function Invoke-Documents {
                 Write-VaultLog "vault $ScriptVersion - documents verify ($Depth)"
                 [void](Confirm-VaultsForRun)
                 $ctx = New-VaultContext -Section 'documents' -IdsKey 'ids'
-                $bad = Invoke-VaultDocumentsVerify -Context $ctx -Depth $Depth -TestCount $Test -Limit $Limit
+                $bad = Invoke-VaultDocumentsVerify -Context $ctx -Depth $Depth -TestCount $Test -Limit $Limit -Staged:$Staged
                 Write-VaultLog "Log: $script:VaultLogFile"
                 if ($bad -gt 0) { exit 1 }
             }
             finally { Stop-VaultLock }
         }
+        'list' {
+            Initialize-VaultRun -LogName 'documents-list'
+            Write-VaultLog "vault $ScriptVersion - documents list (read only, nothing is changed)"
+            [void](Confirm-VaultsForRun)
+            $ctx = New-VaultContext -Section 'documents'
+            [void](Invoke-VaultDocumentsList -Context $ctx)
+            Write-VaultLog "Log: $script:VaultLogFile"
+        }
         default {
-            Write-Host "vault.ps1 documents <stage|verify>" -ForegroundColor Red
+            Write-Host "vault.ps1 documents <stage|verify|list>" -ForegroundColor Red
             exit 2
         }
     }
@@ -638,6 +648,7 @@ vault $v
   probe                    Read-only survey of each vault. Changes nothing
 
   documents stage          Copy document source files into the target's File Staging
+  documents list           How much is on the target already, and whether it looks right
   documents verify         Prove what landed in File Staging matches the source
   attachments sync         Deliver document attachments the target is missing
   attachments verify       Prove both vaults hold the same bytes
@@ -654,6 +665,7 @@ Options
   -Test <n>                Stop once n items are genuinely done (not n examined)
   -Limit <n>               Cap the input examined
   -TargetPath <path>       documents: overrides [documents] path
+  -Staged                  verify: check what is ON the target, not the whole id list
   -Workers <n>             Move the work with n processes. Overrides [limits] workers
   -Depth FAST|DEEP         verify: sizes and recorded MD5, or download both and hash
   -ReplaceDiffering        sync: send same-name attachments whose bytes differ
