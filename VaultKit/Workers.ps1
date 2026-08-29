@@ -90,6 +90,18 @@ function Invoke-VaultShardedRun {
     if (-not (Test-Path -LiteralPath $root)) { New-Item -ItemType Directory -Path $root -Force -WhatIf:$false | Out-Null }
 
     $resultsPath = Join-Path $c.Out $ResultsName
+
+    # -Existing Fresh, honoured here too. The single-process path rotates the results
+    # aside and starts clean; the supervisor read them regardless and merged, so asking
+    # for a fresh start on a worker run silently did not get one.
+    if ($c.Existing -eq 'Fresh' -and (Test-Path -LiteralPath $resultsPath)) {
+        $when  = (Get-Item -LiteralPath $resultsPath).LastWriteTime.ToString('yyyyMMdd-HHmmss')
+        $moved = [IO.Path]::Combine([IO.Path]::GetDirectoryName($resultsPath),
+                 ('{0}-{1}{2}' -f [IO.Path]::GetFileNameWithoutExtension($resultsPath), $when, [IO.Path]::GetExtension($resultsPath)))
+        Move-Item -LiteralPath $resultsPath -Destination $moved -Force -WhatIf:$false
+        Write-VaultLog "Rotated previous results to $(Split-Path -Leaf $moved)"
+    }
+
     $prior = [ordered]@{}
     if (Test-Path -LiteralPath $resultsPath) {
         foreach ($row in (Import-Csv -LiteralPath $resultsPath)) {
