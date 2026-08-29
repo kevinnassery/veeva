@@ -172,10 +172,14 @@ function Invoke-VaultShardedRun {
                 $rate = $moved / $elapsed
                 $left = $Pending.Count - $moved
                 $eta  = (Get-Date).AddSeconds($left / [math]::Max($rate, 0.0001))
-                Write-VaultLog ("progress {0:N0}/{1:N0} at {2:N2}/s, {3} worker(s) alive, ETA {4:yyyy-MM-dd HH:mm}" -f `
-                                $moved, $Pending.Count, $rate, $alive, $eta)
+                # "overall", said every time: this is the sum across all workers over
+                # wall clock, not one worker's rate. Reading it as per-worker overstates
+                # throughput by the worker count, which turns an eight hour wave into a
+                # one hour one on paper.
+                Write-VaultLog ("progress {0:N0}/{1:N0} at {2:N2}/s overall, {3} of {4} worker(s) alive, ETA {5:yyyy-MM-dd HH:mm}" -f `
+                                $moved, $Pending.Count, $rate, $alive, $count, $eta)
             }
-            else { Write-VaultLog "progress 0/$($Pending.Count), $alive worker(s) alive" }
+            else { Write-VaultLog "progress 0/$($Pending.Count), $alive of $count worker(s) alive" }
         }
 
         # Drain whatever each worker wrote between the last poll and exiting.

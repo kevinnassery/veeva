@@ -146,7 +146,9 @@ linearly until Vault's burst limit starts throttling. 4 is a safe starting point
 sequential run is known good**.
 
 Workers run hidden, so their warnings and errors are forwarded into the main log as they
-happen, and progress is reported every 30 seconds with a rate and an ETA.
+happen, and progress is reported every 30 seconds with a rate and an ETA. That rate is
+the total across all workers over wall clock, not one worker's — it is what to divide the
+remaining count by.
 
 `-Workers <n>` overrides the config for one run. `-Test` and `-Plan` always run
 sequentially — there is nothing to parallelise, and five documents should be easy to
