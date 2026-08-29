@@ -204,7 +204,7 @@ function Invoke-VaultShardedRun {
 
         $secs = ((Get-Date) - $started).TotalSeconds
         Write-VaultLog '----------------------------------------------------------------'
-        Write-VaultLog ("Moved $ok of $($Pending.Count) item(s), $bad failed, in {0:N1} hour(s) across $count worker(s)" -f ($secs / 3600)) $(if ($bad) { 'WARN' } else { 'OK' })
+        Write-VaultLog ("Moved $ok of $($Pending.Count) item(s), $bad failed, in $(Format-VaultDuration $secs) across $count worker(s)") $(if ($bad) { 'WARN' } else { 'OK' })
         Write-VaultLog "Results     : $resultsPath"
         Write-VaultLog "Worker output: $root"
         return $bad

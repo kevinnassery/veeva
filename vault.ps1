@@ -77,7 +77,7 @@ param(
     [int]$Workers = 0
 )
 
-$ScriptVersion = '2026.08.29-5'
+$ScriptVersion = '2026.08.29-6'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -141,7 +141,10 @@ function Initialize-VaultRun {
 
     if ($LogName) { [void](Start-VaultLog -Directory $root -Name $LogName) }
 
-    if ($Worker) { Set-VaultSessionPersist -Value $false }
+    if ($Worker) {
+        Set-VaultSessionPersist -Value $false
+        Set-VaultLockEnabled -Value $false
+    }
     if ($CredentialFile) {
         $n = Import-VaultCredentials -Path $CredentialFile
         Write-VaultLog "worker: $n credential(s) loaded"

@@ -138,6 +138,13 @@ function Save-VaultResults {
     $out | Export-Csv -LiteralPath $Results.Path -NoTypeInformation -Encoding UTF8 -WhatIf:$false
 }
 
+function Format-VaultDuration {
+    param([double]$Seconds)
+    if ($Seconds -ge 3600) { return ('{0:N1} hour(s)'   -f ($Seconds / 3600)) }
+    if ($Seconds -ge 60)   { return ('{0:N1} minute(s)' -f ($Seconds / 60)) }
+    return ('{0:N0} second(s)' -f $Seconds)
+}
+
 function Add-VaultResult {
     param([Parameter(Mandatory)]$Results, [Parameter(Mandatory)]$Row)
     [void]$Results.Rows.Add($Row)
@@ -153,8 +160,20 @@ function Add-VaultResult {
 
 $script:VaultLock = ''
 
+# Workers take no lock. The supervisor holds one for the whole run, and a worker taking
+# the same one means nine processes writing one file - then the first worker to FINISH
+# deletes it, disarming the guard while the run is still going. That is worse than no
+# lock at all, because it looks like one is held.
+$script:VaultLockEnabled = $true
+
+function Set-VaultLockEnabled {
+    param([bool]$Value)
+    $script:VaultLockEnabled = $Value
+}
+
 function Start-VaultLock {
     param([Parameter(Mandatory)][string]$Name)
+    if (-not $script:VaultLockEnabled) { return }
     $here = $PSScriptRoot
     if ($here) { $here = Split-Path -Parent $here } else { $here = (Get-Location).ProviderPath }
     $script:VaultLock = Join-Path $here ".run-$Name.lock"
