@@ -77,6 +77,11 @@ function Invoke-VaultShardedRun {
         # counts every row of the other as a failure.
         [string]$SuccessStatus = 'SUCCESS',
         [string]$Verb = 'Moved',
+        # Only the transfer renames anything. The validator's Name column holds what the
+        # SOURCE calls the file, which is a different thing from the name that was
+        # written - comparing them there reported 195 renames out of 200 when 2 had
+        # happened.
+        [switch]$ReportRenames,
         [string[]]$ExtraArgs = @()
     )
     $c     = $Context
@@ -233,10 +238,11 @@ function Invoke-VaultShardedRun {
         # a property of the result and the supervisor only ever sees the workers' output.
         # Read with Get-VaultField: rows written by an older version have no StagedName,
         # and under StrictMode reaching for a missing property is a terminating error.
-        $renamed = @($merged | Where-Object {
+        $renamed = 0
+        if ($ReportRenames) { $renamed = @($merged | Where-Object {
             $sn = "$(Get-VaultField $_ 'StagedName' '')"
             $sn -and ($sn -cne "$(Get-VaultField $_ 'Name' '')")
-        }).Count
+        }).Count }
         if ($renamed) {
             Write-VaultLog "$renamed document(s) were written under a changed name - the rows where Name and StagedName differ" 'WARN'
         }

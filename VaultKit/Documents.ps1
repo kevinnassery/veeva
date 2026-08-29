@@ -313,7 +313,7 @@ Uploading into Inbox is not neutral - it creates Staged documents.
         return Invoke-VaultShardedRun -Context $c -Pending $pending -Workers $c.Workers `
                    -Command @('documents', 'stage') -LogPattern 'documents-stage-*.log' `
                    -ResultsName 'document-results.csv' -KeyColumn 'Id' `
-                   -SuccessStatus 'SUCCESS' -Verb 'Moved' `
+                   -SuccessStatus 'SUCCESS' -Verb 'Moved' -ReportRenames `
                    -ExtraArgs @('-TargetPath', "`"$($c.TargetPath)`"")
     }
 
@@ -626,21 +626,29 @@ function Invoke-VaultDocumentsVerify {
             # where it was looked for. Replaced with the file's full path the moment one
             # is found, which is what `stage` writes and what can be pasted into a
             # staging listing or a load.
-            Id = $id; Name = ''; StagedName = ''; SourceBytes = 0; TargetBytes = 0; TargetPath = $folder
+            Id = $id; Name = ''; Title = ''; StagedName = ''; SourceBytes = 0; TargetBytes = 0; TargetPath = $folder
             SourceMd5 = ''; TargetMd5 = ''; Method = $Depth; Status = ''; Message = ''
         }
         $srcFile = $null; $tgtFile = $null; $work = ''
         try {
-            $srcName = ''; $srcSize = [long]0; $haveSource = $true
+            $srcName = ''; $srcTitle = ''; $srcSize = [long]0; $haveSource = $true
             try {
                 $meta = Invoke-VaultApi -VaultHost $c.SourceHost -ApiVersion $c.Api -Method GET -Path "/objects/documents/$id"
                 $doc  = Get-VaultField $meta 'document' $null
-                $srcName = "$(Get-VaultField $doc 'filename__v' '')"
-                if (-not $srcName) { $srcName = "$(Get-VaultField $doc 'name__v' '')" }
+                # filename__v only. name__v is the document TITLE - "Description of
+                # Manufacturing Process and Process Controls" against a file called
+                # bpr-common-ia-04867.pdf - and falling back to it put a title in a
+                # column that is compared against a filename, so almost every document
+                # looked renamed. Blank is the honest answer when Vault reports no
+                # filename, and the checks below skip the comparison rather than invent
+                # one.
+                $srcName  = "$(Get-VaultField $doc 'filename__v' '')"
+                $srcTitle = "$(Get-VaultField $doc 'name__v' '')"
                 $srcSize = [long]"$(Get-VaultField $doc 'size__v' 0)"
             }
             catch { $haveSource = $false; $row.Message = "source: $_" }
             $row.Name        = $srcName
+            $row.Title       = $srcTitle
             $row.SourceBytes = $srcSize
 
             # NOT $staged: PowerShell variable names are case-insensitive, so a local
@@ -700,7 +708,7 @@ function Invoke-VaultDocumentsVerify {
                 $row.TargetBytes = $match.Size
                 $row.TargetPath  = $match.Path
                 $row.StagedName  = $match.Name
-                if ($match.Name -cne $srcName) {
+                if ($srcName -and ($match.Name -cne $srcName)) {
                     $row.Message = (@($row.Message, "source calls it '$srcName'") | Where-Object { $_ }) -join ' | '
                 }
 
