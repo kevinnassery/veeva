@@ -65,14 +65,19 @@ param(
     # ---- Set by the supervisor on the workers it launches ----
     # Overrides the id list named in the config, so a worker reads only its own shard.
     [string]$IdFile = '',
-    # Credentials exported by the supervisor. A worker runs hidden and cannot be asked.
+    # Marks a worker. A worker must not write the session file it shares with the
+    # supervisor and its siblings: several processes rewriting one JSON file the moment
+    # their sessions expire is how a torn file gets written.
+    [switch]$Worker,
+    # Credentials exported by the supervisor, when it had any. A worker runs hidden and
+    # cannot be asked, so without this it cannot renew an expired session.
     [string]$CredentialFile = '',
     # How many processes move the work. 0 means "whatever [limits] workers says".
     [ValidateRange(0, 16)]
     [int]$Workers = 0
 )
 
-$ScriptVersion = '2026.08.29-4'
+$ScriptVersion = '2026.08.29-5'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -136,13 +141,10 @@ function Initialize-VaultRun {
 
     if ($LogName) { [void](Start-VaultLog -Directory $root -Name $LogName) }
 
+    if ($Worker) { Set-VaultSessionPersist -Value $false }
     if ($CredentialFile) {
-        # This process is a worker. It runs hidden and cannot be prompted, so it is given
-        # the passwords instead - and it must not write the session file, which it shares
-        # with the supervisor and every sibling.
         $n = Import-VaultCredentials -Path $CredentialFile
-        Set-VaultSessionPersist -Value $false
-        Write-VaultLog "worker: $n credential(s) loaded, session file is read-only here"
+        Write-VaultLog "worker: $n credential(s) loaded"
     }
 }
 

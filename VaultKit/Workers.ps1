@@ -88,17 +88,31 @@ function Invoke-VaultShardedRun {
         }
     }
 
-    $credPath = Join-Path $c.Out ('.worker-cred-' + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.xml')
-    $nCred = Export-VaultCredentials -Path $credPath
-    if ($nCred -lt 1) {
-        Remove-Item -LiteralPath $credPath -Force -WhatIf:$false -ErrorAction SilentlyContinue
-        throw @'
-Cannot start workers: no credentials are held in memory to pass to them.
+    # Credentials are a bonus here, not a requirement. Workers share .vault-session.json
+    # with this process and read their session straight out of it, so they can work
+    # without ever holding a password. What a password buys them is the ability to
+    # re-authenticate if a session expires mid-run - so its absence is a warning about
+    # long runs, not a reason to refuse to start.
+    #
+    # On the normal path there is nothing to export: `login` cached the sessions in an
+    # earlier process, so this one was never prompted and holds nothing.
+    $credPath = ''
+    $nCred    = 0
+    try {
+        $try = Join-Path $c.Out ('.worker-cred-' + [guid]::NewGuid().ToString('N').Substring(0, 8) + '.xml')
+        $nCred = Export-VaultCredentials -Path $try
+        if ($nCred -gt 0) { $credPath = $try }
+        else { Remove-Item -LiteralPath $try -Force -WhatIf:$false -ErrorAction SilentlyContinue }
+    }
+    catch { Write-VaultLog "Could not stage credentials for the workers: $_" 'WARN' }
 
-A worker runs hidden and cannot be prompted, so it needs the passwords this process
-was given. Run the command from a console so it can ask, rather than relying on a
-cached session file alone.
-'@
+    if ($nCred -gt 0) {
+        Write-VaultLog "$nCred credential(s) staged for the workers - they can re-authenticate if a session expires"
+    }
+    else {
+        Write-VaultLog 'No passwords are held in this process, so the workers run on the cached sessions alone.' 'WARN'
+        Write-VaultLog 'If a session expires mid-run a worker cannot renew it and its remaining items will fail.' 'WARN'
+        Write-VaultLog 'For a long run, log out and let the run prompt: vault logout, then start it again.' 'WARN'
     }
 
     $procs   = @()
@@ -120,14 +134,18 @@ cached session file alone.
 
             # -Existing Fresh, because the worker folder is this run's alone and a
             # previous run's rows in it would be counted twice at merge time.
+            # -Worker, not the credential file, is what marks worker mode: a worker must
+            # never write the session file it shares with this process and its siblings,
+            # whether or not it was given a password.
             $argList = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$($c.ScriptPath)`"") +
                        $Command +
-                       @('-ConfigFile',    "`"$($c.ConfigPath)`"",
-                         '-IdFile',        "`"$shardFile`"",
-                         '-OutputRoot',    "`"$wDir`"",
-                         '-CredentialFile', "`"$credPath`"",
-                         '-Workers', '1', '-Existing', 'Fresh', '-NoPrompt', '-Yes') +
-                       $ExtraArgs
+                       @('-ConfigFile', "`"$($c.ConfigPath)`"",
+                         '-IdFile',     "`"$shardFile`"",
+                         '-OutputRoot', "`"$wDir`"",
+                         '-Worker',
+                         '-Workers', '1', '-Existing', 'Fresh', '-NoPrompt', '-Yes')
+            if ($credPath) { $argList += @('-CredentialFile', "`"$credPath`"") }
+            $argList += $ExtraArgs
 
             $procs += Start-Process -FilePath 'powershell.exe' -ArgumentList $argList -PassThru -WindowStyle Hidden
             Write-VaultLog "worker $w started (pid $($procs[-1].Id)) with $($shards[$w].Count) item(s)"
@@ -193,7 +211,7 @@ cached session file alone.
     }
     finally {
         # The credential file must not outlive the run, even on Ctrl-C.
-        if (Test-Path -LiteralPath $credPath) {
+        if ($credPath -and (Test-Path -LiteralPath $credPath)) {
             Remove-Item -LiteralPath $credPath -Force -WhatIf:$false -ErrorAction SilentlyContinue
         }
     }
