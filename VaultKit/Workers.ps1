@@ -248,6 +248,23 @@ function Invoke-VaultShardedRun {
         return $bad
     }
     finally {
+        # Ctrl-C stops THIS process. The workers are separate processes and carry on:
+        # still uploading, still writing results, still holding scratch files open - so
+        # an operator who stopped the run watches it continue, and the next run trips
+        # over files an orphan is still using.
+        #
+        # Anything still alive when the supervisor leaves is stopped, whether it left by
+        # finishing, by an error, or by Ctrl-C.
+        $orphans = @($procs | Where-Object { $_ -and -not $_.HasExited })
+        if ($orphans.Count) {
+            Write-VaultLog "stopping $($orphans.Count) worker(s) still running: $(($orphans | ForEach-Object { $_.Id }) -join ', ')" 'WARN'
+            foreach ($proc in $orphans) {
+                try { Stop-Process -Id $proc.Id -Force -ErrorAction Stop }
+                catch { Write-VaultLog "could not stop worker pid $($proc.Id): $_" 'WARN' }
+            }
+            Write-VaultLog 'Their part-finished work is recorded, so resuming picks up where they stopped.' 'WARN'
+        }
+
         # The credential file must not outlive the run, even on Ctrl-C.
         if ($credPath -and (Test-Path -LiteralPath $credPath)) {
             Remove-Item -LiteralPath $credPath -Force -WhatIf:$false -ErrorAction SilentlyContinue

@@ -332,6 +332,7 @@ Uploading into Inbox is not neutral - it creates Staged documents.
             StartedUtc = (Get-Date).ToUniversalTime().ToString('s'); FinishedUtc = ''
         }
         $local = $null
+        $work  = ''
         try {
             # Size first, so the disk check happens before anything is downloaded.
             $meta = Invoke-VaultApi -VaultHost $c.SourceHost -ApiVersion $c.Api -Method GET -Path "/objects/documents/$id"
@@ -355,8 +356,15 @@ Uploading into Inbox is not neutral - it creates Staged documents.
             }
             else {
                 Write-VaultLog "$prefix - downloading $(Format-VaultBytes $size)"
+                # A folder per document. Filenames repeat constantly in a real vault -
+                # a dozen documents called "Description of Manufacturing Process and
+                # Process Controls" is normal - so a single flat scratch folder means
+                # one document's leftover file is the path the next one tries to create,
+                # and a delete that lost a race to a virus scanner takes the next
+                # document down with it.
+                $work  = New-VaultScratch -Root $c.Scratch -Name $id
                 $local = Save-VaultFile -VaultHost $c.SourceHost -ApiVersion $c.Api `
-                             -Path "/objects/documents/$id/file" -Destination $c.Scratch
+                             -Path "/objects/documents/$id/file" -Destination $work
                 $record.SizeBytes     = $local.Size
                 $record.DeclaredBytes = $size
                 $record.Name          = $local.OriginalName
@@ -409,6 +417,7 @@ Uploading into Inbox is not neutral - it creates Staged documents.
         }
         finally {
             Remove-VaultScratchFile -File $local -Scratch $c.Scratch -Prefix "$prefix -"
+            if ($work) { Remove-VaultScratchDir -Path $work }
         }
         $record.FinishedUtc = (Get-Date).ToUniversalTime().ToString('s')
         Add-VaultResult -Results $results -Row ([pscustomobject]$record)
@@ -620,7 +629,7 @@ function Invoke-VaultDocumentsVerify {
             Id = $id; Name = ''; StagedName = ''; SourceBytes = 0; TargetBytes = 0; TargetPath = $folder
             SourceMd5 = ''; TargetMd5 = ''; Method = $Depth; Status = ''; Message = ''
         }
-        $srcFile = $null; $tgtFile = $null
+        $srcFile = $null; $tgtFile = $null; $work = ''
         try {
             $srcName = ''; $srcSize = [long]0; $haveSource = $true
             try {
@@ -697,11 +706,13 @@ function Invoke-VaultDocumentsVerify {
 
                 if ($Depth -eq 'DEEP') {
                     Assert-VaultDiskBudget -Path $c.Scratch -Needed ($srcSize * 2) -ReserveMB $c.ReserveMB
+                    $work = New-VaultScratch -Root $c.Scratch -Name $id
                     $srcFile = Save-VaultFile -VaultHost $c.SourceHost -ApiVersion $c.Api `
-                                   -Path "/objects/documents/$id/file" -Destination $c.Scratch
+                                   -Path "/objects/documents/$id/file" -Destination $work `
+                                   -FileName ('source-' + (ConvertTo-VaultStagingName $srcName))
                     $tgtFile = Save-VaultFile -VaultHost $c.TargetHost -ApiVersion $c.Api `
                                    -Path "/services/file_staging/items/content/$(ConvertTo-VaultStagingPath $match.Path)" `
-                                   -Destination $c.Scratch -FileName ('staged-' + $match.Name)
+                                   -Destination $work -FileName ('staged-' + (ConvertTo-VaultStagingName $match.Name))
                     $row.SourceMd5   = (Get-FileHash -LiteralPath $srcFile.Path -Algorithm MD5).Hash
                     $row.TargetMd5   = (Get-FileHash -LiteralPath $tgtFile.Path -Algorithm MD5).Hash
                     $row.SourceBytes = $srcFile.Size
@@ -743,6 +754,7 @@ function Invoke-VaultDocumentsVerify {
         finally {
             Remove-VaultScratchFile -File $srcFile -Scratch $c.Scratch -Prefix "$prefix -"
             Remove-VaultScratchFile -File $tgtFile -Scratch $c.Scratch -Prefix "$prefix -"
+            if ($work) { Remove-VaultScratchDir -Path $work }
         }
         if ($row.Status -notin @('MATCH')) { $bad++ }
         $checked++

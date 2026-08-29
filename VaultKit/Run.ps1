@@ -41,21 +41,56 @@ function Remove-VaultScratchFile {
     # Success or failure, the local copy goes - that is what keeps disk bounded. Logged
     # every time with the free space left, because a delete that quietly stopped working
     # would otherwise surface as a full volume hours later instead of a line in the log.
-    param([Parameter(Mandatory)][AllowNull()]$File, [Parameter(Mandatory)][string]$Scratch, [string]$Prefix = '')
+    #
+    # Retried, because the delete competes with whatever scans files as they are written.
+    # Windows Defender opening a freshly downloaded PDF is enough to make Remove-Item
+    # fail with "being used by another process", and it lets go a moment later.
+    param(
+        [Parameter(Mandatory)][AllowNull()]$File,
+        [Parameter(Mandatory)][string]$Scratch,
+        [string]$Prefix = '',
+        [int]$Attempts = 5
+    )
     if (-not $File) { return }
     if (-not (Test-Path -LiteralPath $File.Path)) { return }
-    try {
-        Remove-Item -LiteralPath $File.Path -Force -WhatIf:$false
-        $free = Get-VaultFreeSpace -Path $Scratch
-        $note = if ($free -ge 0) { ", $(Format-VaultBytes $free) free" } else { '' }
-        Write-VaultLog "$Prefix scratch file deleted ($(Format-VaultBytes $File.Size)$note)"
+
+    for ($n = 1; $n -le $Attempts; $n++) {
+        try {
+            Remove-Item -LiteralPath $File.Path -Force -WhatIf:$false
+            $free = Get-VaultFreeSpace -Path $Scratch
+            $note = if ($free -ge 0) { ", $(Format-VaultBytes $free) free" } else { '' }
+            Write-VaultLog "$Prefix scratch file deleted ($(Format-VaultBytes $File.Size)$note)"
+            return
+        }
+        catch {
+            if ($n -eq $Attempts) {
+                Write-VaultLog "Could not delete $($File.Path) after $Attempts attempts: $_" 'WARN'
+                return
+            }
+            Start-Sleep -Milliseconds (200 * $n)
+        }
     }
-    catch { Write-VaultLog "Could not delete $($File.Path): $_" 'WARN' }
+}
+
+function Remove-VaultScratchDir {
+    # The whole per-item folder, once its files are gone. Deleting a directory that a
+    # scanner still holds a file in fails the same way, so it gets the same patience.
+    param([Parameter(Mandatory)][string]$Path, [int]$Attempts = 5)
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    for ($n = 1; $n -le $Attempts; $n++) {
+        try { Remove-Item -LiteralPath $Path -Recurse -Force -WhatIf:$false; return }
+        catch {
+            if ($n -eq $Attempts) { return }   # Report-VaultLeftovers will name it
+            Start-Sleep -Milliseconds (200 * $n)
+        }
+    }
 }
 
 function Report-VaultLeftovers {
     param([Parameter(Mandatory)][string]$Scratch)
-    $left = @(Get-ChildItem -LiteralPath $Scratch -File -ErrorAction SilentlyContinue)
+    # Recurse: files live in a folder per item now, so a non-recursive look sees an
+    # empty scratch root while gigabytes sit one level down.
+    $left = @(Get-ChildItem -LiteralPath $Scratch -File -Recurse -ErrorAction SilentlyContinue)
     if (-not $left.Count) { return }
     $bytes = ($left | Measure-Object -Property Length -Sum).Sum
     Write-VaultLog "$($left.Count) file(s) left in $Scratch taking $(Format-VaultBytes $bytes) - safe to delete" 'WARN'
