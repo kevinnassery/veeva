@@ -40,6 +40,20 @@ function ConvertTo-VaultStagingPath {
 
 $script:VaultMadeFolders = @{}
 
+function ConvertTo-VaultStagingName {
+    # A Vault document filename is not a path segment, and real ones contain "/":
+    # "Extension for providing representations re: data protection eligibility - HC to
+    # Torys/Extension..." is one, and so is anything with "INO/..." in it. Joining that
+    # straight into a staging path invents folder levels nobody created, and the upload
+    # fails with "The parent folder [...] cannot be found" - two documents in every two
+    # hundred, so it appears only once a run is big enough.
+    #
+    # Only the separators are replaced. Everything else is left exactly as Vault has it,
+    # because the name is what someone will look for on the other side.
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Name)
+    return ($Name -replace '[\\/]', '_')
+}
+
 function New-VaultStagingFolder {
     # Create every level, not just the leaf.
     #
@@ -298,10 +312,11 @@ Uploading into Inbox is not neutral - it creates Staged documents.
                 $record.SizeBytes = $local.Size
                 $record.Name      = $local.OriginalName
 
-                # The name that goes back out to Vault is the one Vault gave us, not the
-                # one scrubbed for the local filesystem. Uploading the scrubbed name
-                # means the names stop matching and a later run cannot tell what landed.
-                $remote = $folder + '/' + $local.OriginalName
+                # Vault's own name, with path separators alone made safe. The local
+                # scrub is far broader - it strips every character Windows forbids - and
+                # using that here would rename files for reasons the target does not
+                # share.
+                $remote = $folder + '/' + (ConvertTo-VaultStagingName $local.OriginalName)
                 $record.TargetPath = $remote
                 New-VaultStagingFolder -Context $c -Path $folder
 
@@ -552,7 +567,11 @@ function Invoke-VaultDocumentsVerify {
                 if ($onTarget.Count -gt 1) {
                     $row.Message = "$($onTarget.Count) files in ${folder}: " + (($onTarget | ForEach-Object { $_.Name }) -join ', ')
                 }
-                $match = @($onTarget | Where-Object { $_.Name -eq $srcName }) | Select-Object -First 1
+                # Matched against the name as it was WRITTEN, which is the source name
+                # with separators replaced - otherwise every document whose name held a
+                # slash looks like a name mismatch and falls through to the first file.
+                $wanted = ConvertTo-VaultStagingName $srcName
+                $match = @($onTarget | Where-Object { $_.Name -eq $wanted }) | Select-Object -First 1
                 if (-not $match) { $match = $onTarget[0] }
                 $row.TargetBytes = $match.Size
                 $row.TargetPath  = $match.Path

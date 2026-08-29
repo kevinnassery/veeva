@@ -16,7 +16,15 @@ function Eq($a,$b,$m){ if("$a" -ne "$b"){ throw "$m (got '$a', want '$b')" } }
 
 # load the module the same way vault.ps1 does
 Set-StrictMode -Version 2.0
-foreach($p in 'Log','Config','Auth','Http','Ids','Run','Attachments'){ . (Join-Path $here "VaultKit/$p.ps1") }
+# Read out of vault.ps1 rather than listed again here. This hand-kept copy silently fell
+# behind when Documents and Workers were added, so every test touching them failed with
+# "the term is not recognized" - which reads like a typo rather than a module never loaded.
+$parts = (Get-Content (Join-Path $here 'vault.ps1') |
+          Where-Object { $_ -like '$VaultKitParts = @(*' } |
+          Select-Object -First 1) -replace '^.*@\(', '' -replace '\).*$', '' -split ',' |
+         ForEach-Object { $_.Trim().Trim("'") }
+if (-not $parts) { throw 'could not read $VaultKitParts out of vault.ps1' }
+foreach($p in $parts){ . (Join-Path $here "VaultKit/$p.ps1") }
 
 Write-Host "== Config: sectioned ini =="
 $ini = Join-Path $tmp 'vk-test.ini'
@@ -67,7 +75,15 @@ if ($fail){ exit 1 }
 # of 26 - and a failure in the first half could not have changed the exit code.
 function Eq($a,$b,$m){ if("$a" -ne "$b"){ throw "$m (got '$a' want '$b')" } }
 Set-StrictMode -Version 2.0
-foreach($p in 'Log','Config','Auth','Http','Ids','Run','Attachments'){ . (Join-Path $here "VaultKit/$p.ps1") }
+# Read out of vault.ps1 rather than listed again here. This hand-kept copy silently fell
+# behind when Documents and Workers were added, so every test touching them failed with
+# "the term is not recognized" - which reads like a typo rather than a module never loaded.
+$parts = (Get-Content (Join-Path $here 'vault.ps1') |
+          Where-Object { $_ -like '$VaultKitParts = @(*' } |
+          Select-Object -First 1) -replace '^.*@\(', '' -replace '\).*$', '' -split ',' |
+         ForEach-Object { $_.Trim().Trim("'") }
+if (-not $parts) { throw 'could not read $VaultKitParts out of vault.ps1' }
+foreach($p in $parts){ . (Join-Path $here "VaultKit/$p.ps1") }
 $td = Join-Path $tmp ('vk2-'+[guid]::NewGuid().ToString('N')); New-Item -ItemType Directory -Force $td|Out-Null
 Push-Location $td
 
@@ -102,6 +118,13 @@ $r2 = New-VaultResults -Path "$td/res.csv" -KeyColumn 'Key' -DoneStatuses @('ATT
 T 'resume marks ATTACHED done' { if(-not $r2.Done.ContainsKey('a')){throw 'a not done'} }
 T 'resume does NOT mark ERROR' { if($r2.Done.ContainsKey('b')){throw 'b wrongly done'} }
 T 'prior rows carried forward'  { Eq $r2.Prior.Count 2 'prior' }
+
+Write-Host "== Staging names =="
+T 'slash in a filename is neutralised' { Eq (ConvertTo-VaultStagingName 'HC to Torys/Extension.pdf') 'HC to Torys_Extension.pdf' 'slash' }
+T 'backslash too'                      { Eq (ConvertTo-VaultStagingName 'a\b.pdf') 'a_b.pdf' 'backslash' }
+T 'every separator, not just the first'{ Eq (ConvertTo-VaultStagingName 'a/b/c.pdf') 'a_b_c.pdf' 'all' }
+T 'colons and spaces are kept'         { Eq (ConvertTo-VaultStagingName 're: data (final) v2.pdf') 're: data (final) v2.pdf' 'kept' }
+T 'ordinary name untouched'            { Eq (ConvertTo-VaultStagingName 'Cover Letter.pdf') 'Cover Letter.pdf' 'plain' }
 
 Write-Host "== Results snapshot =="
 $snapDir = Join-Path $tmp ('vk3-'+[guid]::NewGuid().ToString('N')); New-Item -ItemType Directory -Force $snapDir|Out-Null
