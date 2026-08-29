@@ -404,6 +404,10 @@ function Invoke-VaultDocumentsVerify {
         $prefix = "[$i/$($ids.Count)] doc $id"
         $folder = $c.TargetPath.TrimEnd('/') + '/' + $id
         $row = [ordered]@{
+            # Seeded with the folder so a document that never arrived still records
+            # where it was looked for. Replaced with the file's full path the moment one
+            # is found, which is what `stage` writes and what can be pasted into a
+            # staging listing or a load.
             Id = $id; Name = ''; SourceBytes = 0; TargetBytes = 0; TargetPath = $folder
             SourceMd5 = ''; TargetMd5 = ''; Method = $Depth; Status = ''; Message = ''
         }
@@ -427,7 +431,11 @@ function Invoke-VaultDocumentsVerify {
 
             if (-not $haveSource) {
                 $row.Status = 'MISSING_ON_SOURCE'
-                if ($staged.Count) { $row.TargetBytes = $staged[0].Size }
+                if ($staged.Count) {
+                    $row.TargetBytes = $staged[0].Size
+                    $row.TargetPath  = $staged[0].Path
+                    if (-not $row.Name) { $row.Name = $staged[0].Name }
+                }
                 Write-VaultLog "$prefix - MISSING_ON_SOURCE" 'ERROR'
             }
             elseif (-not $staged.Count) {
@@ -445,6 +453,7 @@ function Invoke-VaultDocumentsVerify {
                 $match = @($staged | Where-Object { $_.Name -eq $srcName }) | Select-Object -First 1
                 if (-not $match) { $match = $staged[0] }
                 $row.TargetBytes = $match.Size
+                $row.TargetPath  = $match.Path
 
                 if ($Depth -eq 'DEEP') {
                     Assert-VaultDiskBudget -Path $c.Scratch -Needed ($srcSize * 2) -ReserveMB $c.ReserveMB
