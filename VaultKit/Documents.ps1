@@ -41,17 +41,59 @@ function ConvertTo-VaultStagingPath {
 $script:VaultMadeFolders = @{}
 
 function ConvertTo-VaultStagingName {
-    # A Vault document filename is not a path segment, and real ones contain "/":
-    # "Extension for providing representations re: data protection eligibility - HC to
-    # Torys/Extension..." is one, and so is anything with "INO/..." in it. Joining that
-    # straight into a staging path invents folder levels nobody created, and the upload
-    # fails with "The parent folder [...] cannot be found" - two documents in every two
-    # hundred, so it appears only once a run is big enough.
+    # A Vault document filename is not a path segment. Make it into one.
     #
-    # Only the separators are replaced. Everything else is left exactly as Vault has it,
-    # because the name is what someone will look for on the other side.
-    param([Parameter(Mandatory)][AllowEmptyString()][string]$Name)
-    return ($Name -replace '[\\/]', '_')
+    # Deliberately NOT an encoding. Base64 would be safe and unreadable, and the
+    # readability is the point: someone loading this extract on the other side has to
+    # recognise what they are looking at. The exact original is recorded in the results
+    # file next to the path it was written to, so nothing is lost by not encoding it -
+    # the mapping lives in the manifest, where it can be read.
+    #
+    # Only what actually breaks is changed, and nothing else, because every character
+    # replaced here is one that stops matching what the source calls the file:
+    #
+    #   / and \   invent path levels that were never created, and the upload fails with
+    #             "The parent folder [...] cannot be found". This is the one that got us.
+    #   control   characters cannot survive a URL or a filesystem.
+    #   trailing  dots and spaces are silently stripped by Windows, so a name ending in
+    #             one never matches itself again on the way back.
+    #   length    a long name plus /u11013315/wave3/<id>/ can exceed both the local
+    #             260-character path limit and Vault's own.
+    #
+    # : * ? " < > | are left alone. Vault accepts them in a staging path - "re: data
+    # protection eligibility" is already there - and replacing them would rename files
+    # that work today, so a re-run would upload a second copy under the new name and
+    # leave both.
+    #
+    # Idempotent on purpose: running it over an already converted name returns the same
+    # name, so a resumed run looks for what the first run wrote.
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Name,
+        [int]$MaxLength = 150,
+        [string]$Fallback = 'unnamed'
+    )
+
+    $out = $Name -replace '[\\/]', '_'
+    $out = ($out.ToCharArray() | ForEach-Object { if ([int]$_ -lt 32 -or [int]$_ -eq 127) { '_' } else { $_ } }) -join ''
+    $out = $out.Trim()
+    $out = $out -replace '[\s.]+$', ''
+
+    if ($out.Length -gt $MaxLength) {
+        # Truncate the stem, keep the extension: a name that loses its .pdf stops being
+        # openable, and the extension is the part a loader keys on.
+        $ext = [IO.Path]::GetExtension($out)
+        if ($ext.Length -gt 20) { $ext = '' }   # not an extension, just a dot late in a long name
+        $keep = $MaxLength - $ext.Length
+        if ($keep -lt 1) { $keep = $MaxLength; $ext = '' }
+        $out = $out.Substring(0, $keep).TrimEnd() + $ext
+    }
+
+    # CON, PRN, AUX, NUL, COM1-9, LPT1-9 are device names on Windows, with or without an
+    # extension. A file called NUL.pdf cannot be written to disk at all.
+    if ($out -match '^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(\.|$)') { $out = "_$out" }
+
+    if (-not $out) { $out = $Fallback }
+    return $out
 }
 
 function New-VaultStagingFolder {
@@ -155,6 +197,11 @@ function Send-VaultStagingPart {
                 $detail = $er.ReadToEnd(); $er.Dispose()
             } catch { }
 
+            if ($status -eq 401 -and $attempt -lt $MaxRetries) {
+                Write-VaultLog "$($Context.TargetHost) HTTP 401 on part $PartNumber - renewing the session" 'WARN'
+                [void](Reset-VaultSession -VaultHost $Context.TargetHost -ApiVersion $Context.Api)
+                continue
+            }
             if ($status -eq 429 -and $attempt -lt $MaxRetries) {
                 Write-VaultLog "$($Context.TargetHost) HTTP 429 on part $PartNumber - waiting 60s" 'WARN'
                 Start-Sleep -Seconds 60
@@ -279,7 +326,7 @@ Uploading into Inbox is not neutral - it creates Staged documents.
         $i++
         $prefix = "[$i/$($ids.Count)] doc $id"
         $record = [ordered]@{
-            Id = $id; Name = ''; SizeBytes = 0; TargetPath = ''; Parts = 0
+            Id = $id; Name = ''; StagedName = ''; SizeBytes = 0; DeclaredBytes = 0; TargetPath = ''; Parts = 0
             Status = ''; Message = ''
             StartedUtc = (Get-Date).ToUniversalTime().ToString('s'); FinishedUtc = ''
         }
@@ -309,14 +356,36 @@ Uploading into Inbox is not neutral - it creates Staged documents.
                 Write-VaultLog "$prefix - downloading $(Format-VaultBytes $size)"
                 $local = Save-VaultFile -VaultHost $c.SourceHost -ApiVersion $c.Api `
                              -Path "/objects/documents/$id/file" -Destination $c.Scratch
-                $record.SizeBytes = $local.Size
-                $record.Name      = $local.OriginalName
+                $record.SizeBytes     = $local.Size
+                $record.DeclaredBytes = $size
+                $record.Name          = $local.OriginalName
+
+                # A short read is the failure mode with no symptom: the file uploads,
+                # Vault accepts it, and nobody finds out until someone opens it. Warned
+                # rather than failed, because size__v is not yet proven to equal the
+                # source file length for every document type - both numbers are recorded
+                # so the answer is in the results rather than in someone's memory.
+                if ($size -gt 0 -and $local.Size -ne $size) {
+                    $record.Message = "Vault declared $size bytes, $($local.Size) arrived"
+                    Write-VaultLog "$prefix - SIZE $($record.Message)" 'WARN'
+                }
+                if ($local.Size -eq 0) {
+                    throw "the source file came back empty (Vault declared $size bytes)"
+                }
 
                 # Vault's own name, with path separators alone made safe. The local
                 # scrub is far broader - it strips every character Windows forbids - and
                 # using that here would rename files for reasons the target does not
                 # share.
-                $remote = $folder + '/' + (ConvertTo-VaultStagingName $local.OriginalName)
+                $stagedName = ConvertTo-VaultStagingName $local.OriginalName
+                $record.StagedName = $stagedName
+                if ($stagedName -cne $local.OriginalName) {
+                    # Said out loud, in the results and the log. A file quietly landing
+                    # under a name nobody chose is how "it is not there" gets reported
+                    # about something that is.
+                    Write-VaultLog "$prefix - written as '$stagedName' (source name is not a legal path segment)" 'WARN'
+                }
+                $remote = $folder + '/' + $stagedName
                 $record.TargetPath = $remote
                 New-VaultStagingFolder -Context $c -Path $folder
 
@@ -521,7 +590,7 @@ function Invoke-VaultDocumentsVerify {
             # where it was looked for. Replaced with the file's full path the moment one
             # is found, which is what `stage` writes and what can be pasted into a
             # staging listing or a load.
-            Id = $id; Name = ''; SourceBytes = 0; TargetBytes = 0; TargetPath = $folder
+            Id = $id; Name = ''; StagedName = ''; SourceBytes = 0; TargetBytes = 0; TargetPath = $folder
             SourceMd5 = ''; TargetMd5 = ''; Method = $Depth; Status = ''; Message = ''
         }
         $srcFile = $null; $tgtFile = $null
@@ -567,14 +636,37 @@ function Invoke-VaultDocumentsVerify {
                 if ($onTarget.Count -gt 1) {
                     $row.Message = "$($onTarget.Count) files in ${folder}: " + (($onTarget | ForEach-Object { $_.Name }) -join ', ')
                 }
-                # Matched against the name as it was WRITTEN, which is the source name
-                # with separators replaced - otherwise every document whose name held a
-                # slash looks like a name mismatch and falls through to the first file.
+                # The FOLDER identifies the document - it is named for the source id,
+                # and the transfer writes one file into it. So the file is chosen by
+                # being the one that is there, not by its name.
+                #
+                # Matching on name instead made correctness depend on reproducing the
+                # sanitiser exactly: change how an illegal character is replaced and
+                # every file written by an earlier run stops matching, then falls
+                # through to "the first one" and is silently checked anyway. The name is
+                # still reported, and a difference is still flagged - it just no longer
+                # decides anything.
                 $wanted = ConvertTo-VaultStagingName $srcName
-                $match = @($onTarget | Where-Object { $_.Name -eq $wanted }) | Select-Object -First 1
-                if (-not $match) { $match = $onTarget[0] }
+                if ($onTarget.Count -eq 1) { $match = $onTarget[0] }
+                else {
+                    $match = @($onTarget | Where-Object { $_.Name -eq $wanted }) | Select-Object -First 1
+                    if (-not $match) {
+                        $row.Status  = 'AMBIGUOUS'
+                        $row.Message = "$($onTarget.Count) files in ${folder} and none named '$wanted': " +
+                                       (($onTarget | ForEach-Object { $_.Name }) -join ', ')
+                        Write-VaultLog "$prefix - AMBIGUOUS $($row.Message)" 'ERROR'
+                        $bad++
+                        $checked++
+                        Add-VaultResult -Results $results -Row ([pscustomobject]$row)
+                        continue
+                    }
+                }
                 $row.TargetBytes = $match.Size
                 $row.TargetPath  = $match.Path
+                $row.StagedName  = $match.Name
+                if ($match.Name -cne $srcName) {
+                    $row.Message = (@($row.Message, "source calls it '$srcName'") | Where-Object { $_ }) -join ' | '
+                }
 
                 if ($Depth -eq 'DEEP') {
                     Assert-VaultDiskBudget -Path $c.Scratch -Needed ($srcSize * 2) -ReserveMB $c.ReserveMB

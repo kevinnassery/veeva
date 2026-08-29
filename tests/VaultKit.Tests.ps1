@@ -120,11 +120,38 @@ T 'resume does NOT mark ERROR' { if($r2.Done.ContainsKey('b')){throw 'b wrongly 
 T 'prior rows carried forward'  { Eq $r2.Prior.Count 2 'prior' }
 
 Write-Host "== Staging names =="
-T 'slash in a filename is neutralised' { Eq (ConvertTo-VaultStagingName 'HC to Torys/Extension.pdf') 'HC to Torys_Extension.pdf' 'slash' }
-T 'backslash too'                      { Eq (ConvertTo-VaultStagingName 'a\b.pdf') 'a_b.pdf' 'backslash' }
-T 'every separator, not just the first'{ Eq (ConvertTo-VaultStagingName 'a/b/c.pdf') 'a_b_c.pdf' 'all' }
-T 'colons and spaces are kept'         { Eq (ConvertTo-VaultStagingName 're: data (final) v2.pdf') 're: data (final) v2.pdf' 'kept' }
-T 'ordinary name untouched'            { Eq (ConvertTo-VaultStagingName 'Cover Letter.pdf') 'Cover Letter.pdf' 'plain' }
+T 'slash is neutralised'        { Eq (ConvertTo-VaultStagingName 'HC to Torys/Extension.pdf') 'HC to Torys_Extension.pdf' 'slash' }
+T 'backslash too'               { Eq (ConvertTo-VaultStagingName 'a\b.pdf') 'a_b.pdf' 'backslash' }
+T 'every separator, not one'    { Eq (ConvertTo-VaultStagingName 'a/b/c.pdf') 'a_b_c.pdf' 'all' }
+T 'colons and spaces kept'      { Eq (ConvertTo-VaultStagingName 're: data (final) v2.pdf') 're: data (final) v2.pdf' 'kept' }
+T 'ordinary name untouched'     { Eq (ConvertTo-VaultStagingName 'Cover Letter.pdf') 'Cover Letter.pdf' 'plain' }
+T 'idempotent'                  { $once = ConvertTo-VaultStagingName 'a/b.pdf'; Eq (ConvertTo-VaultStagingName $once) $once 'twice' }
+T 'control chars removed'       { Eq (ConvertTo-VaultStagingName "a$([char]9)b.pdf") 'a_b.pdf' 'tab' }
+T 'trailing dot dropped'        { Eq (ConvertTo-VaultStagingName 'report.pdf.') 'report.pdf' 'dot' }
+T 'trailing space dropped'      { Eq (ConvertTo-VaultStagingName 'report.pdf  ') 'report.pdf' 'space' }
+T 'device name is escaped'      { Eq (ConvertTo-VaultStagingName 'NUL.pdf') '_NUL.pdf' 'nul' }
+T 'device name alone escaped'   { Eq (ConvertTo-VaultStagingName 'CON') '_CON' 'con' }
+T 'ordinary CONTRACT is not'    { Eq (ConvertTo-VaultStagingName 'CONTRACT.pdf') 'CONTRACT.pdf' 'contract' }
+T 'long name keeps extension'   { $n = ('x' * 300) + '.pdf'; $r = ConvertTo-VaultStagingName $n; Eq $r.Length 150 'len'; if(-not $r.EndsWith('.pdf')){ throw 'lost the extension' } }
+T 'empty name gets a fallback'  { Eq (ConvertTo-VaultStagingName '   ') 'unnamed' 'empty' }
+T 'all-separator name too'      { Eq (ConvertTo-VaultStagingName '/') '_' 'slashonly' }
+
+Write-Host "== Content-Disposition names =="
+# Built from char codes, not typed literally: Windows PowerShell 5.1 reads a .ps1 with no
+# BOM as ANSI, so a non-ASCII character in this file would be corrupted before the test
+# it is meant to check ever ran.
+$e     = [char]0xE9
+$want  = "Rapport d${e}tude.pdf"
+$rfc   = 'attachment; filename="Rapport.pdf"; filename*=UTF-8' + "''" + 'Rapport%20d%C3%A9tude.pdf'
+$moji  = [Text.Encoding]::GetEncoding(28591).GetString([Text.Encoding]::UTF8.GetBytes($want))
+
+T 'plain filename'             { Eq (Get-VaultAttachmentName -Header 'attachment; filename="Cover Letter.pdf"') 'Cover Letter.pdf' 'plain' }
+T 'unquoted filename'          { Eq (Get-VaultAttachmentName -Header 'attachment; filename=report.pdf') 'report.pdf' 'unquoted' }
+T 'filename* beats the ascii'  { Eq (Get-VaultAttachmentName -Header $rfc) $want 'rfc5987' }
+T 'latin-1 mojibake recovered' { Eq (Get-VaultAttachmentName -Header "attachment; filename=`"$moji`"") $want 'utf8' }
+T 'real latin-1 is left alone' { Eq (Get-VaultAttachmentName -Header "attachment; filename=`"caf${e}.pdf`"") "caf${e}.pdf" 'latin1' }
+T 'no header gives nothing'    { Eq (Get-VaultAttachmentName -Header '') '' 'empty' }
+T 'no filename gives nothing'  { Eq (Get-VaultAttachmentName -Header 'attachment') '' 'none' }
 
 Write-Host "== Results snapshot =="
 $snapDir = Join-Path $tmp ('vk3-'+[guid]::NewGuid().ToString('N')); New-Item -ItemType Directory -Force $snapDir|Out-Null

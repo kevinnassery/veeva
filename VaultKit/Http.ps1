@@ -74,6 +74,15 @@ function Invoke-VaultApi {
             $status = $null
             try { if ($ex.Response) { $status = [int]$ex.Response.StatusCode } } catch { }
 
+            if ($status -eq 401 -and $attempt -lt $MaxRetries) {
+                # A raw 401 carries no JSON body, so the INVALID_SESSION_ID handling
+                # above never sees it - that only fires when Vault answers 200 with a
+                # FAILURE payload. Without this a session expiring mid-run fails every
+                # remaining call instead of renewing once.
+                Write-VaultLog "$VaultHost HTTP 401 - renewing the session" 'WARN'
+                [void](Reset-VaultSession -VaultHost $VaultHost -ApiVersion $ApiVersion)
+                continue
+            }
             if ($status -eq 429 -and $attempt -lt $MaxRetries) {
                 Write-VaultLog "$VaultHost HTTP 429 - waiting 60s (attempt $attempt/$MaxRetries)" 'WARN'
                 Start-Sleep -Seconds 60
@@ -94,6 +103,42 @@ function Invoke-VaultApi {
         }
     }
     throw "$VaultHost $Method $Path failed after $MaxRetries attempts"
+}
+
+function Get-VaultAttachmentName {
+    # The filename out of a Content-Disposition header, decoded properly.
+    #
+    # Two traps, both of which produce a wrong name rather than an error:
+    #
+    # RFC 5987 puts the reliable value in filename*, percent-encoded and tagged with its
+    # charset, and servers send a plain ASCII-mangled filename beside it for old clients.
+    # A regex that takes whichever comes first takes the mangled one.
+    #
+    # .NET decodes header bytes as latin-1. A UTF-8 name therefore arrives as mojibake -
+    # an e-acute comes back as two characters - and it is a valid string, so nothing
+    # complains. Re-reading those bytes as UTF-8 recovers it; if that fails, the name was
+    # genuinely latin-1 and is kept as it was.
+    #
+    # This file stays ASCII. Windows PowerShell 5.1 reads a .ps1 with no BOM as ANSI, so
+    # a non-ASCII character here - even in a comment - is not the character that was
+    # written.
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Header)
+    if (-not $Header) { return '' }
+
+    if ($Header -match "filename\*\s*=\s*(?:UTF-8|utf-8)''([^;]+)") {
+        try { return [Uri]::UnescapeDataString($Matches[1].Trim()) } catch { }
+    }
+    if ($Header -match 'filename\s*=\s*"?([^";]+)"?') {
+        $raw = $Matches[1].Trim().Trim('"')
+        try {
+            $bytes = [Text.Encoding]::GetEncoding(28591).GetBytes($raw)   # latin-1, as .NET read it
+            $utf8  = [Text.Encoding]::UTF8.GetString($bytes)
+            if ($utf8 -and ($utf8 -notmatch [char]0xFFFD)) { return $utf8 }
+        }
+        catch { }
+        return $raw
+    }
+    return ''
 }
 
 function Save-VaultFile {
@@ -118,12 +163,7 @@ function Save-VaultFile {
     $resp = $req.GetResponse()
     try {
         $name = $FileName
-        if (-not $name) {
-            $cd = $resp.Headers['Content-Disposition']
-            if ($cd -and $cd -match 'filename\*?=(?:UTF-8'''')?"?([^";]+)"?') {
-                $name = [Uri]::UnescapeDataString($Matches[1]).Trim('"')
-            }
-        }
+        if (-not $name) { $name = Get-VaultAttachmentName -Header "$($resp.Headers['Content-Disposition'])" }
         if (-not $name) { $name = 'download' }
 
         # Scrub for the local filesystem only. Whatever goes back OUT to Vault must use
