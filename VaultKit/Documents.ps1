@@ -413,19 +413,26 @@ function Invoke-VaultDocumentsList {
     # Now the files, which needs the recursive listing. Reported per document so a folder
     # holding none - a transfer that made the folder and then failed - is visible rather
     # than averaged away.
-    $files = 0; $bytes = [long]0
+    # Only files inside the document folders are counted. The wave path may hold plenty
+    # that is not ours - Inbox, other waves, anything a person put there - and folding
+    # that into the totals reports someone else's 8,000 files as this migration's work.
+    $known = @{}
+    foreach ($i in $ids) { $known["$i"] = $true }
+
+    $files = 0; $bytes = [long]0; $skipped = 0
     $perDoc = @{}
     $next = "/services/file_staging/items/$(ConvertTo-VaultStagingPath $c.TargetPath)?recursive=true&limit=1000"
     while ($next) {
         $r = Invoke-VaultApi -VaultHost $c.TargetHost -ApiVersion $c.Api -Method GET -Path $next
         foreach ($d in @(Get-VaultField $r 'data' @())) {
             if ("$(Get-VaultField $d 'kind' '')" -ne 'file') { continue }
-            $files++
-            $bytes += [long]"$(Get-VaultField $d 'size' 0)"
             $path = "$(Get-VaultField $d 'path' '')"
             $rel  = $path.Substring([math]::Min($path.Length, $c.TargetPath.TrimEnd('/').Length)).Trim('/')
             $docId = ($rel -split '/')[0]
-            if ($docId) { $perDoc[$docId] = 1 + [int]$perDoc[$docId] }
+            if (-not $docId -or -not $known.ContainsKey($docId)) { $skipped++; continue }
+            $files++
+            $bytes += [long]"$(Get-VaultField $d 'size' 0)"
+            $perDoc[$docId] = 1 + [int]$perDoc[$docId]
         }
         $next = "$(Get-VaultField (Get-VaultField $r 'responseDetails' $null) 'next_page' '')"
     }
@@ -433,7 +440,10 @@ function Invoke-VaultDocumentsList {
     $empty = @($ids | Where-Object { -not $perDoc.ContainsKey($_) })
     $multi = @($perDoc.Keys | Where-Object { $perDoc[$_] -gt 1 })
 
-    Write-VaultLog "$files file(s), $(Format-VaultBytes $bytes)" 'OK'
+    Write-VaultLog "$files file(s) in those folders, $(Format-VaultBytes $bytes)" 'OK'
+    if ($skipped) {
+        Write-VaultLog "$skipped file(s) under $($c.TargetPath) are outside the document folders and were not counted"
+    }
     if ($empty.Count) {
         Write-VaultLog "$($empty.Count) folder(s) hold no file - a transfer made the folder and did not finish: $(($empty | Select-Object -First 5) -join ', ')" 'WARN'
     }
@@ -513,20 +523,24 @@ function Invoke-VaultDocumentsVerify {
             $row.Name        = $srcName
             $row.SourceBytes = $srcSize
 
-            $staged = @()
-            try { $staged = @(Get-VaultStagingItems -Context $c -Path $folder) }
-            catch { $staged = @() }
+            # NOT $staged: PowerShell variable names are case-insensitive, so a local
+            # $staged and the -Staged parameter are one variable. Assigning the folder
+            # listing to it threw "Cannot convert System.Object[] to SwitchParameter" on
+            # every single document, the moment -Staged was added.
+            $onTarget = @()
+            try { $onTarget = @(Get-VaultStagingItems -Context $c -Path $folder) }
+            catch { $onTarget = @() }
 
             if (-not $haveSource) {
                 $row.Status = 'MISSING_ON_SOURCE'
-                if ($staged.Count) {
-                    $row.TargetBytes = $staged[0].Size
-                    $row.TargetPath  = $staged[0].Path
-                    if (-not $row.Name) { $row.Name = $staged[0].Name }
+                if ($onTarget.Count) {
+                    $row.TargetBytes = $onTarget[0].Size
+                    $row.TargetPath  = $onTarget[0].Path
+                    if (-not $row.Name) { $row.Name = $onTarget[0].Name }
                 }
                 Write-VaultLog "$prefix - MISSING_ON_SOURCE" 'ERROR'
             }
-            elseif (-not $staged.Count) {
+            elseif (-not $onTarget.Count) {
                 $row.Status  = 'MISSING_ON_TARGET'
                 $row.Message = "nothing in $folder"
                 Write-VaultLog "$prefix - MISSING_ON_TARGET ($folder is empty or absent)" 'ERROR'
@@ -535,11 +549,11 @@ function Invoke-VaultDocumentsVerify {
                 # One file per folder is what the transfer writes. More than one means a
                 # re-run under a changed filename, and reporting the first silently would
                 # hide it.
-                if ($staged.Count -gt 1) {
-                    $row.Message = "$($staged.Count) files in ${folder}: " + (($staged | ForEach-Object { $_.Name }) -join ', ')
+                if ($onTarget.Count -gt 1) {
+                    $row.Message = "$($onTarget.Count) files in ${folder}: " + (($onTarget | ForEach-Object { $_.Name }) -join ', ')
                 }
-                $match = @($staged | Where-Object { $_.Name -eq $srcName }) | Select-Object -First 1
-                if (-not $match) { $match = $staged[0] }
+                $match = @($onTarget | Where-Object { $_.Name -eq $srcName }) | Select-Object -First 1
+                if (-not $match) { $match = $onTarget[0] }
                 $row.TargetBytes = $match.Size
                 $row.TargetPath  = $match.Path
 

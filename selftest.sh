@@ -28,8 +28,8 @@ for f in VaultKit/*.ps1; do
 done
 
 echo "== scripts parse and call only defined commands =="
-if $PS -NoProfile -File check-scripts.ps1 2>&1 | grep -q '^FAIL\|^PARSE'; then
-  $PS -NoProfile -File check-scripts.ps1 2>&1 | grep '^FAIL\|^PARSE' | sed 's/^/  /'
+if $PS -NoProfile -File check-scripts.ps1 2>&1 | grep -q '^FAIL\|^PARSE\|^SHADOW'; then
+  $PS -NoProfile -File check-scripts.ps1 2>&1 | grep '^FAIL\|^PARSE\|^SHADOW' | sed 's/^/  /'
   bad "check-scripts"
 else
   ok "check-scripts ($($PS -NoProfile -File check-scripts.ps1 2>&1 | grep -c '^OK') scripts)"
