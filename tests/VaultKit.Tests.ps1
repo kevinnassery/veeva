@@ -1,9 +1,16 @@
 $ErrorActionPreference = 'Stop'
 $here = (Split-Path -Parent $PSScriptRoot)
-$pass = 0; $fail = 0
+# Not $env:TMPDIR: that is a Unix variable, and these scripts run on Windows, where it
+# is unset and every Join-Path against it throws before a single test runs.
+$tmp = [IO.Path]::GetTempPath()
+# $script:, not $global:. A bare `$pass = 0` at the top of a script creates a SCRIPT
+# scoped variable, so incrementing $global:pass throws "cannot be retrieved because it
+# has not been set" on Windows PowerShell 5.1 - which is the only place these scripts
+# run. Every assertion then reported PASS and FAIL at once and the run died on the first.
+$script:pass = 0; $script:fail = 0
 function T($name, $script) {
-  try { & $script; Write-Host "  PASS  $name" -ForegroundColor Green; $global:pass++ }
-  catch { Write-Host "  FAIL  $name -> $_" -ForegroundColor Red; $global:fail++ }
+  try { & $script; Write-Host "  PASS  $name" -ForegroundColor Green; $script:pass++ }
+  catch { Write-Host "  FAIL  $name -> $_" -ForegroundColor Red; $script:fail++ }
 }
 function Eq($a,$b,$m){ if("$a" -ne "$b"){ throw "$m (got '$a', want '$b')" } }
 
@@ -12,7 +19,7 @@ Set-StrictMode -Version 2.0
 foreach($p in 'Log','Config','Auth','Http','Ids','Run','Attachments'){ . (Join-Path $here "VaultKit/$p.ps1") }
 
 Write-Host "== Config: sectioned ini =="
-$ini = Join-Path $env:TMPDIR 'vk-test.ini'
+$ini = Join-Path $tmp 'vk-test.ini'
 @"
 [vault]
 source = https://src.example.com/ui/#/x
@@ -31,7 +38,7 @@ T 'missing key -> default'       { Eq (Get-VaultSetting -Config $cfg -Section va
 T 'required missing throws'      { $t=$false; try { Get-VaultRequired -Config $cfg -Section vault -Key nope -ConfigPath $ini } catch { $t=$true }; if(-not $t){throw 'did not throw'} }
 
 Write-Host "== Auth: session file, keyed by host =="
-$env:_VK = Join-Path $env:TMPDIR ('vk-sess-'+[guid]::NewGuid().ToString('N'))
+$env:_VK = Join-Path $tmp ('vk-sess-'+[guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Force $env:_VK | Out-Null
 $script:VaultSessionPath = Join-Path $env:_VK '.vault-session.json'
 $script:VaultSessions = @{}
@@ -54,14 +61,14 @@ T 'relative path gets api prefix' { $u = if('/objects/x' -match '^https?://'){'x
 T 'next_page not double-prefixed' { $u = if('/api/v26.2/query/tok' -match '^/api/'){"https://h/api/v26.2/query/tok"}else{'wrong'}; Eq $u 'https://h/api/v26.2/query/tok' 'np' }
 
 Write-Host ""
-Write-Host ("RESULT: {0} passed, {1} failed" -f $pass, $fail)
 if ($fail){ exit 1 }
-$ErrorActionPreference='Stop'; $here=(Split-Path -Parent $PSScriptRoot); $pass=0;$fail=0
-function T($n,$s){ try{ & $s; Write-Host "  PASS  $n" -ForegroundColor Green; $global:pass++ }catch{ Write-Host "  FAIL  $n -> $_" -ForegroundColor Red; $global:fail++ } }
+# The second half of this file was a separate suite once. Its preamble is gone: it reset
+# the counters mid-run, so the final RESULT reported only the tests below this line - 12
+# of 26 - and a failure in the first half could not have changed the exit code.
 function Eq($a,$b,$m){ if("$a" -ne "$b"){ throw "$m (got '$a' want '$b')" } }
 Set-StrictMode -Version 2.0
 foreach($p in 'Log','Config','Auth','Http','Ids','Run','Attachments'){ . (Join-Path $here "VaultKit/$p.ps1") }
-$td = Join-Path $env:TMPDIR ('vk2-'+[guid]::NewGuid().ToString('N')); New-Item -ItemType Directory -Force $td|Out-Null
+$td = Join-Path $tmp ('vk2-'+[guid]::NewGuid().ToString('N')); New-Item -ItemType Directory -Force $td|Out-Null
 Push-Location $td
 
 Write-Host "== Ids: id map, real-export shapes =="
