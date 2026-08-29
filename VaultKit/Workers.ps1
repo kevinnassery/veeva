@@ -156,7 +156,10 @@ function Invoke-VaultShardedRun {
             Write-VaultLog "worker $w started (pid $($procs[-1].Id)) with $($shards[$w].Count) item(s)"
         }
 
-        Write-VaultLog "$count worker(s) moving $($Pending.Count) item(s). Per-worker output is under $root"
+        # No verb here on purpose. The summary at the end takes one because it reads
+        # better with it; this line does not need one, and a hardcoded "moving" told an
+        # operator running the validator that 200 documents were being transferred.
+        Write-VaultLog "$count worker(s), $($Pending.Count) item(s). Per-worker output is under $root"
 
         # Progress is read from the workers' own results files - no shared state to
         # contend on, and a stalled worker shows up as a flat count rather than silence.
