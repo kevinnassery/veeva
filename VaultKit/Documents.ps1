@@ -316,7 +316,7 @@ Uploading into Inbox is not neutral - it creates Staged documents.
                    -ExtraArgs @('-TargetPath', "`"$($c.TargetPath)`"")
     }
 
-    $i = 0; $done = 0; $bad = 0; $moved = [long]0
+    $i = 0; $done = 0; $bad = 0; $renamed = 0; $moved = [long]0
     foreach ($id in $ids) {
         if ($results.Done.ContainsKey("$id")) { continue }
         if ($TestCount -gt 0 -and $done -ge $TestCount) {
@@ -380,6 +380,7 @@ Uploading into Inbox is not neutral - it creates Staged documents.
                 $stagedName = ConvertTo-VaultStagingName $local.OriginalName
                 $record.StagedName = $stagedName
                 if ($stagedName -cne $local.OriginalName) {
+                    $renamed++
                     # Said out loud, in the results and the log. A file quietly landing
                     # under a name nobody chose is how "it is not there" gets reported
                     # about something that is.
@@ -415,6 +416,9 @@ Uploading into Inbox is not neutral - it creates Staged documents.
     Report-VaultLeftovers -Scratch $c.Scratch
     Write-VaultLog '----------------------------------------------------------------'
     Write-VaultLog "Moved $done document(s), $bad failed, $(Format-VaultBytes $moved) transferred" $(if ($bad) { 'WARN' } else { 'OK' })
+    if ($renamed) {
+        Write-VaultLog "$renamed document(s) were written under a changed name - the rows where Name and StagedName differ" 'WARN'
+    }
     Write-VaultLog "Results: $($results.Path)"
     $snap = Copy-VaultResultsSnapshot -Path $($results.Path)
     if ($snap) { Write-VaultLog "This run : $snap" }

@@ -221,6 +221,18 @@ function Invoke-VaultShardedRun {
         }
         $merged | Export-Csv -LiteralPath $resultsPath -NoTypeInformation -Encoding UTF8 -WhatIf:$false
 
+        # Counted from the merged rows rather than from each worker, because a rename is
+        # a property of the result and the supervisor only ever sees the workers' output.
+        # Read with Get-VaultField: rows written by an older version have no StagedName,
+        # and under StrictMode reaching for a missing property is a terminating error.
+        $renamed = @($merged | Where-Object {
+            $sn = "$(Get-VaultField $_ 'StagedName' '')"
+            $sn -and ($sn -cne "$(Get-VaultField $_ 'Name' '')")
+        }).Count
+        if ($renamed) {
+            Write-VaultLog "$renamed document(s) were written under a changed name - the rows where Name and StagedName differ" 'WARN'
+        }
+
         $secs = ((Get-Date) - $started).TotalSeconds
         Write-VaultLog '----------------------------------------------------------------'
         Write-VaultLog ("Moved $ok of $($Pending.Count) item(s), $bad failed, in $(Format-VaultDuration $secs) across $count worker(s)") $(if ($bad) { 'WARN' } else { 'OK' })

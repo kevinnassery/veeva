@@ -76,6 +76,21 @@ copy is deleted the moment it lands. One file is on disk at a time, so the disk 
 the size of the largest single document, not the size of the set. Free space is checked
 before every download and the run stops rather than filling the volume.
 
+A filename that is not a legal path segment is written under a changed one — a Vault
+document really can be called `INO/Ikaria Response ... .pdf`, and File Staging treats the
+slash as a folder separator. Only separators, control characters, trailing dots and
+spaces, over-long names and Windows device names are touched; colons, parentheses and
+apostrophes are left as Vault has them.
+
+Every such change is reported: a warning per document as it happens, a count at the end
+of the run, and both names in the results — `Name` is what Vault calls it, `StagedName`
+is what was written. To list them:
+
+```
+Import-Csv document-results.csv | Where-Object { $_.StagedName -and $_.Name -cne $_.StagedName } |
+    Select-Object Id, Name, StagedName, TargetPath
+```
+
 Each document gets its own folder under `[documents] path`, named for its **source id** —
 two documents called `Cover Letter.pdf` are common, and one overwriting the other after a
 twelve-hour transfer is not something to discover afterwards.
