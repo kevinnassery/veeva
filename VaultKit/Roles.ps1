@@ -1437,4 +1437,390 @@ function Invoke-VaultRolesAssign {
     return $stat.Errors
 }
 
+function Get-VaultFoldedName {
+    # Written independently of veeva-roles.ps1's ConvertTo-NameKey, and tested against the
+    # same cases, because a shared folding bug would silently make both tools agree on the
+    # wrong answer. Same contract: drop a trailing __c/__v/__sys, keep letters and digits,
+    # lower case.
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Value)
+    $s = $Value.Trim()
+    foreach ($suffix in @('__c', '__v', '__sys')) {
+        if ($s.EndsWith($suffix)) { $s = $s.Substring(0, $s.Length - $suffix.Length); break }
+    }
+    $sb = New-Object Text.StringBuilder
+    foreach ($ch in $s.ToCharArray()) {
+        if ([char]::IsLetterOrDigit($ch)) { [void]$sb.Append([char]::ToLowerInvariant($ch)) }
+    }
+    return $sb.ToString()
+}
 
+
+
+
+#
+#  Built here rather than shared, and only groups are needed - this checks group
+#  assignments, which is what -Assign Groups writes.
+# ======================================================================================
+
+function Get-VaultGroupIndex {
+    param([Parameter(Mandatory)][string]$VaultHost, [Parameter(Mandatory)][string]$ApiVersion)
+    $byName = @{}
+    $byId   = @{}
+    $r = Invoke-VaultApi -VaultHost $VaultHost -ApiVersion $ApiVersion -Method GET -Path '/objects/groups'
+    foreach ($rec in @(Get-VaultField $r 'groups' @())) {
+        $g = Get-VaultField $rec 'group' $null
+        if ($null -eq $g) { $g = $rec }
+        $id = "$(Get-VaultField $g 'id' '')"
+        if (-not $id) { continue }
+        foreach ($f in @('label__v', 'name__v')) {
+            $n = "$(Get-VaultField $g $f '')"
+            if (-not $n) { continue }
+            $k = Get-VaultFoldedName $n
+            if ($k -and -not $byName.ContainsKey($k)) { $byName[$k] = $id }
+            if (-not $byId.ContainsKey($id)) { $byId[$id] = $n }
+        }
+    }
+    Write-VaultLog "$($byId.Count) group(s) in this vault"
+    return [pscustomobject]@{ ByName = $byName; ById = $byId }
+}
+
+
+# ======================================================================================
+#  Current state, read through doc_role__sys
+# ======================================================================================
+
+function Get-VaultCurrentGroups {
+    param(
+        [Parameter(Mandatory)][string]$VaultHost,
+        [Parameter(Mandatory)][string]$ApiVersion,
+        [Parameter(Mandatory)][array]$DocIds,
+        # One document at a time instead of the bulk read, for a vault where the bulk
+        # query is unavailable or disagrees with itself.
+        [switch]$Slow
+    )
+
+    $byKey = @{}
+    $bulk  = -not $Slow
+
+    if ($bulk) {
+        $chunk = 200
+        for ($off = 0; $off -lt $DocIds.Count; $off += $chunk) {
+            $slice = @($DocIds[$off..([math]::Min($off + $chunk - 1, $DocIds.Count - 1))])
+            $vql = "SELECT document_id, role_name__sys, group__sys FROM doc_role__sys WHERE document_id CONTAINS ($($slice -join ','))"
+            $path = '/query'
+            $body = "q=$([Uri]::EscapeDataString($vql))"
+            $pages = 0
+            try {
+                while ($path -and $pages -lt 500) {
+                    $pages++
+                    $r = if ($pages -eq 1) {
+                            Invoke-VaultApi -VaultHost $VaultHost -ApiVersion $ApiVersion -Method POST -Path $path -Body $body `
+                                -ContentType 'application/x-www-form-urlencoded' -MaxRetries 1
+                         } else {
+                            Invoke-VaultApi -VaultHost $VaultHost -ApiVersion $ApiVersion -Method GET -Path $path -MaxRetries 1
+                         }
+                    foreach ($row in @(Get-VaultField $r 'data' @())) {
+                        $d = "$(Get-VaultField $row 'document_id' '')"
+                        $n = "$(Get-VaultField $row 'role_name__sys' '')"
+                        $g = "$(Get-VaultField $row 'group__sys' '')"
+                        if (-not $d -or -not $n -or -not $g) { continue }
+                        $k = "$d|$(Get-VaultFoldedName $n)"
+                        if (-not $byKey.ContainsKey($k)) { $byKey[$k] = @{} }
+                        $byKey[$k][$g] = $true
+                    }
+                    $path = "$(Get-VaultField (Get-VaultField $r 'responseDetails' $null) 'next_page' '')"
+                }
+            }
+            catch {
+                Write-VaultLog "doc_role__sys will not take that query, falling back to one read per document: $_" 'WARN'
+                $bulk = $false
+                break
+            }
+            Write-VaultLog "  read $([math]::Min($off + $chunk, $DocIds.Count)) of $($DocIds.Count)"
+        }
+    }
+
+    if ($bulk) { return [pscustomobject]@{ ByKey = $byKey; Method = 'doc_role__sys (bulk)' } }
+
+    # Fallback. Still not the same call the assign run made for its comparison - it reads
+    # the roles endpoint, which is at least a different query - but the point of the bulk
+    # path is that it is a genuinely separate route, so a fallback is worth saying out loud.
+    $byKey = @{}
+    $i = 0
+    foreach ($docId in $DocIds) {
+        $i++
+        if (($i % 500) -eq 0) { Write-VaultLog "  read $i of $($DocIds.Count)" }
+        try {
+            $r = Invoke-VaultApi -VaultHost $VaultHost -ApiVersion $ApiVersion -Method GET -Path "/objects/documents/$docId/roles"
+            foreach ($role in @(Get-VaultField $r 'documentRoles' @())) {
+                $n = "$(Get-VaultField $role 'name' '')"
+                if (-not $n) { continue }
+                $k = "$docId|$(Get-VaultFoldedName $n)"
+                if (-not $byKey.ContainsKey($k)) { $byKey[$k] = @{} }
+                foreach ($g in @(Get-VaultField $role 'assignedGroups' @())) { $byKey[$k]["$g"] = $true }
+            }
+        }
+        catch { Write-VaultLog "  could not read document ${docId}: $_" 'ERROR' }
+    }
+    return [pscustomobject]@{ ByKey = $byKey; Method = 'one read per document' }
+}
+
+
+function Get-VaultCurrentFacts {
+    # type, subtype and lifecycle for a set of documents, in bulk.
+    #
+    # These are the INPUTS the run's decision rested on: the lifecycle picks the rule, the
+    # type and subtype pick the MDL component. Confirming them checks the premises without
+    # re-running the reasoning - which is the line this tool tries to hold. Re-deriving
+    # what SHOULD be on a document would just be the same logic agreeing with itself.
+    param([Parameter(Mandatory)][string]$VaultHost, [Parameter(Mandatory)][string]$ApiVersion, [Parameter(Mandatory)][array]$DocIds)
+
+    $byId  = @{}
+    $chunk = 200
+    for ($off = 0; $off -lt $DocIds.Count; $off += $chunk) {
+        $slice = @($DocIds[$off..([math]::Min($off + $chunk - 1, $DocIds.Count - 1))])
+        $vql = "SELECT id, type__v, subtype__v, lifecycle__v FROM documents WHERE id CONTAINS ($($slice -join ','))"
+        $path = '/query'
+        $body = "q=$([Uri]::EscapeDataString($vql))"
+        $pages = 0
+        try {
+            while ($path -and $pages -lt 500) {
+                $pages++
+                $r = if ($pages -eq 1) {
+                        Invoke-VaultApi -VaultHost $VaultHost -ApiVersion $ApiVersion -Method POST -Path $path -Body $body `
+                            -ContentType 'application/x-www-form-urlencoded' -MaxRetries 1
+                     } else {
+                        Invoke-VaultApi -VaultHost $VaultHost -ApiVersion $ApiVersion -Method GET -Path $path -MaxRetries 1
+                     }
+                foreach ($row in @(Get-VaultField $r 'data' @())) {
+                    $id = "$(Get-VaultField $row 'id' '')"
+                    if (-not $id) { continue }
+                    $sub = "$(Get-VaultField $row 'subtype__v' '')"
+                    $ty  = "$(Get-VaultField $row 'type__v' '')"
+                    if (-not $sub) { $sub = $ty }
+                    $byId[$id] = [pscustomobject]@{ Type = $ty; Subtype = $sub; Lifecycle = "$(Get-VaultField $row 'lifecycle__v' '')" }
+                }
+                $path = "$(Get-VaultField (Get-VaultField $r 'responseDetails' $null) 'next_page' '')"
+            }
+        }
+        catch {
+            Write-VaultLog "Could not read document facts, so type and lifecycle go unchecked: $_" 'WARN'
+            return @{}
+        }
+    }
+    return $byId
+}
+# --------------------------------------------------------------------------------------
+# The validator
+#
+# Proves that what a run RECORDED as assigned is actually on the documents. It does not
+# work out what ought to be there - re-deriving that would be the same logic agreeing
+# with itself, which proves nothing. It reads the claims out of the results file and
+# checks them against the vault, along with the facts the run's decision rested on.
+#
+# A separate command, run when someone chooses to. Vault ignores group ids it cannot
+# grant and still answers SUCCESS, so a run can report an assignment it did not make -
+# which is exactly the failure this exists to find, and re-running the assign will not
+# fix it.
+# --------------------------------------------------------------------------------------
+
+function Invoke-VaultRolesVerify {
+    param(
+        [Parameter(Mandatory)]$Context,
+        [string]$ResultsFile = '',
+        [switch]$Slow,
+        [int]$Limit = 0
+    )
+    $c = $Context
+
+    $path = $ResultsFile
+    if (-not $path) { $path = Join-Path $c.Out 'role-results.csv' }
+    if (-not (Test-Path -LiteralPath $path)) {
+        throw "No results file at $path. This checks what a run RECORDED; without one there is nothing to check."
+    }
+    Write-VaultLog "  results  $path"
+
+    $rows = @(Import-Csv -LiteralPath $path)
+    $statuses = @{}
+    $claims = New-Object System.Collections.ArrayList
+    foreach ($row in $rows) {
+        $st = "$(Get-VaultField $row 'Status' '')"
+        if ($st) { $statuses[$st] = 1 + $(if ($statuses.ContainsKey($st)) { $statuses[$st] } else { 0 }) }
+        if ($st -ne 'ASSIGNED') { continue }
+        $groups = "$(Get-VaultField $row 'MissingGroups' '')"
+        if (-not $groups) { continue }
+        [void]$claims.Add([pscustomobject]@{
+            DocId     = "$(Get-VaultField $row 'DocId' '')"
+            Role      = "$(Get-VaultField $row 'Role' '')"
+            Lifecycle = "$(Get-VaultField $row 'Lifecycle' '')"
+            Type      = "$(Get-VaultField $row 'Type' '')"
+            Subtype   = "$(Get-VaultField $row 'Subtype' '')"
+            Groups    = @($groups -split ';' | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+        })
+    }
+    Write-VaultLog "$($rows.Count) row(s): $((($statuses.Keys | Sort-Object) | ForEach-Object { "$_=$($statuses[$_])" }) -join ', ')"
+
+    if (-not $claims.Count) {
+        Write-VaultLog 'No ASSIGNED rows carrying groups. Nothing was claimed, so there is nothing to prove.' 'WARN'
+        return 0
+    }
+
+    $docIds = @($claims | ForEach-Object { $_.DocId } | Select-Object -Unique)
+
+    # Trimmed by DOCUMENT, then the claims are filtered to match - not the other way
+    # round. Cutting the claim list first would leave a document half-checked, and a
+    # document that is partly verified is the one thing worse than one that is not.
+    if ($Limit -gt 0 -and $docIds.Count -gt $Limit) {
+        Write-VaultLog "-n $Limit - checking the first $Limit of $($docIds.Count) document(s)" 'WARN'
+        $docIds = @($docIds | Select-Object -First $Limit)
+        $keep   = @{}
+        foreach ($d in $docIds) { $keep[$d] = $true }
+        $claims = @($claims | Where-Object { $keep.ContainsKey($_.DocId) })
+    }
+
+    Write-VaultLog "$($claims.Count) claim(s) over $($docIds.Count) document(s)"
+
+    $groups  = Get-VaultGroupIndex -VaultHost $c.VaultHost -ApiVersion $c.Api
+    $current = Get-VaultCurrentGroups -VaultHost $c.VaultHost -ApiVersion $c.Api -DocIds $docIds -Slow:$Slow
+    $facts   = Get-VaultCurrentFacts  -VaultHost $c.VaultHost -ApiVersion $c.Api -DocIds $docIds
+
+    # One row per DOCUMENT, not per claim. A claim-level file for this scope runs to
+    # hundreds of thousands of rows that nobody can scan; a document is the thing you
+    # filter to a work list and then go and open in the UI. The detail is not lost - the
+    # groups that failed are named in the row.
+    $byDoc = @{}
+    foreach ($claim in $claims) {
+        if (-not $byDoc.ContainsKey($claim.DocId)) { $byDoc[$claim.DocId] = New-Object System.Collections.ArrayList }
+        [void]$byDoc[$claim.DocId].Add($claim)
+    }
+
+    $out  = New-Object System.Collections.ArrayList
+    $stat = @{ Documents = 0; Clean = 0; Missing = 0; Unresolved = 0
+               LifecycleMismatch = 0; TypeMismatch = 0; NotChecked = 0
+               ClaimsConfirmed = 0; ClaimsMissing = 0 }
+
+    foreach ($docId in ($byDoc.Keys | Sort-Object)) {
+        $stat.Documents++
+        $docClaims = @($byDoc[$docId])
+
+        $confirmed = 0
+        $missing   = New-Object System.Collections.ArrayList
+        $unres     = New-Object System.Collections.ArrayList
+        $roles     = New-Object System.Collections.ArrayList
+
+        foreach ($claim in $docClaims) {
+            if ($roles -notcontains $claim.Role) { [void]$roles.Add($claim.Role) }
+            $k    = "$docId|$(Get-VaultFoldedName $claim.Role)"
+            $have = if ($current.ByKey.ContainsKey($k)) { $current.ByKey[$k] } else { @{} }
+            foreach ($gName in $claim.Groups) {
+                $gid = ''
+                $fk  = Get-VaultFoldedName $gName
+                if ($groups.ByName.ContainsKey($fk)) { $gid = $groups.ByName[$fk] }
+                elseif ($gName -match '^\d+$')       { $gid = $gName }
+
+                if (-not $gid)                   { [void]$unres.Add("$($claim.Role): $gName") }
+                elseif ($have.ContainsKey($gid)) { $confirmed++ }
+                else                             { [void]$missing.Add("$($claim.Role): $gName") }
+            }
+        }
+        $stat.ClaimsConfirmed += $confirmed
+        $stat.ClaimsMissing   += $missing.Count
+        if ($unres.Count) { $stat.Unresolved++ }
+
+        # The dimensions the run's decision rested on. Blank where the run did not record
+        # them - older results files carry no Type or Subtype - which is reported as
+        # NOT_RECORDED rather than quietly passing.
+        $recLc  = "$($docClaims[0].Lifecycle)"
+        $recTy  = "$($docClaims[0].Type)"
+        $recSub = "$($docClaims[0].Subtype)"
+        $now    = if ($facts.ContainsKey($docId)) { $facts[$docId] } else { $null }
+
+        function Compare-Dimension {
+            param([string]$Recorded, $Now, [string]$Field)
+            if (-not $Recorded)  { return 'NOT_RECORDED' }
+            if ($null -eq $Now)  { return 'NOT_CHECKED' }
+            $current = "$(Get-VaultField $Now $Field '')"
+            if (-not $current)   { return 'NOT_CHECKED' }
+            if ((Get-VaultFoldedName $Recorded) -eq (Get-VaultFoldedName $current)) { return 'CONFIRMED' }
+            return 'CHANGED'
+        }
+
+        $lcState  = Compare-Dimension -Recorded $recLc  -Now $now -Field 'Lifecycle'
+        $tyState  = Compare-Dimension -Recorded $recTy  -Now $now -Field 'Type'
+        $subState = Compare-Dimension -Recorded $recSub -Now $now -Field 'Subtype'
+
+        if ($lcState -eq 'CHANGED') { $stat.LifecycleMismatch++ }
+        if ($tyState -eq 'CHANGED' -or $subState -eq 'CHANGED') { $stat.TypeMismatch++ }
+        if ($lcState -eq 'NOT_CHECKED') { $stat.NotChecked++ }
+
+        $status =
+            if ($missing.Count)                                  { $stat.Missing++; 'GROUPS_MISSING' }
+            elseif ($lcState -eq 'CHANGED' -or $tyState -eq 'CHANGED' -or $subState -eq 'CHANGED') { 'DIMENSION_CHANGED' }
+            elseif ($unres.Count)                                { 'NAMES_UNRESOLVED' }
+            else                                                 { $stat.Clean++; 'CONFIRMED' }
+
+        if ($status -ne 'CONFIRMED') {
+            $why = if ($missing.Count) { ($missing | Select-Object -First 4) -join '; ' }
+                   elseif ($unres.Count) { ($unres | Select-Object -First 4) -join '; ' }
+                   else { "lifecycle $lcState, type $tyState, subtype $subState" }
+            Write-VaultLog "  doc $docId - $status : $why" $(if ($status -eq 'GROUPS_MISSING') { 'ERROR' } else { 'WARN' })
+        }
+
+        [void]$out.Add([pscustomobject][ordered]@{
+            DocId = $docId
+            Status = $status
+            RolesChecked = $roles.Count
+            GroupsClaimed = $confirmed + $missing.Count + $unres.Count
+            GroupsConfirmed = $confirmed
+            GroupsMissing = $missing.Count
+            MissingDetail = ($missing -join '; ')
+            UnresolvedDetail = ($unres -join '; ')
+            LifecycleRecorded = $recLc
+            LifecycleNow = $(if ($now) { $now.Lifecycle } else { '' })
+            LifecycleCheck = $lcState
+            TypeRecorded = $recTy
+            TypeNow = $(if ($now) { $now.Type } else { '' })
+            TypeCheck = $tyState
+            SubtypeRecorded = $recSub
+            SubtypeNow = $(if ($now) { $now.Subtype } else { '' })
+            SubtypeCheck = $subState
+            CheckedUtc = (Get-Date).ToUniversalTime().ToString('s')
+        })
+    }
+
+    $report = Join-Path $c.Out 'role-validate-results.csv'
+    $out | Export-Csv -LiteralPath $report -NoTypeInformation -Encoding UTF8
+
+    Write-VaultLog '----------------------------------------------------------------'
+    Write-VaultLog "$($stat.Documents) document(s) checked, assignments read by $($current.Method)"
+    Write-VaultLog ("  CONFIRMED           {0}" -f $stat.Clean) 'OK'
+    if ($stat.Missing) {
+        Write-VaultLog ("  GROUPS_MISSING      {0}  ({1} group assignment(s))" -f $stat.Missing, $stat.ClaimsMissing) 'ERROR'
+        Write-VaultLog '  The run recorded these as assigned and the vault does not have them. Vault' 'ERROR'
+        Write-VaultLog '  ignores ids it cannot grant and still reports SUCCESS, so re-running will not' 'ERROR'
+        Write-VaultLog '  fix it. Check whether the account may grant those groups.' 'ERROR'
+    }
+    if ($stat.LifecycleMismatch) {
+        Write-VaultLog ("  lifecycle changed   {0}  - not what the run saw, so its rule choice no longer holds" -f $stat.LifecycleMismatch) 'WARN'
+    }
+    if ($stat.TypeMismatch) {
+        Write-VaultLog ("  type/subtype changed {0} - the run picked its type defaults from a different one" -f $stat.TypeMismatch) 'WARN'
+    }
+    if ($stat.Unresolved) {
+        Write-VaultLog ("  NAMES_UNRESOLVED    {0}  - recorded under a name no group here answers to" -f $stat.Unresolved) 'WARN'
+    }
+    if ($stat.NotChecked) {
+        Write-VaultLog ("  dimensions unchecked {0} - the document facts could not be read" -f $stat.NotChecked) 'WARN'
+    }
+    Write-VaultLog ("  {0} group assignment(s) confirmed in total" -f $stat.ClaimsConfirmed)
+    if ($out.Count -and -not $out[0].TypeRecorded) {
+        Write-VaultLog 'Type and subtype were NOT_RECORDED - this results file predates the run recording them.' 'WARN'
+    }
+    if (-not $stat.Missing -and -not $stat.Unresolved -and -not $stat.LifecycleMismatch -and -not $stat.TypeMismatch) {
+        Write-VaultLog 'Every group the run recorded as assigned is on its document, on the facts it decided from.' 'OK'
+    }
+    Write-VaultLog "Report: $report"
+
+    Write-VaultLog "Report: $report"
+    return $stat.Missing
+}

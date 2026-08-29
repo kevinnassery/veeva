@@ -71,6 +71,8 @@ param(
     [string[]]$Role = @(),
     [string[]]$ExcludeRole = @(),
     [ValidateRange(1, 1000)][int]$BatchSize = 200,
+    # roles verify: read each document's roles individually instead of in bulk.
+    [switch]$Slow,
     # update: go ahead even though a run is holding a lock.
     [switch]$Force,
     # update: fetch this exact commit instead of whatever main points at. Pins a known
@@ -97,7 +99,7 @@ param(
     [int]$Workers = 0
 )
 
-$ScriptVersion = '2026.08.29-28'
+$ScriptVersion = '2026.08.29-30'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -663,8 +665,8 @@ function Invoke-Roles {
     # command will not touch teaches people to say yes without reading.
     param([string]$Action)
 
-    if ($Action -notin @('survey', 'probe', 'plan', 'assign')) {
-        Write-Host 'vault.ps1 roles <survey|probe|plan|assign>' -ForegroundColor Red
+    if ($Action -notin @('survey', 'probe', 'plan', 'assign', 'verify')) {
+        Write-Host 'vault.ps1 roles <survey|probe|plan|assign|verify>' -ForegroundColor Red
         exit 2
     }
 
@@ -686,6 +688,18 @@ function Invoke-Roles {
 
         $ctx = if ($Where) { New-VaultContext -Section 'roles' }
                else        { New-VaultContext -Section 'roles' -MapKey 'map' }
+
+        # A command of its own, and it needs no document list: it reads the claims out
+        # of the results file a run wrote. Never chained onto assign - Vault ignores
+        # group ids it cannot grant and still answers SUCCESS, so the run that made the
+        # claim is the last thing that should be trusted to check it.
+        if ($Action -eq 'verify') {
+            $ctxV = New-VaultContext -Section 'roles'
+            $bad = Invoke-VaultRolesVerify -Context $ctxV -Slow:$Slow -Limit $Limit
+            Write-VaultLog "Log: $script:VaultLogFile"
+            if ($bad -gt 0) { exit 1 }
+            return
+        }
 
         # -Survey does its own single query and needs no document list, so it answers
         # before the enumeration every other mode depends on.
@@ -793,6 +807,7 @@ vault $v
   roles probe              Whether a defaults table is needed, and what it should say
   roles plan               Exactly who would be added to which role. Changes nothing
   roles assign             Fill in the Sharing Settings the migration left empty
+  roles verify             Prove what a run recorded is actually on the documents
   version                  Print the version
   help                     This
 
@@ -814,6 +829,7 @@ Options
   -Defaults <csv>          roles: a defaults table. Overrides [roles] defaults
   -Role / -ExcludeRole     roles: only these roles, or all but these
   -BatchSize <n>           roles: assignments per request (default 200)
+  -Slow                    roles verify: read roles per document, not in bulk
   -Workers <n>             Move the work with n processes. Overrides [limits] workers
   -Depth FAST|DEEP         verify: sizes and recorded MD5, or download both and hash
   -ReplaceDiffering        sync: send same-name attachments whose bytes differ
@@ -844,8 +860,8 @@ host. It holds live tokens: treat it like a password, and log out when finished.
 
 roles reads ONE vault - the target it repairs - so it confirms that one only.
 
-Not yet ported: the roles validator (veeva-validate.ps1 on the oneshot branch),
-submissions import, and the object record pull that get-attachments.bat does today.
+Not yet ported: submissions import, and the object record pull that
+get-attachments.bat does today.
 
 "@
 }

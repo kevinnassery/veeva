@@ -157,6 +157,35 @@ unless `-ReplaceDiffering` is set. Attachments are attached directly to the targ
 document in one upload — no File Staging is involved, because an attachment has somewhere
 to land the moment it arrives.
 
+## Repair the Sharing Settings
+
+A document created through the API or Vault Loader does **not** get the lifecycle's role
+assignment rules or the document type's default security applied — Veeva confirms this is
+by design — so a migrated document arrives with its Sharing Settings empty. Filling them
+in is a separate job from moving the files, and it touches only the **target** vault.
+
+```
+.\vault.ps1 roles survey     what is in scope: subtypes, roles, defaults
+.\vault.ps1 roles probe      whether a defaults table is needed, and what it should say
+.\vault.ps1 roles plan       exactly who would be added to which role
+.\vault.ps1 roles assign     add them
+.\vault.ps1 roles verify     prove what the run recorded is on the documents
+```
+
+The first three change nothing. `assign` never removes anyone and never invents an
+assignment: everything it writes is something the configuration already names as a
+default.
+
+Which documents get repaired comes from `[roles] map` — the target id column — or from
+`-Where "<VQL condition>"`. `survey` and `probe` will sample the vault if given neither,
+and say so; `plan` and `assign` refuse, because guessing the scope of a run that grants
+people access is not the same as guessing the scope of one that reads.
+
+`verify` is its own command and is never chained onto `assign`. Vault ignores group ids
+it cannot grant **and still answers SUCCESS**, so a run can report an assignment it did
+not make — and re-running the assign will not fix it. The run that made the claim is the
+last thing that should be trusted to check it.
+
 ## Going faster
 
 `[limits] workers` starts at 1. Above 1, the command shards what is outstanding, runs
