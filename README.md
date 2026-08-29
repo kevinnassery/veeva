@@ -169,6 +169,12 @@ remaining count by.
 sequentially — there is nothing to parallelise, and five documents should be easy to
 follow.
 
+`documents verify` shards the same way, and wants it more: `DEEP` downloads **both**
+copies of every document, so a full pass moves twice what the migration did and run
+sequentially takes longer than the transfer it is checking. Every call it makes is a
+read, on both vaults. Note that each worker holds two files at once, so eight workers is
+up to sixteen files on disk rather than two.
+
 ## Cheat sheet
 
 | | |

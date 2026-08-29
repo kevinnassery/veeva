@@ -72,6 +72,11 @@ function Invoke-VaultShardedRun {
         [Parameter(Mandatory)][string]$LogPattern,    # e.g. 'documents-stage-*.log'
         [Parameter(Mandatory)][string]$ResultsName,   # e.g. 'document-results.csv'
         [string]$KeyColumn = 'Id',
+        # What a good row looks like for this workflow. The transfer records SUCCESS and
+        # the validator records MATCH, and a supervisor that only knows one of them
+        # counts every row of the other as a failure.
+        [string]$SuccessStatus = 'SUCCESS',
+        [string]$Verb = 'Moved',
         [string[]]$ExtraArgs = @()
     )
     $c     = $Context
@@ -163,7 +168,7 @@ function Invoke-VaultShardedRun {
                 Read-VaultWorkerLog -Dir $wDir -Label "w$w" -Pattern $LogPattern -Offsets $offsets
                 $f = Join-Path $wDir $ResultsName
                 if (Test-Path -LiteralPath $f) {
-                    try { $moved += @(Import-Csv -LiteralPath $f | Where-Object { $_.Status -eq 'SUCCESS' }).Count } catch { }
+                    try { $moved += @(Import-Csv -LiteralPath $f | Where-Object { $_.Status -eq $SuccessStatus }).Count } catch { }
                 }
             }
             $elapsed = ((Get-Date) - $started).TotalSeconds
@@ -203,7 +208,7 @@ function Invoke-VaultShardedRun {
             $f = Join-Path (Join-Path $root "w$w") $ResultsName
             if (-not (Test-Path -LiteralPath $f)) { Write-VaultLog "worker $w produced no results file" 'WARN'; continue }
             foreach ($row in (Import-Csv -LiteralPath $f)) {
-                if ("$(Get-VaultField $row 'Status' '')" -eq 'SUCCESS') { $ok++ } else { $bad++ }
+                if ("$(Get-VaultField $row 'Status' '')" -eq $SuccessStatus) { $ok++ } else { $bad++ }
                 $key = "$(Get-VaultField $row $KeyColumn '')"
                 if ($key) { $fresh[$key] = $row }
             }
@@ -235,7 +240,7 @@ function Invoke-VaultShardedRun {
 
         $secs = ((Get-Date) - $started).TotalSeconds
         Write-VaultLog '----------------------------------------------------------------'
-        Write-VaultLog ("Moved $ok of $($Pending.Count) item(s), $bad failed, in $(Format-VaultDuration $secs) across $count worker(s)") $(if ($bad) { 'WARN' } else { 'OK' })
+        Write-VaultLog ("$Verb $ok of $($Pending.Count) item(s), $bad not $SuccessStatus, in $(Format-VaultDuration $secs) across $count worker(s)") $(if ($bad) { 'WARN' } else { 'OK' })
         Write-VaultLog "Results     : $resultsPath"
         $snap = Copy-VaultResultsSnapshot -Path $resultsPath
         if ($snap) { Write-VaultLog "This run    : $snap" }

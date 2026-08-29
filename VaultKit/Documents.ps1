@@ -313,6 +313,7 @@ Uploading into Inbox is not neutral - it creates Staged documents.
         return Invoke-VaultShardedRun -Context $c -Pending $pending -Workers $c.Workers `
                    -Command @('documents', 'stage') -LogPattern 'documents-stage-*.log' `
                    -ResultsName 'document-results.csv' -KeyColumn 'Id' `
+                   -SuccessStatus 'SUCCESS' -Verb 'Moved' `
                    -ExtraArgs @('-TargetPath', "`"$($c.TargetPath)`"")
     }
 
@@ -576,6 +577,28 @@ function Invoke-VaultDocumentsVerify {
         Write-VaultLog 'Use DEEP to download both copies and compare the bytes.' 'WARN'
     }
     Write-VaultLog "$($ids.Count) document(s) to check ($Depth)"
+
+    # Sharded the same way the transfer is, and for a stronger reason: DEEP downloads
+    # BOTH copies of every document, so a full pass moves twice the bytes the migration
+    # did. Run sequentially that takes longer than the transfer it is checking, and a
+    # check that costs more than the work is a check people skip.
+    #
+    # Safer to parallelise than the transfer, too - every call here is a read, on both
+    # sides. The ids are resolved once, here, and handed to the workers as a shard file,
+    # so -Staged lists the target once rather than once per worker.
+    if ($c.Workers -gt 1 -and $ids.Count -gt 1 -and $TestCount -le 0) {
+        if ($Depth -eq 'DEEP') {
+            # Each worker holds a source copy and a target copy at once, and the disk
+            # check each one makes knows nothing about its siblings. Eight workers is
+            # therefore up to sixteen files on disk, not two.
+            Write-VaultLog "DEEP across $($c.Workers) worker(s) holds up to $($c.Workers * 2) files on disk at once" 'WARN'
+        }
+        return Invoke-VaultShardedRun -Context $c -Pending $ids -Workers $c.Workers `
+                   -Command @('documents', 'verify') -LogPattern 'documents-verify-*.log' `
+                   -ResultsName 'document-validate-results.csv' -KeyColumn 'Id' `
+                   -SuccessStatus 'MATCH' -Verb 'Checked' `
+                   -ExtraArgs @('-Depth', $Depth, '-TargetPath', "`"$($c.TargetPath)`"")
+    }
 
     $results = New-VaultResults -Path (Join-Path $c.Out 'document-validate-results.csv') `
                    -KeyColumn 'Id' -DoneStatuses @() -Existing $c.Existing
