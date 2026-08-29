@@ -191,18 +191,33 @@ function Invoke-VaultShardedRun {
         }
 
         # Merge every worker's rows back into the one results file the operator reads.
-        $merged  = New-Object System.Collections.ArrayList
-        $seen    = @{}
-        foreach ($k in $prior.Keys) { [void]$merged.Add($prior[$k]); $seen["$k"] = $true }
+        #
+        # A worker's row REPLACES the earlier one for the same document. It has to: a
+        # document that failed once and is retried already has a row, and keeping the
+        # older one meant the retry succeeded, was counted as moved, and was still
+        # recorded ERROR - so the next resume retried it again, and so would every
+        # resume after that, for ever.
+        $fresh = @{}
         $ok = 0; $bad = 0
         for ($w = 1; $w -le $count; $w++) {
             $f = Join-Path (Join-Path $root "w$w") $ResultsName
             if (-not (Test-Path -LiteralPath $f)) { Write-VaultLog "worker $w produced no results file" 'WARN'; continue }
             foreach ($row in (Import-Csv -LiteralPath $f)) {
                 if ("$(Get-VaultField $row 'Status' '')" -eq 'SUCCESS') { $ok++ } else { $bad++ }
-                if ($seen.ContainsKey("$(Get-VaultField $row $KeyColumn '')")) { continue }
-                [void]$merged.Add($row)
+                $key = "$(Get-VaultField $row $KeyColumn '')"
+                if ($key) { $fresh[$key] = $row }
             }
+        }
+
+        $merged  = New-Object System.Collections.ArrayList
+        $written = @{}
+        foreach ($k in $prior.Keys) {
+            $key = "$k"
+            if ($fresh.ContainsKey($key)) { [void]$merged.Add($fresh[$key]) } else { [void]$merged.Add($prior[$key]) }
+            $written[$key] = $true
+        }
+        foreach ($key in $fresh.Keys) {
+            if (-not $written.ContainsKey("$key")) { [void]$merged.Add($fresh[$key]) }
         }
         $merged | Export-Csv -LiteralPath $resultsPath -NoTypeInformation -Encoding UTF8 -WhatIf:$false
 
