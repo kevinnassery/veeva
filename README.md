@@ -161,7 +161,16 @@ memory. A failed upload aborts its session rather than leaving it holding quota.
 
 Downloads are pinned to a commit SHA. `raw.githubusercontent.com` caches the branch URL
 for five minutes and ignores no-cache, so pulling from `/main` can hand back the previous
-version of a file — which looks exactly like a fix that did not work.
+version of a file — which looks exactly like a fix that did not work. `update` resolves
+the head commit itself and fetches from that; it prints the SHA, and
+
+```
+.ault.ps1 update -Commit <sha>
+```
+
+fetches that exact commit instead — to pin a known good set, to roll one back, or to get
+a specific version when the branch is being cached. The first `curl` can be pinned the
+same way, by putting the SHA where `main` is in the URL.
 
 ## Reference
 

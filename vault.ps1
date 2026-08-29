@@ -55,6 +55,10 @@ param(
     [string]$TargetPath = '',
     # update: go ahead even though a run is holding a lock.
     [switch]$Force,
+    # update: fetch this exact commit instead of whatever main points at. Pins a known
+    # good version, rolls one back, and bypasses the raw CDN's branch cache outright.
+    [ValidatePattern('^$|^[0-9a-fA-F]{7,40}$')]
+    [string]$Commit = '',
     # Skip the "are these the right two vaults" confirmation.
     [switch]$Yes,
 
@@ -68,7 +72,7 @@ param(
     [int]$Workers = 0
 )
 
-$ScriptVersion = '2026.08.29-1'
+$ScriptVersion = '2026.08.29-2'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -299,15 +303,25 @@ function Invoke-Update {
         Write-Host '  -Force given: updating over a running job.' -ForegroundColor Yellow
     }
 
-    $sha = Get-VaultHeadSha
-    if ($sha) {
+    if ($Commit) {
+        # Asked for by hash: no API call, no branch, nothing to resolve. Immutable, so
+        # the CDN cache cannot serve anything else under it.
+        $sha  = $Commit.ToLowerInvariant()
         $base = "https://raw.githubusercontent.com/$Repo/$sha"
-        Write-Host "Commit : $sha"
+        Write-Host "Commit : $sha (pinned)"
     }
     else {
-        $base = "https://raw.githubusercontent.com/$Repo/main"
-        Write-Host '  WARNING: could not read the head commit - falling back to the main branch.' -ForegroundColor Yellow
-        Write-Host '  Files may be up to five minutes out of date. Check the version below.' -ForegroundColor Yellow
+        $sha = Get-VaultHeadSha
+        if ($sha) {
+            $base = "https://raw.githubusercontent.com/$Repo/$sha"
+            Write-Host "Commit : $sha"
+        }
+        else {
+            $base = "https://raw.githubusercontent.com/$Repo/main"
+            Write-Host '  WARNING: could not read the head commit - falling back to the main branch,' -ForegroundColor Yellow
+            Write-Host '  which the CDN caches for five minutes. Files may be out of date, and an old' -ForegroundColor Yellow
+            Write-Host '  one looks exactly like a fix that did not work. Pass -Commit <sha> to pin.' -ForegroundColor Yellow
+        }
     }
     Write-Host ''
 
@@ -374,6 +388,7 @@ function Invoke-Update {
         }
 
         Write-Host ''
+        if ($sha) { Write-Host "Repeat this exact set with:  .\vault.ps1 update -Commit $sha" }
         if ($versions.Count -eq 1) { Write-Host "All files at version $($versions[0])." }
         elseif ($versions.Count -gt 1) {
             Write-Host "  WARNING: $($versions.Count) different versions in this folder: $($versions -join ', ')" -ForegroundColor Yellow
@@ -623,6 +638,7 @@ Options
   -ReplaceDiffering        sync: send same-name attachments whose bytes differ
   -Existing Resume|Fresh   Keep earlier results, or rotate them aside
   -Yes                     Skip the "are these the right two vaults" confirmation
+  -Commit <sha>            update: fetch this exact commit, not whatever main points at
   -Force                   update: go ahead even though a run holds a lock
   -WhatIf                  Withhold every write to Vault
 
