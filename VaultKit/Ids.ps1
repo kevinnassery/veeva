@@ -69,6 +69,73 @@ function Resolve-VaultInput {
     return $null
 }
 
+function Import-VaultDelimitedFile {
+    # Read a spreadsheet export into rows, whatever shape it arrived in. Returns the rows
+    # and the column names actually used, since a duplicate header gets suffixed.
+    param([Parameter(Mandatory)][string]$Path)
+
+    $resolved = $null
+    foreach ($t in @($Path, [IO.Path]::GetFullPath([IO.Path]::Combine((Get-Location).ProviderPath, $Path)))) {
+        if ($t -and (Test-Path -LiteralPath $t)) { $resolved = (Resolve-Path -LiteralPath $t).ProviderPath; break }
+    }
+    if (-not $resolved) {
+        throw ("Not found. Looked for:`n    {0}" -f
+               [IO.Path]::GetFullPath([IO.Path]::Combine((Get-Location).ProviderPath, $Path)))
+    }
+
+    # Excel's "CSV UTF-8" writes a byte order mark, which Windows PowerShell 5.1 reads as
+    # literal characters glued to the first column name - so source_id arrives as
+    # something no name match would ever find.
+    $bom = $false
+    try {
+        $head3 = New-Object byte[] 3
+        $fsb = [IO.File]::OpenRead($resolved)
+        try { [void]$fsb.Read($head3, 0, 3) } finally { $fsb.Dispose() }
+        if ($head3[0] -eq 0xEF -and $head3[1] -eq 0xBB -and $head3[2] -eq 0xBF) { $bom = $true }
+    } catch { }
+
+    $header = @(Get-Content -LiteralPath $resolved -TotalCount 1)
+    if (-not $header.Count) { throw "$resolved is empty" }
+    $header[0] = $header[0].TrimStart([char]0xFEFF)
+
+    # The delimiter is not implied by the extension. A tab-separated export read as
+    # comma-separated yields one column and a confusing "cannot work out which columns"
+    # error rather than an obvious one.
+    $delims = @{ ',' = ([regex]::Matches($header[0], ',')).Count
+                 "`t" = ([regex]::Matches($header[0], "`t")).Count
+                 ';' = ([regex]::Matches($header[0], ';')).Count
+                 '|' = ([regex]::Matches($header[0], '\|')).Count }
+    $delim = ','; $best = 0
+    foreach ($d in $delims.Keys) { if ($delims[$d] -gt $best) { $best = $delims[$d]; $delim = $d } }
+    if ($best -eq 0) { throw "$resolved has no delimiter in its header: '$($header[0])'. It needs at least two columns." }
+
+    # Import-Csv refuses a sheet with a repeated header - "The member 'Created By' is
+    # already present" - and a real export usually has one. Only a couple of columns
+    # matter, so a duplicate elsewhere must not stop the job.
+    $all = if ($bom) { @(Get-Content -LiteralPath $resolved -Encoding UTF8) }
+           else      { @(Get-Content -LiteralPath $resolved) }
+    if ($all.Count -lt 2) { throw "$resolved has a header but no rows" }
+
+    $names = New-Object System.Collections.ArrayList
+    $used  = @{}
+    $renamed = 0
+    foreach ($raw in ($header[0] -split [regex]::Escape($delim))) {
+        $nm = $raw.Trim().Trim('"')
+        if (-not $nm) { $nm = 'Column' }
+        $base = $nm; $k = 2
+        while ($used.ContainsKey($nm.ToLowerInvariant())) { $nm = "${base}_$k"; $k++; $renamed++ }
+        $used[$nm.ToLowerInvariant()] = $true
+        [void]$names.Add($nm)
+    }
+    if ($renamed) { Write-VaultLog "$renamed duplicate column name(s) in $(Split-Path -Leaf $resolved) suffixed to keep them apart" }
+
+    $rows = @($all | Select-Object -Skip 1 | ConvertFrom-Csv -Header $names -Delimiter $delim)
+    if ($rows.Count -eq 0) { throw "$resolved has a header but no rows" }
+
+    $shown = if ($delim -eq "`t") { 'tab' } else { $delim }
+    return [pscustomobject]@{ Path = $resolved; Rows = $rows; Names = @($names); Delimiter = $shown }
+}
+
 function Import-VaultIdMap {
     # source id -> target id, from a spreadsheet export.
     param(

@@ -55,6 +55,22 @@ param(
     [string]$TargetPath = '',
     # verify: check what is on the target, rather than everything in the id list.
     [switch]$Staged,
+
+    # ---- roles ----
+    # Name the documents with a VQL condition instead of a map.
+    [string]$Where = '',
+    # Where the desired state comes from.
+    [ValidateSet('Lifecycle', 'Document', 'Table')][string]$DesiredFrom = 'Lifecycle',
+    # Assign groups, users, or both.
+    [ValidateSet('Both', 'Groups', 'Users')][string]$Assign = 'Both',
+    # Apply the document type's default security alongside the lifecycle rules.
+    [switch]$WithTypeDefaults,
+    # A defaults table. Overrides [roles] defaults.
+    [string]$Defaults = '',
+    # Only these roles, or all but these.
+    [string[]]$Role = @(),
+    [string[]]$ExcludeRole = @(),
+    [ValidateRange(1, 1000)][int]$BatchSize = 200,
     # update: go ahead even though a run is holding a lock.
     [switch]$Force,
     # update: fetch this exact commit instead of whatever main points at. Pins a known
@@ -81,7 +97,7 @@ param(
     [int]$Workers = 0
 )
 
-$ScriptVersion = '2026.08.29-26'
+$ScriptVersion = '2026.08.29-28'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -96,7 +112,7 @@ $Repo = 'kevinnassery/veeva'
 # The module, in load order, and the manifest `update` fetches. Derived from one list so
 # that adding a part cannot leave it undelivered - a dispatcher calling a function from a
 # file nobody downloads is the failure this arrangement exists to make impossible.
-$VaultKitParts = @('Log', 'Config', 'Auth', 'Http', 'Ids', 'Run', 'Workers', 'Attachments', 'Documents')
+$VaultKitParts = @('Log', 'Config', 'Auth', 'Http', 'Ids', 'Run', 'Workers', 'Attachments', 'Documents', 'Roles')
 
 # vault.ps1 goes LAST: it is the file being executed, and it is the one whose failure to
 # land leaves the least broken folder behind.
@@ -196,6 +212,9 @@ function New-VaultContext {
         Workers    = $nWorkers
         SourceHost = $script:SourceHost
         TargetHost = $script:TargetHost
+        # Roles repairs ONE vault - the target of the migration - so it reads this
+        # rather than choosing between the two.
+        VaultHost  = $script:TargetHost
         Out        = $script:Out
         Scratch    = (New-VaultScratch -Root $script:Out -Name 'scratch')
         Map        = $map
@@ -636,6 +655,119 @@ function Invoke-Documents {
     }
 }
 
+function Invoke-Roles {
+    # Document Sharing Settings a migration left empty.
+    #
+    # ONE vault. This repairs the target of a migration rather than comparing two, so the
+    # source is never consulted and never confirmed - being asked to confirm a vault a
+    # command will not touch teaches people to say yes without reading.
+    param([string]$Action)
+
+    if ($Action -notin @('survey', 'probe', 'plan', 'assign')) {
+        Write-Host 'vault.ps1 roles <survey|probe|plan|assign>' -ForegroundColor Red
+        exit 2
+    }
+
+    Initialize-VaultRun -LogName "roles-$Action"
+    Start-VaultLock -Name 'roles'
+    try {
+        Write-VaultLog "vault $ScriptVersion - roles $Action"
+        if (-not $script:TargetHost) { throw "No vault configured. Set [vault] target = ... in $($script:CfgPath)" }
+        [void](Confirm-VaultSessions -Vaults @(@{ Role = 'target'; Name = $script:TargetHost }) `
+                   -ApiVersion $script:Api -Yes:$Yes)
+
+        $mapSetting = Get-VaultSetting -Config $script:Cfg -Section roles -Key map -Default ''
+        if ($Where -and $mapSetting -and -not $MapFile) {
+            # Both name the documents to repair. The map says what the migration produced;
+            # a query says what matches a condition today, and those stop being the same
+            # set the moment anyone adds a document by hand.
+            Write-VaultLog "-Where given, so [roles] map is ignored for this run" 'WARN'
+        }
+
+        $ctx = if ($Where) { New-VaultContext -Section 'roles' }
+               else        { New-VaultContext -Section 'roles' -MapKey 'map' }
+
+        # -Survey does its own single query and needs no document list, so it answers
+        # before the enumeration every other mode depends on.
+        if ($Action -eq 'survey') {
+            $bad = Invoke-VaultRolesSurvey -Context $ctx -Where $Where
+            Write-VaultLog "Log: $script:VaultLogFile"
+            if ($bad -gt 0) { exit 1 }
+            return
+        }
+
+        # Scope is capped only where this command GUESSED it, never where it was given. A
+        # probe over a named scope surveys all of it: sampling 25 of 577 documents can
+        # miss a subtype entirely and then report that everything is consistent, which is
+        # worse than not having run it.
+        $documents =
+            if ($Where) { Get-VaultDocumentsByQuery -Context $ctx -Where $Where }
+            elseif ($ctx.Map -and $ctx.Map.Count) { @($ctx.Map.Values | Select-Object -Unique) }
+            elseif ($Action -eq 'probe') {
+                Write-VaultLog 'No map or -Where given, so sampling the vault in whatever order it returns.'
+                Write-VaultLog 'This can miss a subtype entirely. Set [roles] map or pass -Where.' 'WARN'
+                Get-VaultDocumentsByQuery -Context $ctx -Where '' -Stop $(if ($Limit -gt 0) { $Limit } else { 200 })
+            }
+            else {
+                # Assign and plan never default to "the whole vault". A probe writes
+                # nothing, so guessing its scope costs an operator some time; guessing the
+                # scope of a run that grants people access costs a great deal more.
+                throw 'No documents named. Set [roles] map, or pass -Where "<VQL condition>".'
+            }
+
+        if ($Action -eq 'probe') {
+            $bad = Invoke-VaultRolesProbe -Context $ctx -Documents $documents -Limit $Limit
+            Write-VaultLog "Log: $script:VaultLogFile"
+            if ($bad -gt 0) { exit 1 }
+            return
+        }
+
+        # -Defaults names a table, so it settles the question on its own. Saying both
+        # -Defaults and -DesiredFrom something else is a contradiction, not a preference.
+        $table = $null
+        $rules = $null
+        $from  = $DesiredFrom
+        $defaultsPath = $Defaults
+        if (-not $defaultsPath) { $defaultsPath = Get-VaultSetting -Config $script:Cfg -Section roles -Key defaults -Default '' }
+
+        if ($defaultsPath) {
+            if ($PSBoundParameters.ContainsKey('DesiredFrom') -and $DesiredFrom -ne 'Table') {
+                throw "-Defaults and -DesiredFrom $DesiredFrom contradict each other. Drop one."
+            }
+            $from = 'Table'
+        }
+        elseif ($from -eq 'Table') {
+            throw '-DesiredFrom Table needs a table. Pass -Defaults, or set [roles] defaults.'
+        }
+
+        switch ($from) {
+            'Table' {
+                $table = Import-VaultDefaultsTable -Path $defaultsPath -Directory (Get-VaultDirectory -Context $ctx)
+                Write-VaultLog 'Desired state: the defaults table.'
+            }
+            'Lifecycle' {
+                $rules = Get-VaultRoleAssignmentRule -Context $ctx -Directory (Get-VaultDirectory -Context $ctx)
+                Write-VaultLog "Desired state: each document's lifecycle role assignment rules."
+                if (-not $rules.Count) {
+                    throw 'No lifecycle role assignment rules were returned, so there is nothing to apply. Check the account can read Admin configuration, or use -DesiredFrom Document.'
+                }
+            }
+            default {
+                Write-VaultLog 'Desired state: the defaultUsers and defaultGroups Vault reports per document.'
+                Write-VaultLog 'Run roles probe if you have not - it says whether those carry the type defaults too.' 'WARN'
+            }
+        }
+
+        $planning = $Plan -or ($Action -eq 'plan')
+        $bad = Invoke-VaultRolesAssign -Context $ctx -Documents $documents -From $from -Table $table -Rules $rules `
+                   -Assign $Assign -WithTypeDefaults:$WithTypeDefaults -Plan:$planning `
+                   -Role $Role -ExcludeRole $ExcludeRole -BatchSize $BatchSize -Test $Test -Limit $Limit
+        Write-VaultLog "Log: $script:VaultLogFile"
+        if ($bad -gt 0) { exit 1 }
+    }
+    finally { Stop-VaultLock }
+}
+
 function Invoke-Help {
     $v = $ScriptVersion
     Write-Host @"
@@ -653,8 +785,14 @@ vault $v
   documents stage          Copy document source files into the target's File Staging
   documents list           How much is on the target already, and whether it looks right
   documents verify         Prove what landed in File Staging matches the source
+
   attachments sync         Deliver document attachments the target is missing
   attachments verify       Prove both vaults hold the same bytes
+
+  roles survey             What is in scope: subtypes, roles, defaults. Changes nothing
+  roles probe              Whether a defaults table is needed, and what it should say
+  roles plan               Exactly who would be added to which role. Changes nothing
+  roles assign             Fill in the Sharing Settings the migration left empty
   version                  Print the version
   help                     This
 
@@ -669,6 +807,13 @@ Options
   -Limit <n>               Cap the input examined
   -TargetPath <path>       documents: overrides [documents] path
   -Staged                  verify: check what is ON the target, not the whole id list
+  -Where <vql>             roles: name the documents by condition instead of a map
+  -DesiredFrom <src>       roles: Lifecycle (default), Document, or Table
+  -Assign Both|Groups|Users  roles: what kind of principal to assign
+  -WithTypeDefaults        roles: apply the document type's defaults as well
+  -Defaults <csv>          roles: a defaults table. Overrides [roles] defaults
+  -Role / -ExcludeRole     roles: only these roles, or all but these
+  -BatchSize <n>           roles: assignments per request (default 200)
   -Workers <n>             Move the work with n processes. Overrides [limits] workers
   -Depth FAST|DEEP         verify: sizes and recorded MD5, or download both and hash
   -ReplaceDiffering        sync: send same-name attachments whose bytes differ
@@ -697,8 +842,10 @@ migrated into can be two different accounts. Pass -Shared when one account cover
 both. Sessions are cached in .vault-session.json beside this script, keyed by vault
 host. It holds live tokens: treat it like a password, and log out when finished.
 
-Not yet ported from legacy\: submissions import, and the object record pull that
-get-attachments.bat does today.
+roles reads ONE vault - the target it repairs - so it confirms that one only.
+
+Not yet ported: the roles validator (veeva-validate.ps1 on the oneshot branch),
+submissions import, and the object record pull that get-attachments.bat does today.
 
 "@
 }
@@ -715,6 +862,7 @@ switch ($verb) {
     'probe'       { Invoke-Probe }
     'attachments' { Invoke-Attachments -Action $sub }
     'documents'   { Invoke-Documents -Action $sub }
+    'roles'       { Invoke-Roles -Action $sub }
     'version'     { Write-Host $ScriptVersion }
     'help'        { Invoke-Help }
     ''            { Invoke-Help }
