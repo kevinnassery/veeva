@@ -24,6 +24,12 @@ attachments-map.csv
 map.csv
 session.txt
 
+document-results.csv
+document-results-*.csv
+document-validate-results.csv
+document-validate-results-*.csv
+documents-*.log
+
 # Run outputs, in case OutputRoot ever points at a clone
 attachment-results.csv
 attachment-results-*.csv
@@ -37,4 +43,8 @@ validate-work/
 old-*/
 .run-*.lock
 .vault-session.json
+scratch/
+workers/
+.worker-cred-*.xml
+.update-*/
 .claude/
