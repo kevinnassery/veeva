@@ -170,7 +170,21 @@ function Connect-VaultHost {
             -Headers @{ Accept = 'application/json' }
 
     if ((Get-VaultField $r 'responseStatus') -ne 'SUCCESS') {
-        throw "Authentication failed for ${VaultHost}: $($r | ConvertTo-Json -Depth 5 -Compress)"
+        # Vault's own words, not the whole JSON body. A failed login is the most common
+        # error there is and the least deserving of a stack trace over a raw response.
+        $errs  = @(Get-VaultField $r 'errors' @())
+        $types = @($errs | ForEach-Object { "$(Get-VaultField $_ 'type' '')" })
+        $msg   = (($errs | ForEach-Object { "$(Get-VaultField $_ 'message' '')" }) -join '; ')
+        if (-not $msg) { $msg = "$(Get-VaultField $r 'responseMessage' 'no detail given')" }
+
+        if ($types -contains 'USERNAME_OR_PASSWORD_INCORRECT') {
+            $msg += [Environment]::NewLine +
+                    '    Sign in to that vault in a browser as the same user to check the password.' + [Environment]::NewLine +
+                    '    If that account uses SSO it has no Vault password, and API login cannot work' + [Environment]::NewLine +
+                    '    for it at all - it needs a Vault-local password or a different account.' + [Environment]::NewLine +
+                    '    Vault locks an account after repeated failures, so do not simply retry.'
+        }
+        throw "Authentication failed for $VaultHost as $($Credential.UserName): $msg"
     }
     $sid = "$(Get-VaultField $r 'sessionId' '')"
     if (-not $sid) {

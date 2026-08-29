@@ -72,7 +72,7 @@ param(
     [int]$Workers = 0
 )
 
-$ScriptVersion = '2026.08.29-2'
+$ScriptVersion = '2026.08.29-3'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -448,10 +448,26 @@ function Invoke-Login {
         foreach ($h in $hosts) { Set-VaultCredential -VaultHost $h -Credential $cred }
     }
 
+    # Every vault is tried, not just up to the first failure. Stopping at the source
+    # means never finding out whether the target credentials were right either, so a
+    # wrong password costs two rounds of prompting instead of one.
+    $failed = @()
     foreach ($h in $hosts) {
         $role = if ($h -eq $script:SourceHost) { 'source' } else { 'target' }
         Write-VaultLog "$role vault: $h"
-        [void](Connect-VaultHost -VaultHost $h -ApiVersion $script:Api)
+        try { [void](Connect-VaultHost -VaultHost $h -ApiVersion $script:Api) }
+        catch {
+            $failed += $h
+            Write-VaultLog "$_" 'ERROR'
+        }
+    }
+    if ($failed.Count) {
+        Write-VaultLog '----------------------------------------------------------------'
+        Write-VaultLog "$($failed.Count) of $($hosts.Count) vault(s) did not authenticate: $($failed -join ', ')" 'ERROR'
+        if ($failed.Count -lt $hosts.Count) {
+            Write-VaultLog 'The others are cached, so only the failures above need another try.' 'WARN'
+        }
+        exit 1
     }
 
     [void](Confirm-VaultSessions -Vaults @($hosts | ForEach-Object {
