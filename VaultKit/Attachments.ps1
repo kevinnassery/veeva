@@ -281,6 +281,8 @@ function Invoke-VaultAttachmentsSync {
     }
     if ($stopped) { Write-VaultLog "TEST run - stopped after $i of $($ids.Count) document(s). NOT the whole set." 'WARN' }
     Write-VaultLog "Results: $($res.Path)"
+    $snap = Copy-VaultResultsSnapshot -Path $($res.Path)
+    if ($snap) { Write-VaultLog "This run : $snap" }
     return $stat.Errors
 }
 
@@ -441,5 +443,7 @@ function Invoke-VaultAttachmentsVerify {
         Write-VaultLog 'Every attachment compared is byte-identical on both vaults.' 'OK'
     }
     Write-VaultLog "Results: $($res.Path)"
+    $snap = Copy-VaultResultsSnapshot -Path $($res.Path)
+    if ($snap) { Write-VaultLog "This run : $snap" }
     return ($stat.Mismatch + $stat.Errors)
 }

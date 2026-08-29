@@ -332,6 +332,8 @@ Uploading into Inbox is not neutral - it creates Staged documents.
     Write-VaultLog '----------------------------------------------------------------'
     Write-VaultLog "Moved $done document(s), $bad failed, $(Format-VaultBytes $moved) transferred" $(if ($bad) { 'WARN' } else { 'OK' })
     Write-VaultLog "Results: $($results.Path)"
+    $snap = Copy-VaultResultsSnapshot -Path $($results.Path)
+    if ($snap) { Write-VaultLog "This run : $snap" }
     return $bad
 }
 
@@ -513,5 +515,7 @@ function Invoke-VaultDocumentsVerify {
     Write-VaultLog '----------------------------------------------------------------'
     Write-VaultLog "Checked $checked document(s), $bad not matching" $(if ($bad) { 'WARN' } else { 'OK' })
     Write-VaultLog "Results: $($results.Path)"
+    $snap = Copy-VaultResultsSnapshot -Path $($results.Path)
+    if ($snap) { Write-VaultLog "This run : $snap" }
     return $bad
 }

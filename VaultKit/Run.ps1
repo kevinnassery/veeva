@@ -145,6 +145,36 @@ function Format-VaultDuration {
     return ('{0:N0} second(s)' -f $Seconds)
 }
 
+function Copy-VaultResultsSnapshot {
+    # This run's own copy of its results, stamped, and never written again.
+    #
+    # The working file keeps a fixed name because resume depends on it: a run has to
+    # find what an earlier one finished, and it cannot do that if every run writes to a
+    # new name. But that fixed name is then merged into, rotated aside, or overwritten
+    # by whatever runs next - so the record of what THIS run did does not survive it.
+    #
+    # The snapshot is that record. It carries the same timestamp as the run's log, so a
+    # report and the log that explains it can be paired without guessing.
+    param([Parameter(Mandatory)][string]$Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return '' }
+
+    $stamp = ''
+    if ($script:VaultLogFile -and ($script:VaultLogFile -match '(\d{8}-\d{6})')) { $stamp = $Matches[1] }
+    if (-not $stamp) { $stamp = Get-Date -Format 'yyyyMMdd-HHmmss' }
+
+    $snap = [IO.Path]::Combine(
+        [IO.Path]::GetDirectoryName($Path),
+        ('{0}-{1}{2}' -f [IO.Path]::GetFileNameWithoutExtension($Path), $stamp, [IO.Path]::GetExtension($Path)))
+    try {
+        Copy-Item -LiteralPath $Path -Destination $snap -Force -WhatIf:$false
+        return $snap
+    }
+    catch {
+        Write-VaultLog "Could not write the results snapshot: $_" 'WARN'
+        return ''
+    }
+}
+
 function Add-VaultResult {
     param([Parameter(Mandatory)]$Results, [Parameter(Mandatory)]$Row)
     [void]$Results.Rows.Add($Row)

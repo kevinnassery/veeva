@@ -206,6 +206,8 @@ function Invoke-VaultShardedRun {
         Write-VaultLog '----------------------------------------------------------------'
         Write-VaultLog ("Moved $ok of $($Pending.Count) item(s), $bad failed, in $(Format-VaultDuration $secs) across $count worker(s)") $(if ($bad) { 'WARN' } else { 'OK' })
         Write-VaultLog "Results     : $resultsPath"
+        $snap = Copy-VaultResultsSnapshot -Path $resultsPath
+        if ($snap) { Write-VaultLog "This run    : $snap" }
         Write-VaultLog "Worker output: $root"
         return $bad
     }

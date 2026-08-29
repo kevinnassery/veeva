@@ -81,7 +81,10 @@ two documents called `Cover Letter.pdf` are common, and one overwriting the othe
 twelve-hour transfer is not something to discover afterwards.
 
 Results are written after every document, so any run can be stopped and re-run: ids
-already recorded `SUCCESS` are skipped.
+already recorded `SUCCESS` are skipped. That file keeps a fixed name because resume
+depends on finding it — so each run also drops a stamped copy of its own results,
+`document-results-<when>.csv`, sharing a timestamp with its log. The working file gets
+merged into and overwritten; the stamped one is the record of what a given run did.
 
 ## Check it landed
 

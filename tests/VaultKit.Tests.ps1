@@ -103,6 +103,20 @@ T 'resume marks ATTACHED done' { if(-not $r2.Done.ContainsKey('a')){throw 'a not
 T 'resume does NOT mark ERROR' { if($r2.Done.ContainsKey('b')){throw 'b wrongly done'} }
 T 'prior rows carried forward'  { Eq $r2.Prior.Count 2 'prior' }
 
+Write-Host "== Results snapshot =="
+$snapDir = Join-Path $tmp ('vk3-'+[guid]::NewGuid().ToString('N')); New-Item -ItemType Directory -Force $snapDir|Out-Null
+$canon = Join-Path $snapDir 'document-results.csv'
+'Id,Status' | Set-Content $canon
+'1,SUCCESS'  | Add-Content $canon
+$script:VaultLogFile = Join-Path $snapDir 'documents-stage-20260829-100705.log'
+$snap = Copy-VaultResultsSnapshot -Path $canon
+T 'snapshot takes the log timestamp' { Eq (Split-Path -Leaf $snap) 'document-results-20260829-100705.csv' 'name' }
+T 'snapshot has the same rows'       { Eq (Get-Content $snap).Count (Get-Content $canon).Count 'rows' }
+T 'canonical file still there'       { if(-not (Test-Path $canon)){ throw 'canonical was moved, not copied' } }
+$script:VaultLogFile = ''
+T 'no log stamp still snapshots'     { $s2 = Copy-VaultResultsSnapshot -Path $canon; if(-not (Test-Path $s2)){ throw 'no snapshot written' } }
+T 'missing source returns empty'     { Eq (Copy-VaultResultsSnapshot -Path (Join-Path $snapDir 'nope.csv')) '' 'empty' }
+
 Write-Host "== Disk budget =="
 T 'budget throws when tight' { $t=$false; try{ Assert-VaultDiskBudget -Path $td -Needed ([long]999TB) -ReserveMB 2048 }catch{ $t=($_ -match 'not enough disk') }; if(-not $t){throw 'no throw'} }
 T 'budget ok when room'      { Assert-VaultDiskBudget -Path $td -Needed 1024 -ReserveMB 1 }
