@@ -100,6 +100,11 @@ param(
     [string]$IdFile = '',
     # The same, for workflows whose input is a map rather than a list.
     [string]$MapFile = '',
+    # Name the id columns rather than letting the header wording decide.
+    [string]$SourceColumn = '',
+    [string]$TargetColumn = '',
+    # map write: where the canonical copy goes.
+    [string]$OutFile = '',
     # Marks a worker. A worker must not write the session file it shares with the
     # supervisor and its siblings: several processes rewriting one JSON file the moment
     # their sessions expire is how a torn file gets written.
@@ -112,7 +117,7 @@ param(
     [int]$Workers = 0
 )
 
-$ScriptVersion = '2026.08.30-1'
+$ScriptVersion = '2026.08.30-2'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -196,7 +201,7 @@ function New-VaultContext {
         $file = $MapFile
         if (-not $file) { $file = Get-VaultSetting -Config $script:Cfg -Section $Section -Key $MapKey -Default '' }
         if (-not $file) { throw "[$Section] $MapKey is not set in $($script:CfgPath)" }
-        $map = Import-VaultIdMap -Path $file -LegacyNames @('map.csv')
+        $map = Import-VaultIdMap -Path $file -SourceColumn $SourceColumn -TargetColumn $TargetColumn -LegacyNames @('map.csv')
     }
     if ($IdsKey) {
         $file = $IdFile
@@ -795,6 +800,58 @@ function Invoke-Roles {
     finally { Stop-VaultLock }
 }
 
+function Invoke-Map {
+    # The map, checked and normalised. Needs no vault: this is about a file, and being
+    # able to answer "is my map usable" without credentials is most of the point - it is
+    # the question you have before a run, not during one.
+    param([string]$Action)
+
+    if ($Action -notin @('check', 'write')) {
+        Write-Host 'vault.ps1 map <check|write>' -ForegroundColor Red
+        Write-Host '  check   read the map and report what it holds. Changes nothing' -ForegroundColor Red
+        Write-Host '  write   rewrite it in the canonical two-column form' -ForegroundColor Red
+        exit 2
+    }
+
+    Initialize-VaultRun -LogName "map-$Action"
+    Write-VaultLog "vault $ScriptVersion - map $Action"
+
+    $file = $MapFile
+    if (-not $file) { $file = Get-VaultSetting -Config $script:Cfg -Section verify -Key map -Default '' }
+    if (-not $file) { $file = Get-VaultSetting -Config $script:Cfg -Section attachments -Key map -Default '' }
+    if (-not $file) { throw 'No map named. Pass -MapFile <csv>, or set [verify] map.' }
+
+    $map = Import-VaultIdMap -Path $file -SourceColumn $SourceColumn -TargetColumn $TargetColumn
+    $st  = $script:VaultIdMapStats
+
+    Write-VaultLog '----------------------------------------------------------------'
+    Write-VaultLog "  file        $($st.Path)"
+    Write-VaultLog "  encoding    $(if ($st.Bom) { 'UTF-8 with BOM' } else { 'no BOM' })"
+    Write-VaultLog "  delimiter   $($st.Delimiter)"
+    Write-VaultLog "  columns     $($st.Headers -join ', ')"
+    Write-VaultLog "  ids from    '$($st.SourceColumn)' -> '$($st.TargetColumn)'  ($($st.How))"
+    Write-VaultLog "  data rows   $($st.Rows)"
+    Write-VaultLog "  pairs       $($st.Pairs)" 'OK'
+    if ($st.RepeatedPairs) { Write-VaultLog "  repeats     $($st.RepeatedPairs)  - the same pair more than once, which a row-per-file export produces" }
+    if ($st.Skipped)       { Write-VaultLog "  skipped     $($st.Skipped)  - no usable id pair. Those documents are NOT processed" 'WARN' }
+    Write-VaultLog "  canonical   $(if ($st.Canonical) { 'yes' } else { 'no - source_id,target_id comma separated is the canonical shape' })" `
+        $(if ($st.Canonical) { 'OK' } else { 'WARN' })
+
+    if ($Action -eq 'write') {
+        $out = $OutFile
+        if (-not $out) { $out = Join-Path $script:Out 'map.csv' }
+        if ([IO.Path]::GetFullPath($out) -eq [IO.Path]::GetFullPath($st.Path)) {
+            throw "That would overwrite the map it just read ($out). Name a different -OutFile."
+        }
+        $n = Export-VaultIdMap -Map $map -Path $out
+        Write-VaultLog "$n pair(s) written to $out in canonical form" 'OK'
+        Write-VaultLog 'Point [verify] map at it and nothing downstream has to guess again.'
+    }
+
+    Write-VaultLog "Log: $script:VaultLogFile"
+    if ($st.Skipped) { exit 1 }
+}
+
 function Invoke-Verify {
     # Is this document migrated? One verdict per source/target pair, across the document's
     # own file, its attachments and its Sharing Settings.
@@ -870,6 +927,9 @@ vault $v
   verify census            The same, over every mapped document
   verify anchors           Which field, if any, relates the two vaults
   verify map               Build the source/target pairs from the vault itself
+
+  map check                Read the map and report what it holds. No vault needed
+  map write                Rewrite it as canonical source_id,target_id
   version                  Print the version
   help                     This
 
@@ -898,6 +958,10 @@ Options
   -Seed <n>                verify: fix the random selection so it can be repeated
   -WithRoleRules           verify: check roles against the lifecycle rules as well
   -Anchor <field>          verify map: the target field holding the source id
+  -MapFile <csv>           map: which file to read
+  -OutFile <csv>           map write: where to put the canonical copy
+  -SourceColumn <name>     map: name the id columns instead of detecting them
+  -TargetColumn <name>
   -Workers <n>             Move the work with n processes. Overrides [limits] workers
   -Depth FAST|DEEP         verify: sizes and recorded MD5, or download both and hash
   -ReplaceDiffering        sync: send same-name attachments whose bytes differ
@@ -948,6 +1012,7 @@ switch ($verb) {
     'documents'   { Invoke-Documents -Action $sub }
     'roles'       { Invoke-Roles -Action $sub }
     'verify'      { Invoke-Verify -Action $sub }
+    'map'         { Invoke-Map -Action $sub }
     'version'     { Write-Host $ScriptVersion }
     'help'        { Invoke-Help }
     ''            { Invoke-Help }

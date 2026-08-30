@@ -268,7 +268,7 @@ function Invoke-VaultBuildPairMap {
             continue
         }
         $dupes[$src] = $tgt
-        [void]$rows.Add([pscustomobject]@{ source = $src; target = $tgt })
+        [void]$rows.Add([pscustomobject]@{ source_id = $src; target_id = $tgt })
     }
 
     $repeated = @($dupes.Keys | Where-Object { $dupes[$_] -match ',' })

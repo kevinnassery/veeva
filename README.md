@@ -195,6 +195,11 @@ did you check" is the first question anyone will ask. Every run states its mode,
 seed and what fraction of the population it covered, and a sample run says out loud that
 it does not certify the documents it did not check.
 
+**The map.** The pairs come from `[verify] map` — canonical form is
+`source_id,target_id`, and anything Excel produced is read too. `.\vault.ps1 map check`
+reports what a map holds and **needs no vault**, so it answers the question before a run
+rather than during one. Full specification: [`docs/map-format.md`](docs/map-format.md).
+
 **The anchor.** The pairs come from `[verify] map`. A static map says what somebody
 *intended*, goes stale when anyone loads a document outside it, and cannot tell you about
 a document it does not mention. If the load wrote the source id onto a field of the target
@@ -309,4 +314,5 @@ same way, by putting the SHA where `main` is in the URL.
 | --- | --- |
 | Vault API v26.2, offline | [`docs/api/`](docs/api/INDEX.md) |
 | Library bulk action → API | [`docs/library-bulk-action-api-map.md`](docs/library-bulk-action-api-map.md) |
+| The id map, specified | [`docs/map-format.md`](docs/map-format.md) |
 | The standalone tools this replaces | [`legacy/`](legacy/) |

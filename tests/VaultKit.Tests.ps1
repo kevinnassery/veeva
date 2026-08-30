@@ -176,6 +176,54 @@ $script:VaultLogFile = ''
 T 'no log stamp still snapshots'     { $s2 = Copy-VaultResultsSnapshot -Path $canon; if(-not (Test-Path $s2)){ throw 'no snapshot written' } }
 T 'missing source returns empty'     { Eq (Copy-VaultResultsSnapshot -Path (Join-Path $snapDir 'nope.csv')) '' 'empty' }
 
+Write-Host "== Map format =="
+$md = Join-Path $tmp ('vkmap-'+[guid]::NewGuid().ToString('N')); New-Item -ItemType Directory -Force $md|Out-Null
+
+# canonical: no detection should be involved at all
+$canon = Join-Path $md 'canon.csv'
+"source_id,target_id`n55056,207311`n55057,207312" | Set-Content $canon -Encoding ASCII
+$m = Import-VaultIdMap -Path $canon
+T 'canonical reads'            { Eq $m['55056'] '207311' 'pair' }
+T 'canonical is recognised'    { Eq $script:VaultIdMapStats.How 'canonical header' 'how' }
+T 'canonical flagged canonical'{ Eq $script:VaultIdMapStats.Canonical $true 'flag' }
+
+# plain source/target - what verify map used to write, and what the id-only heuristic missed
+$plain = Join-Path $md 'plain.csv'
+"source,target`n1,2" | Set-Content $plain -Encoding ASCII
+T 'bare source/target reads'   { $p = Import-VaultIdMap -Path $plain; Eq $p['1'] '2' 'pair' }
+
+# a real export: human headers, a duplicate column, a row per file, an #N/A
+$human = Join-Path $md 'human.csv'
+@'
+Source (old) Document ID,Created By,Destination (new) Document ID,Created By
+55056,ab,207311,cd
+55056,ab,207311,cd
+55058,ab,#N/A,cd
+55059,ab,207313,cd
+'@ | Set-Content $human -Encoding ASCII
+$h = Import-VaultIdMap -Path $human
+T 'human headers detected'     { Eq $script:VaultIdMapStats.How 'detected from the header wording' 'how' }
+T 'human pairs'                { Eq $h.Count 2 'pairs' }
+T 'repeat collapsed'           { Eq $script:VaultIdMapStats.RepeatedPairs 1 'dupe' }
+T 'NA skipped and counted'     { Eq $script:VaultIdMapStats.Skipped 1 'skipped' }
+T 'human is not canonical'     { Eq $script:VaultIdMapStats.Canonical $false 'flag' }
+
+# normalising makes it canonical
+$norm = Join-Path $md 'norm.csv'
+T 'export writes canonical'    { [void](Export-VaultIdMap -Map $h -Path $norm)
+                                 Eq ((Get-Content $norm -TotalCount 1) -replace '"','') 'source_id,target_id' 'header' }
+T 'normalised round-trips'     { $r = Import-VaultIdMap -Path $norm
+                                 Eq $script:VaultIdMapStats.Canonical $true 'canonical'
+                                 Eq $r.Count $h.Count 'same pairs' }
+
+# the two refusals
+$conf = Join-Path $md 'conflict.csv'
+"source_id,target_id`n1,2`n1,3" | Set-Content $conf -Encoding ASCII
+T 'contradiction is refused'   { $t=$false; try { Import-VaultIdMap -Path $conf } catch { $t = "$_" -match 'two different targets' }; if(-not $t){throw 'accepted'} }
+$sci = Join-Path $md 'sci.csv'
+"source_id,target_id`n5.5283E+04,207311" | Set-Content $sci -Encoding ASCII
+T 'excel mangling is refused'  { $t=$false; try { Import-VaultIdMap -Path $sci } catch { $t = "$_" -match 'scientific notation' }; if(-not $t){throw 'accepted'} }
+
 Write-Host "== Sample size (Cochran + finite population) =="
 T '95/5 over a large N is ~384'   { $n = Get-VaultSampleSize -Population 1000000 -Confidence 95 -MarginPct 5; if($n -lt 384 -or $n -gt 385){ throw "got $n" } }
 T '95/5 over 15775 is 375-376'    { $n = Get-VaultSampleSize -Population 15775 -Confidence 95 -MarginPct 5; if($n -lt 375 -or $n -gt 376){ throw "got $n" } }

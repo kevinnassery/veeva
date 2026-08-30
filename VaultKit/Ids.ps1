@@ -5,6 +5,20 @@
 # called "Created By", headers written for people rather than parsers, a row per file so
 # one document appears eight times, and #N/A where a lookup found nothing.
 
+function Export-VaultIdMap {
+    # Write the canonical map. One shape out, whatever went in.
+    param(
+        [Parameter(Mandatory)]$Map,
+        [Parameter(Mandatory)][string]$Path
+    )
+    $rows = New-Object System.Collections.ArrayList
+    foreach ($k in ($Map.Keys | Sort-Object { [long]$_ })) {
+        [void]$rows.Add([pscustomobject]@{ source_id = "$k"; target_id = "$($Map[$k])" })
+    }
+    $rows | Export-Csv -LiteralPath $Path -NoTypeInformation -Encoding UTF8 -WhatIf:$false
+    return $rows.Count
+}
+
 function Import-VaultIdList {
     # One id per line. Tolerant because this file is usually pasted out of Excel or a
     # Library grid: a header, quotes, blank lines, #-comments, a trailing comma.
@@ -136,6 +150,22 @@ function Import-VaultDelimitedFile {
     return [pscustomobject]@{ Path = $resolved; Rows = $rows; Names = @($names); Delimiter = $shown }
 }
 
+# What the last Import-VaultIdMap decided. A side channel rather than a changed return
+# type, because several callers want the map and only `map check` wants the reasoning.
+$script:VaultIdMapStats = @{}
+
+# The canonical map. This is what the kit WRITES, and what it looks for before it starts
+# guessing - two columns, named, comma separated, one pair per row:
+#
+#     source_id,target_id
+#     55056,207311
+#
+# Anything else is still read, because a real map arrives as whatever Excel produced and
+# refusing it would just move the work to a person. But a file in this shape needs no
+# detection at all, and `map write` turns one into the other.
+$script:VaultCanonicalSource = @('source_id', 'sourceid', 'source')
+$script:VaultCanonicalTarget = @('target_id', 'targetid', 'target')
+
 function Import-VaultIdMap {
     # source id -> target id, from a spreadsheet export.
     param(
@@ -214,6 +244,22 @@ function Import-VaultIdMap {
 
     $srcCol = $SourceColumn
     $tgtCol = $TargetColumn
+    $how    = 'named on the command line'
+
+    # The canonical names first, exactly. Detection is for files written for people;
+    # a file written by this kit should not be guessed at - and the heuristic below
+    # requires the header to contain "id", so a column called plainly "source" would
+    # otherwise fail to be found at all.
+    if (-not $srcCol -and -not $tgtCol) {
+        $lower = @{}
+        foreach ($n in $names) { $lower[($n -replace '[^a-zA-Z0-9]', '').ToLowerInvariant()] = $n }
+        foreach ($cand in $script:VaultCanonicalSource) { if ($lower.ContainsKey($cand)) { $srcCol = $lower[$cand]; break } }
+        foreach ($cand in $script:VaultCanonicalTarget) { if ($lower.ContainsKey($cand)) { $tgtCol = $lower[$cand]; break } }
+        if ($srcCol -and $tgtCol) { $how = 'canonical header' }
+        else { $srcCol = ''; $tgtCol = '' }
+    }
+    if (-not $srcCol -and -not $tgtCol) { $how = 'detected from the header wording' }
+
     if (-not $srcCol) {
         $c = @($names | Where-Object { Test-IsIdColumn -Header $_ -Words @('source', 'old', 'from', 'legacy') })
         if ($c.Count -eq 1) { $srcCol = $c[0] }
@@ -227,6 +273,8 @@ function Import-VaultIdMap {
     if (-not $srcCol -or -not $tgtCol) {
         throw "Could not work out which columns hold the ids in $resolved. Headers: $($names -join ', ')."
     }
+
+    Write-VaultLog "Id columns: '$srcCol' -> '$tgtCol' ($how)"
 
     $map = @{}
     $bad = 0; $sci = 0; $dupes = 0
@@ -252,6 +300,15 @@ function Import-VaultIdMap {
             continue
         }
         $map[$a] = $b
+    }
+
+    $script:VaultIdMapStats = @{
+        Path = $resolved; Delimiter = $shown; Bom = $bom; Headers = @($names)
+        SourceColumn = $srcCol; TargetColumn = $tgtCol; How = $how
+        Rows = $rows.Count; Pairs = $map.Count; Skipped = $bad
+        RepeatedPairs = $dupes; Conflicts = $conflict.Count; Scientific = $sci
+        BadRows = @($badRows)
+        Canonical = ($how -eq 'canonical header' -and $shown -eq ',')
     }
 
     if ($sci) {
