@@ -426,6 +426,8 @@ Uploading into Inbox is not neutral - it creates Staged documents.
         Add-VaultResult -Results $results -Row ([pscustomobject]$record)
     }
 
+    # The tail: Add-VaultResult writes on a cadence, so the last rows are in memory.
+    Save-VaultResults -Results $results
     Report-VaultLeftovers -Scratch $c.Scratch
     Write-VaultLog '----------------------------------------------------------------'
     Write-VaultLog "Moved $done document(s), $bad failed, $(Format-VaultBytes $moved) transferred" $(if ($bad) { 'WARN' } else { 'OK' })
@@ -778,6 +780,8 @@ function Invoke-VaultDocumentsVerify {
         Add-VaultResult -Results $results -Row ([pscustomobject]$row)
     }
 
+    # The tail: Add-VaultResult writes on a cadence, so the last rows are in memory.
+    Save-VaultResults -Results $results
     Report-VaultLeftovers -Scratch $c.Scratch
     Write-VaultLog '----------------------------------------------------------------'
     Write-VaultLog "Checked $checked document(s), $bad not matching" $(if ($bad) { 'WARN' } else { 'OK' })

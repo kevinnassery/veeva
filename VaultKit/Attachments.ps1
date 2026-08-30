@@ -288,6 +288,7 @@ function Invoke-VaultAttachmentsSync {
         }
     }
 
+    Save-VaultResults -Results $res
     Report-VaultLeftovers -Scratch $c.Scratch
     Write-VaultLog '----------------------------------------------------------------'
     Write-VaultLog ("source {0}   present {1}   missing {2}   different MD5 {3}   no attachments {4}" -f `
@@ -464,6 +465,7 @@ function Invoke-VaultAttachmentsVerify {
         }
     }
 
+    Save-VaultResults -Results $res
     Report-VaultLeftovers -Scratch $c.Scratch
     Write-VaultLog '----------------------------------------------------------------'
     Write-VaultLog ("{0} compared by {1}" -f ($stat.Match + $stat.Mismatch + $stat.NoChecksum), $Depth)

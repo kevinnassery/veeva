@@ -113,6 +113,10 @@ Write-Host "== Run: resumable results =="
 $r = New-VaultResults -Path "$td/res.csv" -KeyColumn 'Key' -DoneStatuses @('ATTACHED') -Existing 'Resume'
 Add-VaultResult -Results $r -Row ([pscustomobject]@{Key='a';Status='ATTACHED';Msg='x'})
 Add-VaultResult -Results $r -Row ([pscustomobject]@{Key='b';Status='ERROR';Msg='y'})
+# Two rows are under the save cadence, so nothing is on disk yet - which is the whole
+# point of the cadence, and the reason every workflow saves explicitly when it finishes.
+T 'held under the cadence'   { if(Test-Path "$td/res.csv"){throw 'wrote every row again'} }
+Save-VaultResults -Results $r
 T 'results csv written'      { if(-not(Test-Path "$td/res.csv")){throw 'no file'} }
 $r2 = New-VaultResults -Path "$td/res.csv" -KeyColumn 'Key' -DoneStatuses @('ATTACHED') -Existing 'Resume'
 T 'resume marks ATTACHED done' { if(-not $r2.Done.ContainsKey('a')){throw 'a not done'} }
@@ -152,6 +156,20 @@ T 'latin-1 mojibake recovered' { Eq (Get-VaultAttachmentName -Header "attachment
 T 'real latin-1 is left alone' { Eq (Get-VaultAttachmentName -Header "attachment; filename=`"caf${e}.pdf`"") "caf${e}.pdf" 'latin1' }
 T 'no header gives nothing'    { Eq (Get-VaultAttachmentName -Header '') '' 'empty' }
 T 'no filename gives nothing'  { Eq (Get-VaultAttachmentName -Header 'attachment') '' 'none' }
+
+Write-Host "== Results save cadence =="
+$cd = Join-Path $tmp ('vkcad-'+[guid]::NewGuid().ToString('N')); New-Item -ItemType Directory -Force $cd|Out-Null
+$cf = Join-Path $cd 'r.csv'
+$rc = New-VaultResults -Path $cf -KeyColumn 'Id' -DoneStatuses @() -Existing 'Fresh' -SaveEvery 5
+1..4 | ForEach-Object { Add-VaultResult -Results $rc -Row ([pscustomobject]@{ Id="$_"; Status='SUCCESS' }) }
+T 'under the cadence, no file yet' { if(Test-Path $cf){ throw 'wrote too early' } }
+Add-VaultResult -Results $rc -Row ([pscustomobject]@{ Id='5'; Status='SUCCESS' })
+T 'at the cadence, it writes'      { Eq (@(Import-Csv $cf).Count) 5 'rows' }
+Add-VaultResult -Results $rc -Row ([pscustomobject]@{ Id='6'; Status='SUCCESS' })
+T 'tail is held, not written'      { Eq (@(Import-Csv $cf).Count) 5 'still 5' }
+T 'explicit save flushes the tail' { Save-VaultResults -Results $rc; Eq (@(Import-Csv $cf).Count) 6 'six' }
+T 'save resets the counter'        { Eq $rc.Unsaved 0 'reset' }
+T 'default cadence is set'         { $r2 = New-VaultResults -Path (Join-Path $cd 'r2.csv') -KeyColumn 'Id' -Existing 'Fresh'; Eq $r2.SaveEvery 25 'default' }
 
 Write-Host "== Mixed-schema results =="
 $oldRow = [pscustomobject]@{ Id='1'; Name='a.pdf'; Status='SUCCESS' }

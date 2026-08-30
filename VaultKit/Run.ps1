@@ -110,7 +110,15 @@ function New-VaultResults {
         [Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)][string]$KeyColumn,
         [string[]]$DoneStatuses = @(),
-        [ValidateSet('Prompt', 'Resume', 'Fresh')][string]$Existing = 'Resume'
+        [ValidateSet('Prompt', 'Resume', 'Fresh')][string]$Existing = 'Resume',
+        # How many rows may be held before the file is rewritten. Saving after every
+        # single row rewrites the WHOLE file each time, which is quadratic: measured on
+        # Windows PowerShell 5.1 that is 30ms a document at 200 documents and 77ms at
+        # 600, and a sequential run over 15,775 would spend more time writing CSV than
+        # moving files. The cost of a cadence is that a hard kill loses at most this many
+        # rows - and those are re-done on resume, which is safe because everything the
+        # workflows write is idempotent.
+        [int]$SaveEvery = 25
     )
     $prior = [ordered]@{}
     $done  = @{}
@@ -151,6 +159,8 @@ function New-VaultResults {
         Prior     = $prior
         Done      = $done
         Rows      = (New-Object System.Collections.ArrayList)
+        SaveEvery = [math]::Max(1, $SaveEvery)
+        Unsaved   = 0
     }
 }
 
@@ -206,6 +216,7 @@ function Save-VaultResults {
     }
     (ConvertTo-VaultUniformRows -Rows $out) |
         Export-Csv -LiteralPath $Results.Path -NoTypeInformation -Encoding UTF8 -WhatIf:$false
+    $Results.Unsaved = 0
 }
 
 function Format-VaultDuration {
@@ -246,9 +257,14 @@ function Copy-VaultResultsSnapshot {
 }
 
 function Add-VaultResult {
+    # Record a row, and write the file every SaveEvery rows rather than every row.
+    #
+    # Every caller MUST call Save-VaultResults when it finishes, or the last few rows are
+    # only in memory. That is why the summary line in each workflow saves first.
     param([Parameter(Mandatory)]$Results, [Parameter(Mandatory)]$Row)
     [void]$Results.Rows.Add($Row)
-    Save-VaultResults -Results $Results
+    $Results.Unsaved++
+    if ($Results.Unsaved -ge $Results.SaveEvery) { Save-VaultResults -Results $Results }
 }
 
 # --------------------------------------------------------------------------------------

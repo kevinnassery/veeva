@@ -100,8 +100,11 @@ Each document gets its own folder under `[documents] path`, named for its **sour
 two documents called `Cover Letter.pdf` are common, and one overwriting the other after a
 twelve-hour transfer is not something to discover afterwards.
 
-Results are written after every document, so any run can be stopped and re-run: ids
-already recorded `SUCCESS` are skipped. That file keeps a fixed name because resume
+Results are written as the run goes, so any run can be stopped and re-run: ids already
+recorded `SUCCESS` are skipped. They are written every 25 documents rather than every
+one — saving rewrites the whole file, so saving per document is quadratic and a
+sequential run over 15,775 would spend longer writing the CSV than moving files. A hard
+kill therefore loses at most 25 rows, and those are simply done again on the next run. That file keeps a fixed name because resume
 depends on finding it — so each run also drops a stamped copy of its own results,
 `document-results-<when>.csv`, sharing a timestamp with its log. The working file gets
 merged into and overwritten; the stamped one is the record of what a given run did.

@@ -542,6 +542,8 @@ function Invoke-VaultMigrationVerify {
         Add-VaultResult -Results $results -Row $row
     }
 
+    # The tail: Add-VaultResult writes on a cadence, so the last rows are in memory.
+    Save-VaultResults -Results $results
     Report-VaultLeftovers -Scratch $c.Scratch
     Write-VaultLog '----------------------------------------------------------------'
     Write-VaultLog "$($chosen.Count) of $($pairs.Count) document(s) checked ($Mode, $Depth)"
