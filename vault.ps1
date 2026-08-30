@@ -78,6 +78,10 @@ param(
     # to reach further back than it was told to.
     [string]$CreatedBy = 'me',
     [int]$WithinHours = 0,
+    # The fields the window and the creator are matched on. Defaults confirmed against
+    # the vault with `verify fields`; overridable because another vault may differ.
+    [string]$DateField = 'document_creation_date__v',
+    [string]$CreatorField = 'created_by__v',
     # Optional: a file of document ids, one per line, that the scope query is expected to
     # return. Reported both ways, because a count agreeing is not the sets agreeing.
     [string]$ExpectIds = '',
@@ -129,7 +133,7 @@ param(
     [int]$Workers = 0
 )
 
-$ScriptVersion = '2026.08.30-19'
+$ScriptVersion = '2026.08.30-20'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -808,7 +812,7 @@ roles survey and roles probe write nothing and need no scope.
                 # log line is pages of calls out of the allowance the run itself needs.
                 $dirForScope = if ($CreatedBy -match '^(?i)(me|\d+)$') { $null } else { Get-VaultDirectory -Context $ctx }
                 $found = Get-VaultCreatedByScope -Context $ctx -CreatedBy $CreatedBy -WithinHours $WithinHours `
-                             -Directory $dirForScope
+                             -Directory $dirForScope -DateField $DateField -CreatorField $CreatorField
                 # Narrowed again by the map where there is one: only documents the
                 # migration produced AND this person made in the window.
                 if ($ctx.Map -and $ctx.Map.Count) { Select-VaultScopeIntersection -Documents $found -Map $ctx.Map }
@@ -1124,6 +1128,8 @@ Options
   -CreatedBy <user>        roles: only documents this user created. 'me' is this
                            session's own user, which is usually the one that made them
   -WithinHours <n>         roles scope/plan/assign: how far back. REQUIRED
+  -DateField <name>        roles: default document_creation_date__v (a DateTime)
+  -CreatorField <name>     roles: default created_by__v
   -ExpectIds <txt>         roles: check the query returns exactly these ids, one per line
   -Slow                    roles verify: read roles per document, not in bulk
   -TrialSize <n>           verify trial: how many (default 25)

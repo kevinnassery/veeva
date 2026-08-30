@@ -1842,7 +1842,15 @@ function Get-VaultCreatedByScope {
         # Only needed to turn a NAME into an id. A numeric id needs nothing, and the
         # directory is every user and group in the vault - pages of calls against the
         # same burst allowance the run needs, spent on a lookup that was already done.
-        [AllowNull()]$Directory
+        [AllowNull()]$Directory,
+        # Confirmed against endo-rim with `verify fields`, not taken from documentation:
+        # document_creation_date__v is a DateTime and queryable, which is what makes an
+        # hours-wide window expressible at all. created_date__v - which this used at
+        # first - is a field on OBJECTS and does not exist on documents, and the vault
+        # said so: "Unknown field 'created_date__v' in 'where clause'".
+        [string]$DateField = 'document_creation_date__v',
+        # An ObjectReference, which VQL compares by id.
+        [string]$CreatorField = 'created_by__v'
     )
     # created_by__v holds a user ID, not a name - so a name has to be resolved, and a
     # name that resolves to nothing must stop the run. Falling back to "everyone" here
@@ -1882,8 +1890,9 @@ function Get-VaultCreatedByScope {
 
     Write-VaultLog "Scope: documents created by $who (id $uid)"
     Write-VaultLog "       in the last $WithinHours hour(s) - since $cutLocal local / $iso"
+    Write-VaultLog "       matching on $CreatorField and $DateField"
 
-    $vql = "SELECT id FROM documents WHERE created_by__v = $uid AND created_date__v > '$iso'"
+    $vql = "SELECT id FROM documents WHERE $CreatorField = $uid AND $DateField > '$iso'"
     $docs = @(Get-VaultDocumentsByQuery -Context $Context -Where $vql)
     Write-VaultLog "$($docs.Count) document(s) match both conditions" 'OK'
 
