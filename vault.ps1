@@ -126,7 +126,7 @@ param(
     [int]$Workers = 0
 )
 
-$ScriptVersion = '2026.08.30-11'
+$ScriptVersion = '2026.08.30-12'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -404,6 +404,38 @@ function Invoke-Update {
                 exit 1
             }
             $staged[$rel] = $tmp
+        }
+
+        # A new version may need modules this one has never heard of. The manifest above
+        # was built from THIS script's parts list, so a module added since would simply
+        # not be fetched - the new dispatcher lands, then fails on its first run saying a
+        # file is missing, and only a SECOND update brings it. Observed exactly that when
+        # Roles and Verify were added.
+        #
+        # So the parts list is read out of the vault.ps1 that was just downloaded, and
+        # anything new is fetched before anything is moved into place.
+        try {
+            $newParts = @()
+            foreach ($line in (Get-Content -LiteralPath $staged['vault.ps1'] -ErrorAction SilentlyContinue)) {
+                if ($line -like '$VaultKitParts = @(*') {
+                    $newParts = @(($line -replace '^.*@\(', '' -replace '\).*$', '') -split ',' |
+                                  ForEach-Object { $_.Trim().Trim("'") } | Where-Object { $_ })
+                    break
+                }
+            }
+            foreach ($part in $newParts) {
+                $rel = "VaultKit/$part.ps1"
+                if ($staged.Contains($rel)) { continue }
+                Write-Host "  also needed by the new version: $rel"
+                $tmp = Join-Path $stage ($rel -replace '[\\/]', '_')
+                Invoke-WebRequest -Uri "$base/$rel" -OutFile $tmp -UseBasicParsing -TimeoutSec 120
+                $staged[$rel] = $tmp
+            }
+        }
+        catch {
+            Write-Host "  FAILED    reading the new version's module list: $_" -ForegroundColor Red
+            Write-Host '  Nothing here was changed. Run update again.' -ForegroundColor Red
+            exit 1
         }
 
         # One version across the whole set. They all come from one commit, so a mismatch
