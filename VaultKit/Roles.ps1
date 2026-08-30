@@ -2234,18 +2234,26 @@ function Invoke-VaultDocTypeMdlDump {
         # What the Library shows, and therefore what anyone has to hand, is the SUBTYPE
         # label - "Study Protocol" is a subtype of "Clinical". Insisting on the type name
         # would mean knowing the hierarchy before being allowed to ask about it.
-        $foundType = ''; $foundSub = ''
+        # EVERY type is searched, not the first that matches. Hashtable order is not
+        # meaningful, so stopping at the first hit picks an arbitrary parent when two
+        # types both have a subtype of that label - and then reads the wrong component
+        # and reports on it as if it were the right one.
+        $hits = New-Object System.Collections.ArrayList
         foreach ($tk in @($idx.Types.Keys)) {
             $tn = $idx.Types[$tk]
             $sn = Get-VaultSubtypeName -Context $c -TypeName $tn -SubtypeLabel $TypeLabel
-            if ($sn) { $foundType = $tn; $foundSub = $TypeLabel; break }
+            if ($sn) { [void]$hits.Add($tn) }
         }
-        if ($foundType) {
-            Write-VaultLog "'$TypeLabel' is a subtype of $foundType - reading that type and this subtype." 'WARN'
-            $typeName = $foundType
-            $SubtypeLabel = $foundSub
+        if ($hits.Count -gt 1) {
+            throw ("'$TypeLabel' is a subtype of more than one type: " + ($hits -join ', ') +
+                   ". Name which one with -Type <type> -Subtype '$TypeLabel'.")
         }
-        else {
+        if ($hits.Count -eq 1) {
+            Write-VaultLog "'$TypeLabel' is a subtype of $($hits[0]) - reading that type and this subtype." 'WARN'
+            $typeName = $hits[0]
+            $SubtypeLabel = $TypeLabel
+        }
+        elseif ($hits.Count -eq 0) {
             # Name them. "Run roles survey" is an instruction to go and find out
             # something this already knows.
             $labels = @($idx.Types.Keys | ForEach-Object { $idx.Types[$_] } | Sort-Object)
