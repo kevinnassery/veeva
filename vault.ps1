@@ -126,7 +126,7 @@ param(
     [int]$Workers = 0
 )
 
-$ScriptVersion = '2026.08.30-12'
+$ScriptVersion = '2026.08.30-13'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -927,6 +927,40 @@ function Invoke-Map {
     if (-not $file) { $file = Get-VaultSetting -Config $script:Cfg -Section attachments -Key map -Default '' }
     if (-not $file) { throw 'No map named. Pass -MapFile <csv>, or set [verify] map.' }
 
+    # A map has two columns; a list has one. Both are inputs someone needs checked before
+    # a run, and refusing a list because it is not a map answers a question nobody asked -
+    # the operator wants to know whether their file is usable, not what shape it is.
+    $resolved = Resolve-VaultInput -Path $file
+    if (-not $resolved) { throw "Not found: $file" }
+    $head = @(Get-Content -LiteralPath $resolved -TotalCount 1)
+    $isList = $true
+    if ($head.Count) {
+        foreach ($d in @(',', "`t", ';', '|')) { if ($head[0].Contains($d)) { $isList = $false; break } }
+    }
+
+    if ($isList) {
+        Write-VaultLog 'One column, so this is read as a list of ids rather than a map.'
+        $ids = @(Import-VaultIdList -Path $resolved)
+        Write-VaultLog '----------------------------------------------------------------'
+        Write-VaultLog "  file        $resolved"
+        Write-VaultLog "  ids         $($ids.Count)" 'OK'
+        Write-VaultLog "  first few   $((@($ids | Select-Object -First 5)) -join ' ')"
+        Write-VaultLog "  last few    $((@($ids | Select-Object -Last 5)) -join ' ')"
+        Write-VaultLog 'A list names documents. It cannot say what any of them came from - that needs a map.'
+
+        if ($Action -eq 'write') {
+            $out = $OutFile
+            if (-not $out) { $out = Join-Path $script:Out 'ids.txt' }
+            if ([IO.Path]::GetFullPath($out) -eq [IO.Path]::GetFullPath($resolved)) {
+                throw "That would overwrite the file it just read ($out). Name a different -OutFile."
+            }
+            [IO.File]::WriteAllLines($out, $ids, (New-Object Text.UTF8Encoding $false))
+            Write-VaultLog "$($ids.Count) id(s) written to $out, one per line, deduplicated" 'OK'
+        }
+        Write-VaultLog "Log: $script:VaultLogFile"
+        exit 0
+    }
+
     $map = Import-VaultIdMap -Path $file -SourceColumn $SourceColumn -TargetColumn $TargetColumn
     $st  = $script:VaultIdMapStats
 
@@ -1044,7 +1078,7 @@ vault $v
   verify anchors           Which field, if any, relates the two vaults
   verify map               Build the source/target pairs from the vault itself
 
-  map check                Read the map and report what it holds. No vault needed
+  map check                Read a map or an id list and report it. No vault needed
   map write                Rewrite it as canonical source_id,target_id
   version                  Print the version
   help                     This
