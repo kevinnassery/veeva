@@ -96,6 +96,8 @@ param(
     [switch]$Slow,
     # verify map: the target document field that holds the source document's id.
     [string]$Anchor = '',
+    # verify fields: show only fields whose name matches this.
+    [string]$Match = '',
     # update: go ahead even though a run is holding a lock.
     [switch]$Force,
     # update: fetch this exact commit instead of whatever main points at. Pins a known
@@ -127,7 +129,7 @@ param(
     [int]$Workers = 0
 )
 
-$ScriptVersion = '2026.08.30-18'
+$ScriptVersion = '2026.08.30-19'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -1011,6 +1013,17 @@ function Invoke-Verify {
     # own file, its attachments and its Sharing Settings.
     param([string]$Action)
 
+    if ($Action -eq 'fields') {
+        Initialize-VaultRun -LogName 'verify-fields'
+        Write-VaultLog "vault $ScriptVersion - verify fields (read only, nothing is changed)"
+        [void](Confirm-VaultSessions -Vaults @(@{ Role = 'target'; Name = $script:TargetHost }) `
+                   -ApiVersion $script:Api -Yes:$Yes)
+        $ctxF = New-VaultContext -Section 'verify'
+        [void](Invoke-VaultFieldList -Context $ctxF -Match $Match)
+        Write-VaultLog "Log: $script:VaultLogFile"
+        return
+    }
+
     if ($Action -in @('anchors', 'map')) {
         Initialize-VaultRun -LogName "verify-$Action"
         Write-VaultLog "vault $ScriptVersion - verify $Action (read only, nothing is changed)"
@@ -1027,7 +1040,7 @@ function Invoke-Verify {
     }
 
     if ($Action -notin @('trial', 'sample', 'census')) {
-        Write-Host 'vault.ps1 verify <trial|sample|census>   (also: anchors, map)' -ForegroundColor Red
+        Write-Host 'vault.ps1 verify <trial|sample|census>   (also: fields, anchors, map)' -ForegroundColor Red
         Write-Host '  trial   a fixed handful at random - proves the check runs' -ForegroundColor Red
         Write-Host '  sample  sized for a confidence level - evidence about the population' -ForegroundColor Red
         Write-Host '  census  every mapped document' -ForegroundColor Red
@@ -1081,6 +1094,7 @@ vault $v
   verify trial             Is it migrated? A fixed handful at random, to prove the check
   verify sample            The same, sized for a confidence level (95% by default)
   verify census            The same, over every mapped document
+  verify fields            Which fields the target's documents have, and of what type
   verify anchors           Which field, if any, relates the two vaults
   verify map               Build the source/target pairs from the vault itself
 
@@ -1118,6 +1132,7 @@ Options
   -Seed <n>                verify: fix the random selection so it can be repeated
   -WithRoleRules           verify: check roles against the lifecycle rules as well
   -Anchor <field>          verify map: the target field holding the source id
+  -Match <regex>           verify fields: show only fields matching this
   -MapFile <csv>           map: which file to read
   -OutFile <csv>           map write: where to put the canonical copy
   -SourceColumn <name>     map: name the id columns instead of detecting them

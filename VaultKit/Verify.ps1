@@ -145,6 +145,48 @@ function Get-VaultDocumentFieldName {
     return @($names)
 }
 
+function Invoke-VaultFieldList {
+    # Which fields this vault's documents actually have, and of what type.
+    #
+    # Exists because guessing was wrong twice. created_date__v is a field on objects and
+    # not on documents; document_creation_date__v is documented for documents but every
+    # example uses a bare date, which does not say whether a time of day is usable. Both
+    # questions are answered by asking the vault, in one call, for free.
+    param([Parameter(Mandatory)]$Context, [string]$Match = '')
+    $c = $Context
+    Write-VaultLog "$($c.TargetHost) document fields"
+
+    $r = Invoke-VaultApi -VaultHost $c.TargetHost -ApiVersion $c.Api -Method GET `
+            -Path '/metadata/objects/documents/properties'
+    $props = @(Get-VaultField $r 'properties' @())
+    Write-VaultLog "$($props.Count) field(s) defined"
+
+    $rows = New-Object System.Collections.ArrayList
+    foreach ($p in $props) {
+        $name = "$(Get-VaultField $p 'name' '')"
+        if (-not $name) { continue }
+        if ($Match -and ($name -notmatch $Match)) { continue }
+        [void]$rows.Add([pscustomobject]@{
+            Name       = $name
+            Type       = "$(Get-VaultField $p 'type' '')"
+            Queryable  = "$(Get-VaultField $p 'queryable' '')"
+            Editable   = "$(Get-VaultField $p 'editable' '')"
+            Label      = "$(Get-VaultField $p 'label' '')"
+        })
+    }
+
+    if ($Match) { Write-VaultLog "$($rows.Count) match '$Match'" 'OK' }
+    foreach ($row in ($rows | Sort-Object Name)) {
+        Write-VaultLog ("  {0,-34} {1,-12} queryable={2,-5} {3}" -f $row.Name, $row.Type, $row.Queryable, $row.Label)
+    }
+
+    $out = Join-Path $c.Out 'document-fields.csv'
+    (ConvertTo-VaultUniformRows -Rows $rows) |
+        Export-Csv -LiteralPath $out -NoTypeInformation -Encoding UTF8 -WhatIf:$false
+    Write-VaultLog "Written to $out"
+    return 0
+}
+
 function Invoke-VaultAnchorProbe {
     # Which field, if any, relates the two vaults - answered from the vaults.
     #
