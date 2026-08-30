@@ -228,12 +228,33 @@ in is a separate job from moving the files, and it touches only the **target** v
 ```
 .\vault.ps1 roles survey     what is in scope: subtypes, roles, defaults
 .\vault.ps1 roles probe      whether a defaults table is needed, and what it should say
-.\vault.ps1 roles plan       exactly who would be added to which role
-.\vault.ps1 roles assign     add them
+.\vault.ps1 roles plan   -CreatedBy <user> -WithinHours <n>   who would be added to which role
+.\vault.ps1 roles assign -CreatedBy <user> -WithinHours <n>   add them
 .\vault.ps1 roles verify     prove what the run recorded is on the documents
 ```
 
-The first three change nothing. `assign` never removes anyone and never invents an
+**`plan` and `assign` require both `-CreatedBy` and `-WithinHours`.** This command grants
+people access to documents, so it has no default scope — there is no safe guess about
+which documents that should be. One condition without the other is not a bound either: a
+user with no window is all of their work ever, and a window with no user is everyone's.
+
+`-CreatedBy` takes a username, an email or a user id. Vault stores `created_by__v` as an
+id, so a name is resolved against the directory first — and a name that resolves to
+nothing stops the run rather than widening it. `-WithinHours` counts back from now; the
+cutoff is logged in both local time and the UTC form the query uses, so there is no
+ambiguity about which window ran.
+
+Where `[roles] map` is also set, the scope is the **intersection**: only documents the
+migration produced *and* this person created in the window. The counts at each stage are
+logged, including how many matched the user and window but were not in the map.
+
+The desired state is each document's **lifecycle role assignment rules**, and with
+`-WithTypeDefaults` the document type's *Default Settings for New Documents* as well —
+which is the combination a migrated document is missing, since neither is applied to
+documents created through the API or Vault Loader.
+
+`survey` and `probe` change nothing and take no scope flags, so you can look around
+first. `assign` never removes anyone and never invents an
 assignment: everything it writes is something the configuration already names as a
 default.
 

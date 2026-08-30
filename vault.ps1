@@ -71,6 +71,12 @@ param(
     [string[]]$Role = @(),
     [string[]]$ExcludeRole = @(),
     [ValidateRange(1, 1000)][int]$BatchSize = 200,
+    # The permission sync touches only documents this user created, within this many
+    # hours before now. Both are required for roles plan and roles assign: a run that
+    # grants people access should not be able to reach further than it was told to, and
+    # one condition without the other is not a bound worth having.
+    [string]$CreatedBy = '',
+    [int]$WithinHours = 0,
 
     # ---- verify ----
     # trial: a fixed handful, at random. sample: sized for a confidence level.
@@ -117,7 +123,7 @@ param(
     [int]$Workers = 0
 )
 
-$ScriptVersion = '2026.08.30-7'
+$ScriptVersion = '2026.08.30-8'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -704,8 +710,31 @@ function Invoke-Roles {
             Write-VaultLog "-Where given, so [roles] map is ignored for this run" 'WARN'
         }
 
-        $ctx = if ($Where) { New-VaultContext -Section 'roles' }
-               else        { New-VaultContext -Section 'roles' -MapKey 'map' }
+        # Both, or neither. One alone is not a scope: a user with no window is all of
+        # their work ever, and a window with no user is everyone's.
+        $scoped = $false
+        if ($CreatedBy -or $WithinHours -gt 0) {
+            if (-not $CreatedBy -or $WithinHours -le 0) {
+                throw '-CreatedBy and -WithinHours go together. One without the other is not a scope.'
+            }
+            if ($Where) { throw '-Where and -CreatedBy/-WithinHours both name the scope. Pass one.' }
+            $scoped = $true
+        }
+        if ($Action -in @('plan', 'assign') -and -not $scoped) {
+            throw @'
+A permission sync has to say whose documents, and how recent:
+
+    roles plan   -CreatedBy <user> -WithinHours <n>
+    roles assign -CreatedBy <user> -WithinHours <n>
+
+Both are required. This command grants people access to documents, so it does not
+default to a scope - there is no safe guess about which documents that should be.
+Use roles survey or roles probe to look around; neither writes anything.
+'@
+        }
+
+        $ctx = if ($Where -or ($scoped -and -not $mapSetting)) { New-VaultContext -Section 'roles' }
+               else { New-VaultContext -Section 'roles' -MapKey 'map' }
 
         # A command of its own, and it needs no document list: it reads the claims out
         # of the results file a run wrote. Never chained onto assign - Vault ignores
@@ -733,7 +762,15 @@ function Invoke-Roles {
         # miss a subtype entirely and then report that everything is consistent, which is
         # worse than not having run it.
         $documents =
-            if ($Where) { Get-VaultDocumentsByQuery -Context $ctx -Where $Where }
+            if ($scoped) {
+                $found = Get-VaultCreatedByScope -Context $ctx -CreatedBy $CreatedBy -WithinHours $WithinHours `
+                             -Directory (Get-VaultDirectory -Context $ctx)
+                # Narrowed again by the map where there is one: only documents the
+                # migration produced AND this person made in the window.
+                if ($ctx.Map -and $ctx.Map.Count) { Select-VaultScopeIntersection -Documents $found -Map $ctx.Map }
+                else { $found }
+            }
+            elseif ($Where) { Get-VaultDocumentsByQuery -Context $ctx -Where $Where }
             elseif ($ctx.Map -and $ctx.Map.Count) { @($ctx.Map.Values | Select-Object -Unique) }
             elseif ($Action -eq 'probe') {
                 Write-VaultLog 'No map or -Where given, so sampling the vault in whatever order it returns.'
@@ -928,6 +965,7 @@ vault $v
   roles probe              Whether a defaults table is needed, and what it should say
   roles plan               Exactly who would be added to which role. Changes nothing
   roles assign             Fill in the Sharing Settings the migration left empty
+                           Needs -CreatedBy and -WithinHours. Both. Every time
   roles verify             Prove what a run recorded is actually on the documents
 
   verify trial             Is it migrated? A fixed handful at random, to prove the check
@@ -959,6 +997,8 @@ Options
   -Defaults <csv>          roles: a defaults table. Overrides [roles] defaults
   -Role / -ExcludeRole     roles: only these roles, or all but these
   -BatchSize <n>           roles: assignments per request (default 200)
+  -CreatedBy <user>        roles plan/assign: only documents this user created
+  -WithinHours <n>         roles plan/assign: only from this many hours ago. Required
   -Slow                    roles verify: read roles per document, not in bulk
   -TrialSize <n>           verify trial: how many (default 25)
   -Confidence 90|95|99     verify sample: confidence level (default 95)

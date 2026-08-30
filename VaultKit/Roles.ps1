@@ -1824,3 +1824,69 @@ function Invoke-VaultRolesVerify {
     Write-VaultLog "Report: $report"
     return $stat.Missing
 }
+
+# --------------------------------------------------------------------------------------
+# Scoping a permission sync
+#
+# A run that grants people access should never be able to reach further than it was told
+# to. So the sync names WHOSE documents and HOW RECENT, both, every time - and the two
+# together are a far tighter bound than either alone: one operator's work, in one window.
+# --------------------------------------------------------------------------------------
+
+function Get-VaultCreatedByScope {
+    # The documents a named user created within the last N hours.
+    param(
+        [Parameter(Mandatory)]$Context,
+        [Parameter(Mandatory)][string]$CreatedBy,
+        [Parameter(Mandatory)][int]$WithinHours,
+        [Parameter(Mandatory)]$Directory
+    )
+    # created_by__v holds a user ID, not a name - so a name has to be resolved, and a
+    # name that resolves to nothing must stop the run. Falling back to "everyone" here
+    # would turn the narrowest possible scope into the widest.
+    $uid = Resolve-VaultNameToId -Directory $Directory -Kind 'user' -Name $CreatedBy
+    if (-not $uid) {
+        throw "No user in this vault answers to '$CreatedBy'. created_by__v holds a user id, so the name has to resolve to one - check the spelling, or pass the id."
+    }
+    $who = Get-VaultDisplayName -Directory $Directory -Kind 'user' -Id $uid
+
+    # Hours before NOW, in UTC, because that is what Vault stores and compares against.
+    # Both are logged: an operator reads the local time, and the query uses the other.
+    $cutUtc   = (Get-Date).ToUniversalTime().AddHours(-1 * $WithinHours)
+    $iso      = $cutUtc.ToString('yyyy-MM-ddTHH:mm:ss.fffZ')
+    $cutLocal = $cutUtc.ToLocalTime().ToString('yyyy-MM-dd HH:mm:ss')
+
+    Write-VaultLog "Scope: documents created by $who (id $uid)"
+    Write-VaultLog "       in the last $WithinHours hour(s) - since $cutLocal local / $iso"
+
+    $vql = "SELECT id FROM documents WHERE created_by__v = $uid AND created_date__v > '$iso'"
+    $docs = @(Get-VaultDocumentsByQuery -Context $Context -Where $vql)
+    Write-VaultLog "$($docs.Count) document(s) match both conditions" 'OK'
+    return $docs
+}
+
+function Select-VaultScopeIntersection {
+    # Where a map is also configured, take only what is in BOTH.
+    #
+    # The map says what the migration produced; the query says what this person made
+    # recently. A document in one and not the other is not something to guess about, and
+    # the intersection is the only reading that cannot reach further than either.
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][array]$Documents,
+        [Parameter(Mandatory)]$Map
+    )
+    $known = @{}
+    foreach ($v in $Map.Values) { $known["$v"] = $true }
+
+    $keep = New-Object System.Collections.ArrayList
+    foreach ($d in $Documents) {
+        $id = "$(Get-VaultField $d 'id' '')"
+        if ($id -and $known.ContainsKey($id)) { [void]$keep.Add($d) }
+    }
+    $dropped = $Documents.Count - $keep.Count
+    Write-VaultLog "$($Documents.Count) from the query, $($known.Count) in the map, $($keep.Count) in both"
+    if ($dropped) {
+        Write-VaultLog "$dropped document(s) matched the user and window but are not in the map - not touched" 'WARN'
+    }
+    return @($keep)
+}
