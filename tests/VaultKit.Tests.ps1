@@ -157,6 +157,29 @@ T 'real latin-1 is left alone' { Eq (Get-VaultAttachmentName -Header "attachment
 T 'no header gives nothing'    { Eq (Get-VaultAttachmentName -Header '') '' 'empty' }
 T 'no filename gives nothing'  { Eq (Get-VaultAttachmentName -Header 'attachment') '' 'none' }
 
+Write-Host "== Throttle backoff =="
+T 'burst: eases off gently high' { $d = Get-VaultThrottleDelay -Kind 'burst' -Remaining 390; if($d -lt 1 -or $d -gt 12){ throw "got $d" } }
+T 'burst: waits longer when low' { $lo = 1..40 | ForEach-Object { Get-VaultThrottleDelay -Kind 'burst' -Remaining 10 }
+                                   $hi = 1..40 | ForEach-Object { Get-VaultThrottleDelay -Kind 'burst' -Remaining 390 }
+                                   $a = ($lo | Measure-Object -Average).Average; $b = ($hi | Measure-Object -Average).Average
+                                   if($a -le $b){ throw "low=$a not longer than high=$b" } }
+T 'jitter actually varies'       { $v = 1..40 | ForEach-Object { Get-VaultThrottleDelay -Kind 'throttled' }
+                                   if((@($v | Sort-Object -Unique).Count) -lt 5){ throw 'the wait is not being randomised' } }
+T 'jitter stays in 0.5x-1.5x'    { $v = 1..200 | ForEach-Object { Get-VaultThrottleDelay -Kind 'throttled' }
+                                   $mn = ($v | Measure-Object -Minimum).Minimum; $mx = ($v | Measure-Object -Maximum).Maximum
+                                   if($mn -lt 30 -or $mx -gt 90){ throw "range $mn..$mx outside 30..90" } }
+T 'transient grows with attempt' { $a = 1..30 | ForEach-Object { Get-VaultThrottleDelay -Kind 'transient' -Attempt 1 }
+                                   $b = 1..30 | ForEach-Object { Get-VaultThrottleDelay -Kind 'transient' -Attempt 4 }
+                                   if((($a|Measure-Object -Average).Average) -ge (($b|Measure-Object -Average).Average)){ throw 'no growth' } }
+T 'transient is capped'          { $v = 1..50 | ForEach-Object { Get-VaultThrottleDelay -Kind 'transient' -Attempt 12 -Cap 120 }
+                                   if((($v|Measure-Object -Maximum).Maximum) -gt 180){ throw 'cap ignored' } }
+T 'Retry-After is never undercut'{ $v = 1..100 | ForEach-Object { Get-VaultThrottleDelay -Kind 'throttled' -RetryAfter 45 }
+                                   if((($v|Measure-Object -Minimum).Minimum) -lt 45){ throw 'waited less than Vault asked' } }
+T 'Retry-After still jitters up' { $v = 1..60 | ForEach-Object { Get-VaultThrottleDelay -Kind 'throttled' -RetryAfter 45 }
+                                   if((@($v | Sort-Object -Unique).Count) -lt 3){ throw 'no spread above the floor' } }
+T 'never returns zero'           { $v = 1..100 | ForEach-Object { Get-VaultThrottleDelay -Kind 'burst' -Remaining 400 }
+                                   if((($v|Measure-Object -Minimum).Minimum) -lt 1){ throw 'a wait of nothing is not a wait' } }
+
 Write-Host "== Burst headroom tracking =="
 $script:VaultBurstRemaining = @{}; $script:VaultBurstLowest = @{}
 $script:VaultBurstRemaining['a.example.com'] = 1400; $script:VaultBurstLowest['a.example.com'] = 310

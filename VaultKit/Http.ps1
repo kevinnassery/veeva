@@ -22,6 +22,70 @@ function Get-VaultBurstReport {
     return @($out)
 }
 
+# --------------------------------------------------------------------------------------
+# Backing off without thrashing
+#
+# Eight workers that all pause for exactly sixty seconds resume in the same instant and
+# hit the vault together, which is the behaviour that turns "throttled" into "thrashing".
+# Every wait here is therefore jittered: the point is not the length of the pause, it is
+# that the workers stop agreeing on when it ends.
+# --------------------------------------------------------------------------------------
+
+$script:VaultJitter = New-Object System.Random
+
+function Get-VaultThrottleDelay {
+    # Seconds to wait, jittered. Returns a whole number so it can be logged plainly.
+    param(
+        [Parameter(Mandatory)][ValidateSet('burst', 'throttled', 'transient')][string]$Kind,
+        [int]$Attempt = 1,
+        [int]$Remaining = -1,
+        [int]$RetryAfter = 0,
+        [int]$Cap = 120
+    )
+    # Vault said how long: that is an instruction, not an opinion. Jitter still applies,
+    # because the workers must not resume together - but upward only. Waiting LESS than
+    # you were told is the one direction that cannot help.
+    if ($RetryAfter -gt 0) {
+        $up = [int][math]::Ceiling($RetryAfter * (1.0 + $script:VaultJitter.NextDouble() * 0.5))
+        return [math]::Min([math]::Max($up, $RetryAfter), [math]::Max($Cap, $RetryAfter))
+    }
+
+    $base =
+        if ($false) { 0 }
+        else {
+            switch ($Kind) {
+                'burst' {
+                    # Proportional to how little is left, not a cliff at one value. The
+                    # allowance is 2,000 per five minutes; easing off from 400 remaining
+                    # keeps a run away from the floor instead of pausing hard once it is
+                    # already there.
+                    $r = if ($Remaining -lt 0) { 0 } else { [math]::Min(400, $Remaining) }
+                    [math]::Max(3, [int](3 + (400 - $r) / 400.0 * 45))
+                }
+                'throttled' { 60 }
+                default     { [math]::Min($Cap, [int]([math]::Pow(2, $Attempt) * 5)) }
+            }
+        }
+    if ($base -gt $Cap) { $base = $Cap }
+
+    # Half to one and a half times the base. Not full jitter down to zero: a wait of
+    # nothing is not a wait, and the reason for pausing has not gone away.
+    $factor = 0.5 + $script:VaultJitter.NextDouble()
+    $delay  = [int][math]::Round($base * $factor)
+    if ($delay -lt 1) { $delay = 1 }
+    return $delay
+}
+
+function Get-VaultRetryAfter {
+    # Vault's own answer, when it gives one.
+    param($Response)
+    try {
+        $v = $Response.Headers['Retry-After']
+        if ($v -and ($v -match '^\d+$')) { return [int]$v }
+    } catch { }
+    return 0
+}
+
 function Invoke-VaultApi {
     param(
         [Parameter(Mandatory)][string]$VaultHost,
@@ -66,9 +130,14 @@ function Invoke-VaultApi {
                     $script:VaultBurstLowest[$VaultHost] = [int]$remaining
                 }
             }
-            if ($remaining -and [int]$remaining -lt 200) {
-                Write-VaultLog "$VaultHost burst limit low ($remaining) - pausing 30s" 'WARN'
-                Start-Sleep -Seconds 30
+            # Eased off from 400 rather than stopped dead at 200: the allowance is 2,000
+            # every five minutes, and a run that keeps reaching the floor is one already
+            # being delayed 500ms a call by Vault - which looks like slowness, not like
+            # throttling, and is the failure this is meant to stay ahead of.
+            if ($remaining -and [int]$remaining -lt 400) {
+                $wait = Get-VaultThrottleDelay -Kind 'burst' -Remaining ([int]$remaining)
+                Write-VaultLog "$VaultHost burst allowance low ($remaining of 2000) - easing off ${wait}s" 'WARN'
+                Start-Sleep -Seconds $wait
             }
 
             $json = $null
@@ -109,12 +178,13 @@ function Invoke-VaultApi {
                 continue
             }
             if ($status -eq 429 -and $attempt -lt $MaxRetries) {
-                Write-VaultLog "$VaultHost HTTP 429 - waiting 60s (attempt $attempt/$MaxRetries)" 'WARN'
-                Start-Sleep -Seconds 60
+                $wait = Get-VaultThrottleDelay -Kind 'throttled' -Attempt $attempt -RetryAfter (Get-VaultRetryAfter $ex.Response)
+                Write-VaultLog "$VaultHost HTTP 429 - waiting ${wait}s (attempt $attempt/$MaxRetries)" 'WARN'
+                Start-Sleep -Seconds $wait
                 continue
             }
             if (((-not $status) -or ($status -ge 500)) -and $attempt -lt $MaxRetries) {
-                $wait = [math]::Pow(2, $attempt) * 5
+                $wait = Get-VaultThrottleDelay -Kind 'transient' -Attempt $attempt -RetryAfter (Get-VaultRetryAfter $ex.Response)
                 Write-VaultLog "$VaultHost transient error on $Method $Path (HTTP $status) - retry $attempt/$MaxRetries in ${wait}s" 'WARN'
                 Start-Sleep -Seconds $wait
                 continue

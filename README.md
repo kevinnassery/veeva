@@ -258,7 +258,31 @@ sequential run is known good**.
 Workers run hidden, so their warnings and errors are forwarded into the main log as they
 happen, and progress is reported every 30 seconds with a rate and an ETA. That rate is
 the total across all workers over wall clock, not one worker's — it is what to divide the
-remaining count by.
+remaining count by. Each worker also keeps its own log, and they are merged into one
+timestamp-ordered file at the end, every line labelled with the worker that wrote it.
+
+**There is a ceiling, and it is not the worker count.** Vault allows 2,000 API calls
+every five minutes *per user* — about 6.7 a second. A document costs roughly four calls
+on the target, so no number of workers moves more than about 1.7 documents a second.
+Eight workers measured 0.93/s, a little over half the allowance. Past the ceiling Vault
+delays *every* call by 500ms rather than refusing it, so an over-parallel run does not
+fail, it just quietly gets slower.
+
+Every parallel run therefore ends with what Vault actually reported:
+
+```
+endo-rim.veevavault.com  burst remaining 1240, lowest seen 380 of 2000 per 5 min
+```
+
+If the lowest stays well clear of zero there is room; if it bottoms out, more workers
+will make the run slower rather than faster.
+
+Waits are randomised. Eight workers that all pause for exactly sixty seconds resume in
+the same instant and hit the vault together, which is what turns being throttled into
+thrashing — so every wait is jittered to between half and one and a half times its base,
+and the pause for a low burst allowance is proportional to how little is left rather than
+a cliff at one value. When Vault sends `Retry-After` that is honoured as a floor: the
+jitter only ever moves it later, never sooner.
 
 `-Workers <n>` overrides the config for one run. `-Test` and `-Plan` always run
 sequentially — there is nothing to parallelise, and five documents should be easy to

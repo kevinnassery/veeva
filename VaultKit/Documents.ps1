@@ -203,12 +203,13 @@ function Send-VaultStagingPart {
                 continue
             }
             if ($status -eq 429 -and $attempt -lt $MaxRetries) {
-                Write-VaultLog "$($Context.TargetHost) HTTP 429 on part $PartNumber - waiting 60s" 'WARN'
-                Start-Sleep -Seconds 60
+                $wait = Get-VaultThrottleDelay -Kind 'throttled' -Attempt $attempt -RetryAfter (Get-VaultRetryAfter $_.Exception.Response)
+                Write-VaultLog "$($Context.TargetHost) HTTP 429 on part $PartNumber - waiting ${wait}s" 'WARN'
+                Start-Sleep -Seconds $wait
                 continue
             }
             if (((-not $status) -or ($status -ge 500)) -and $attempt -lt $MaxRetries) {
-                $wait = [math]::Pow(2, $attempt) * 5
+                $wait = Get-VaultThrottleDelay -Kind 'transient' -Attempt $attempt -RetryAfter (Get-VaultRetryAfter $_.Exception.Response)
                 Write-VaultLog "$($Context.TargetHost) transient error on part $PartNumber (HTTP $status) - retry $attempt/$MaxRetries in ${wait}s" 'WARN'
                 Start-Sleep -Seconds $wait
                 continue
