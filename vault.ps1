@@ -117,7 +117,7 @@ param(
     [int]$Workers = 0
 )
 
-$ScriptVersion = '2026.08.30-2'
+$ScriptVersion = '2026.08.30-3'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -849,7 +849,15 @@ function Invoke-Map {
     }
 
     Write-VaultLog "Log: $script:VaultLogFile"
-    if ($st.Skipped) { exit 1 }
+
+    # Set explicitly, both ways. A script that simply runs off its end leaves whatever
+    # $LASTEXITCODE the previous command happened to set, so a clean check looked like a
+    # failure purely because something before it had failed.
+    if ($st.Skipped) {
+        Write-VaultLog "Exit 1: $($st.Skipped) row(s) name no document that will be migrated." 'WARN'
+        exit 1
+    }
+    exit 0
 }
 
 function Invoke-Verify {

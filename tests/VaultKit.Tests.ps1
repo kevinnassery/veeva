@@ -211,7 +211,9 @@ T 'human is not canonical'     { Eq $script:VaultIdMapStats.Canonical $false 'fl
 # normalising makes it canonical
 $norm = Join-Path $md 'norm.csv'
 T 'export writes canonical'    { [void](Export-VaultIdMap -Map $h -Path $norm)
-                                 Eq ((Get-Content $norm -TotalCount 1) -replace '"','') 'source_id,target_id' 'header' }
+                                 Eq (Get-Content $norm -TotalCount 1) 'source_id,target_id' 'header, unquoted' }
+T 'export quotes nothing'      { if((Get-Content $norm -Raw) -match '"'){ throw 'Export-Csv style quoting crept back in' } }
+T 'export writes no BOM'       { $b = [IO.File]::ReadAllBytes($norm); if($b[0] -eq 0xEF -and $b[1] -eq 0xBB){ throw 'BOM written' } }
 T 'normalised round-trips'     { $r = Import-VaultIdMap -Path $norm
                                  Eq $script:VaultIdMapStats.Canonical $true 'canonical'
                                  Eq $r.Count $h.Count 'same pairs' }

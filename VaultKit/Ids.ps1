@@ -11,12 +11,19 @@ function Export-VaultIdMap {
         [Parameter(Mandatory)]$Map,
         [Parameter(Mandatory)][string]$Path
     )
-    $rows = New-Object System.Collections.ArrayList
+    # Written by hand rather than with Export-Csv, which on Windows PowerShell 5.1 quotes
+    # every field and emits a byte order mark - so the canonical file would have come out
+    # as "source_id","target_id" with a BOM, which is not the shape the format document
+    # says it is. Ids are digits and the headers are fixed, so nothing here needs quoting
+    # or escaping, and a file anyone can read in Notepad and diff cleanly is worth more
+    # than one that went through a cmdlet.
+    $lines = New-Object System.Collections.ArrayList
+    [void]$lines.Add('source_id,target_id')
     foreach ($k in ($Map.Keys | Sort-Object { [long]$_ })) {
-        [void]$rows.Add([pscustomobject]@{ source_id = "$k"; target_id = "$($Map[$k])" })
+        [void]$lines.Add(('{0},{1}' -f $k, $Map[$k]))
     }
-    $rows | Export-Csv -LiteralPath $Path -NoTypeInformation -Encoding UTF8 -WhatIf:$false
-    return $rows.Count
+    [IO.File]::WriteAllLines($Path, $lines, (New-Object Text.UTF8Encoding $false))
+    return ($lines.Count - 1)
 }
 
 function Import-VaultIdList {
