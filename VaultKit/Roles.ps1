@@ -2213,3 +2213,96 @@ function Invoke-VaultRolesExplain {
     Write-VaultLog "Report: $report"
     return ($stat.Surplus + $stat.Both)
 }
+
+function Invoke-VaultDocTypeMdlDump {
+    # Every attribute of a document type's MDL component, not the three we parse.
+    #
+    # Get-VaultDocTypeRoleDefault reads role_defaulting_editors, _viewers and _consumers
+    # and nothing else, so a document type that defaults a CUSTOM role would be invisible
+    # to it - and -WithTypeDefaults would silently apply less than the type configures.
+    # That is a claim about the component's shape, and the component can be asked.
+    param(
+        [Parameter(Mandatory)]$Context,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$TypeLabel,
+        [AllowEmptyString()][string]$SubtypeLabel = ''
+    )
+    $c = $Context
+    $idx = Get-VaultDocTypeNameIndex -Context $c
+    $typeKey = ConvertTo-VaultNameKey $TypeLabel
+    if (-not $idx.Types.ContainsKey($typeKey)) {
+        throw "No document type called '$TypeLabel'. Run roles survey to see the labels this vault uses."
+    }
+    $typeName = $idx.Types[$typeKey]
+
+    $candidates = New-Object System.Collections.ArrayList
+    if ($SubtypeLabel -and (ConvertTo-VaultNameKey $SubtypeLabel) -ne $typeKey) {
+        $subName = Get-VaultSubtypeName -Context $c -TypeName $typeName -SubtypeLabel $SubtypeLabel
+        if ($subName) { [void]$candidates.Add("Doctype.$typeName.$subName") }
+    }
+    [void]$candidates.Add("Doctype.$typeName")
+    [void]$candidates.Add('Doctype.base_document__v')
+
+    $rows = New-Object System.Collections.ArrayList
+    foreach ($component in $candidates) {
+        Write-VaultLog '----------------------------------------------------------------'
+        Write-VaultLog "$component"
+        $r = $null
+        foreach ($path in @("/configuration/$component", "/api/mdl/components/$component")) {
+            try { $r = Invoke-VaultApi -VaultHost $c.VaultHost -ApiVersion $c.Api -Method GET -Path $path -MaxRetries 1; break }
+            catch { }
+        }
+        if ($null -eq $r) { Write-VaultLog '  could not be read' 'WARN'; continue }
+
+        $data = Get-VaultField $r 'data' $null
+        if (-not $data) { $data = $r }
+
+        $props = @()
+        try { $props = @($data.PSObject.Properties) } catch { }
+        if (-not $props.Count) {
+            $raw = "$(Get-VaultField $r 'raw' '')"
+            Write-VaultLog "  not JSON - raw MDL, $($raw.Length) character(s). Saved to the file below."
+            [void]$rows.Add([pscustomobject]@{ Component = $component; Attribute = '(raw)'; Kind = 'text'; Count = $raw.Length; Value = $raw })
+            continue
+        }
+
+        foreach ($p in ($props | Sort-Object Name)) {
+            $v = $p.Value
+            $kind = 'scalar'; $count = 1; $shown = "$v"
+            if ($v -is [Array]) { $kind = 'array'; $count = $v.Count; $shown = (@($v | Select-Object -First 6) -join '; ') }
+            elseif ($null -eq $v) { $shown = '' }
+            if ($shown.Length -gt 160) { $shown = $shown.Substring(0, 160) + ' ...' }
+
+            # Anything that looks like it defaults a principal into a role. This is the
+            # question: are there more of these than the three we parse?
+            $interesting = ($p.Name -match 'role|default|permission|shar')
+            $line = ("  {0,-38} {1,-7} {2,4}  {3}" -f $p.Name, $kind, $count, $shown)
+            if ($interesting) { Write-VaultLog $line 'OK' } else { Write-VaultLog $line }
+
+            [void]$rows.Add([pscustomobject]@{
+                Component = $component; Attribute = $p.Name; Kind = $kind; Count = $count; Value = $shown
+            })
+        }
+    }
+
+    $known = @('role_defaulting_editors', 'role_defaulting_viewers', 'role_defaulting_consumers')
+    $defaulting = @($rows | Where-Object { $_.Attribute -like 'role_defaulting*' })
+    $unparsed   = @($defaulting | Where-Object { $known -notcontains $_.Attribute })
+
+    Write-VaultLog '----------------------------------------------------------------'
+    Write-VaultLog "$($defaulting.Count) role_defaulting_* attribute(s) across the components read"
+    if ($unparsed.Count) {
+        Write-VaultLog "$($unparsed.Count) of them are NOT read by -WithTypeDefaults:" 'ERROR'
+        foreach ($u in $unparsed) { Write-VaultLog "  $($u.Component)  $($u.Attribute)  = $($u.Value)" 'ERROR' }
+        Write-VaultLog 'Type defaults for those roles are configured and would not be applied.' 'ERROR'
+    }
+    else {
+        Write-VaultLog 'Only editors, viewers and consumers - which is exactly what -WithTypeDefaults reads.' 'OK'
+        Write-VaultLog 'So a document type cannot default a custom role, and nothing is being missed.' 'OK'
+    }
+
+    $out = Join-Path $c.Out 'doctype-mdl.csv'
+    (ConvertTo-VaultUniformRows -Rows $rows) |
+        Export-Csv -LiteralPath $out -NoTypeInformation -Encoding UTF8 -WhatIf:$false
+    Write-VaultLog "Every attribute written to $out"
+    return $unparsed.Count
+}

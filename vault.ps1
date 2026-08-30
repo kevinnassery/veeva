@@ -102,6 +102,9 @@ param(
     [string]$Anchor = '',
     # verify fields: show only fields whose name matches this.
     [string]$Match = '',
+    # roles mdl: which document type, and optionally which subtype.
+    [string]$Type = '',
+    [string]$Subtype = '',
     # update: go ahead even though a run is holding a lock.
     [switch]$Force,
     # update: fetch this exact commit instead of whatever main points at. Pins a known
@@ -133,7 +136,7 @@ param(
     [int]$Workers = 0
 )
 
-$ScriptVersion = '2026.08.30-23'
+$ScriptVersion = '2026.08.30-24'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -731,8 +734,8 @@ function Invoke-Roles {
     # command will not touch teaches people to say yes without reading.
     param([string]$Action)
 
-    if ($Action -notin @('survey', 'probe', 'explain', 'scope', 'plan', 'assign', 'verify')) {
-        Write-Host 'vault.ps1 roles <survey|probe|explain|scope|plan|assign|verify>' -ForegroundColor Red
+    if ($Action -notin @('survey', 'probe', 'explain', 'mdl', 'scope', 'plan', 'assign', 'verify')) {
+        Write-Host 'vault.ps1 roles <survey|probe|explain|mdl|scope|plan|assign|verify>' -ForegroundColor Red
         exit 2
     }
 
@@ -743,6 +746,16 @@ function Invoke-Roles {
         if (-not $script:TargetHost) { throw "No vault configured. Set [vault] target = ... in $($script:CfgPath)" }
         [void](Confirm-VaultSessions -Vaults @(@{ Role = 'target'; Name = $script:TargetHost }) `
                    -ApiVersion $script:Api -Yes:$Yes)
+
+        # Reads one document type's whole MDL component. No scope, no documents.
+        if ($Action -eq 'mdl') {
+            if (-not $Type) { throw "roles mdl needs -Type '<document type label>'. roles survey lists them." }
+            $ctxM = New-VaultContext -Section 'roles'
+            $bad = Invoke-VaultDocTypeMdlDump -Context $ctxM -TypeLabel $Type -SubtypeLabel $Subtype
+            Write-VaultLog "Log: $script:VaultLogFile"
+            if ($bad -gt 0) { exit 1 }
+            return
+        }
 
         $mapSetting = Get-VaultSetting -Config $script:Cfg -Section roles -Key map -Default ''
         if ($Where -and $mapSetting -and -not $MapFile) {
@@ -1103,6 +1116,7 @@ vault $v
   roles survey             What is in scope: subtypes, roles, defaults. Changes nothing
   roles probe              Whether a defaults table is needed, and what it should say
   roles explain            Prove where the reported defaults come from. Changes nothing
+  roles mdl                Every attribute of a document type's MDL component
   roles scope              Which documents the filter selects. One query, changes nothing
   roles plan               Exactly who would be added to which role. Changes nothing
   roles assign             Fill in the Sharing Settings the migration left empty
@@ -1153,6 +1167,7 @@ Options
   -WithRoleRules           verify: check roles against the lifecycle rules as well
   -Anchor <field>          verify map: the target field holding the source id
   -Match <regex>           verify fields: show only fields matching this
+  -Type / -Subtype         roles mdl: which document type to dump
   -MapFile <csv>           map: which file to read
   -OutFile <csv>           map write: where to put the canonical copy
   -SourceColumn <name>     map: name the id columns instead of detecting them
