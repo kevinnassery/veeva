@@ -71,8 +71,21 @@ param(
     [string[]]$Role = @(),
     [string[]]$ExcludeRole = @(),
     [ValidateRange(1, 1000)][int]$BatchSize = 200,
+
+    # ---- verify ----
+    # trial: a fixed handful, at random. sample: sized for a confidence level.
+    [int]$TrialSize = 25,
+    [ValidateSet(90, 95, 99)][int]$Confidence = 95,
+    [ValidateRange(0.1, 50)][double]$Margin = 5,
+    # Fixing this makes a sample reproducible, which is what makes it evidence.
+    [int]$Seed = 0,
+    # Also check each document's roles against the lifecycle rules, not just that they
+    # are populated. Two extra reads per document.
+    [switch]$WithRoleRules,
     # roles verify: read each document's roles individually instead of in bulk.
     [switch]$Slow,
+    # verify map: the target document field that holds the source document's id.
+    [string]$Anchor = '',
     # update: go ahead even though a run is holding a lock.
     [switch]$Force,
     # update: fetch this exact commit instead of whatever main points at. Pins a known
@@ -99,7 +112,7 @@ param(
     [int]$Workers = 0
 )
 
-$ScriptVersion = '2026.08.29-30'
+$ScriptVersion = '2026.08.30-1'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -114,7 +127,7 @@ $Repo = 'kevinnassery/veeva'
 # The module, in load order, and the manifest `update` fetches. Derived from one list so
 # that adding a part cannot leave it undelivered - a dispatcher calling a function from a
 # file nobody downloads is the failure this arrangement exists to make impossible.
-$VaultKitParts = @('Log', 'Config', 'Auth', 'Http', 'Ids', 'Run', 'Workers', 'Attachments', 'Documents', 'Roles')
+$VaultKitParts = @('Log', 'Config', 'Auth', 'Http', 'Ids', 'Run', 'Workers', 'Attachments', 'Documents', 'Roles', 'Verify')
 
 # vault.ps1 goes LAST: it is the file being executed, and it is the one whose failure to
 # land leaves the least broken folder behind.
@@ -782,6 +795,49 @@ function Invoke-Roles {
     finally { Stop-VaultLock }
 }
 
+function Invoke-Verify {
+    # Is this document migrated? One verdict per source/target pair, across the document's
+    # own file, its attachments and its Sharing Settings.
+    param([string]$Action)
+
+    if ($Action -in @('anchors', 'map')) {
+        Initialize-VaultRun -LogName "verify-$Action"
+        Write-VaultLog "vault $ScriptVersion - verify $Action (read only, nothing is changed)"
+        [void](Confirm-VaultsForRun)
+        $ctx = New-VaultContext -Section 'verify' -MapKey 'map'
+        $bad = if ($Action -eq 'anchors') { Invoke-VaultAnchorProbe -Context $ctx -Limit $(if ($Limit -gt 0) { $Limit } else { 500 }) }
+               else {
+                   if (-not $Anchor) { throw 'verify map needs -Anchor <field>. Run verify anchors to find one.' }
+                   Invoke-VaultBuildPairMap -Context $ctx -Anchor $Anchor
+               }
+        Write-VaultLog "Log: $script:VaultLogFile"
+        if ($bad -gt 0) { exit 1 }
+        return
+    }
+
+    if ($Action -notin @('trial', 'sample', 'census')) {
+        Write-Host 'vault.ps1 verify <trial|sample|census>   (also: anchors, map)' -ForegroundColor Red
+        Write-Host '  trial   a fixed handful at random - proves the check runs' -ForegroundColor Red
+        Write-Host '  sample  sized for a confidence level - evidence about the population' -ForegroundColor Red
+        Write-Host '  census  every mapped document' -ForegroundColor Red
+        exit 2
+    }
+
+    Initialize-VaultRun -LogName "verify-$Action"
+    Start-VaultLock -Name 'verify'
+    try {
+        Write-VaultLog "vault $ScriptVersion - verify $Action ($Depth)"
+        [void](Confirm-VaultsForRun)
+        $ctx = New-VaultContext -Section 'verify' -MapKey 'map'
+        $bad = Invoke-VaultMigrationVerify -Context $ctx -Mode $Action -Depth $Depth `
+                   -TrialSize $TrialSize -Confidence $Confidence -MarginPct $Margin -Seed $Seed `
+                   -WithRoleRules:$WithRoleRules -Limit $Limit
+        Write-VaultLog "Log: $script:VaultLogFile"
+        if ($bad -gt 0) { exit 1 }
+    }
+    finally { Stop-VaultLock }
+}
+
 function Invoke-Help {
     $v = $ScriptVersion
     Write-Host @"
@@ -808,6 +864,12 @@ vault $v
   roles plan               Exactly who would be added to which role. Changes nothing
   roles assign             Fill in the Sharing Settings the migration left empty
   roles verify             Prove what a run recorded is actually on the documents
+
+  verify trial             Is it migrated? A fixed handful at random, to prove the check
+  verify sample            The same, sized for a confidence level (95% by default)
+  verify census            The same, over every mapped document
+  verify anchors           Which field, if any, relates the two vaults
+  verify map               Build the source/target pairs from the vault itself
   version                  Print the version
   help                     This
 
@@ -830,6 +892,12 @@ Options
   -Role / -ExcludeRole     roles: only these roles, or all but these
   -BatchSize <n>           roles: assignments per request (default 200)
   -Slow                    roles verify: read roles per document, not in bulk
+  -TrialSize <n>           verify trial: how many (default 25)
+  -Confidence 90|95|99     verify sample: confidence level (default 95)
+  -Margin <pct>            verify sample: margin of error (default 5)
+  -Seed <n>                verify: fix the random selection so it can be repeated
+  -WithRoleRules           verify: check roles against the lifecycle rules as well
+  -Anchor <field>          verify map: the target field holding the source id
   -Workers <n>             Move the work with n processes. Overrides [limits] workers
   -Depth FAST|DEEP         verify: sizes and recorded MD5, or download both and hash
   -ReplaceDiffering        sync: send same-name attachments whose bytes differ
@@ -879,6 +947,7 @@ switch ($verb) {
     'attachments' { Invoke-Attachments -Action $sub }
     'documents'   { Invoke-Documents -Action $sub }
     'roles'       { Invoke-Roles -Action $sub }
+    'verify'      { Invoke-Verify -Action $sub }
     'version'     { Write-Host $ScriptVersion }
     'help'        { Invoke-Help }
     ''            { Invoke-Help }

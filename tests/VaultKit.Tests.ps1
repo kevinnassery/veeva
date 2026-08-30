@@ -176,6 +176,29 @@ $script:VaultLogFile = ''
 T 'no log stamp still snapshots'     { $s2 = Copy-VaultResultsSnapshot -Path $canon; if(-not (Test-Path $s2)){ throw 'no snapshot written' } }
 T 'missing source returns empty'     { Eq (Copy-VaultResultsSnapshot -Path (Join-Path $snapDir 'nope.csv')) '' 'empty' }
 
+Write-Host "== Sample size (Cochran + finite population) =="
+T '95/5 over a large N is ~384'   { $n = Get-VaultSampleSize -Population 1000000 -Confidence 95 -MarginPct 5; if($n -lt 384 -or $n -gt 385){ throw "got $n" } }
+T '95/5 over 15775 is 375-376'    { $n = Get-VaultSampleSize -Population 15775 -Confidence 95 -MarginPct 5; if($n -lt 375 -or $n -gt 376){ throw "got $n" } }
+T 'tighter margin needs more'     { $a = Get-VaultSampleSize -Population 15775 -MarginPct 5; $b = Get-VaultSampleSize -Population 15775 -MarginPct 2; if($b -le $a){ throw "$b not > $a" } }
+T 'higher confidence needs more'  { $a = Get-VaultSampleSize -Population 15775 -Confidence 95; $b = Get-VaultSampleSize -Population 15775 -Confidence 99; if($b -le $a){ throw "$b not > $a" } }
+T 'never exceeds the population'  { Eq (Get-VaultSampleSize -Population 10 -MarginPct 1) 10 'capped' }
+T 'empty population is zero'      { Eq (Get-VaultSampleSize -Population 0) 0 'zero' }
+
+Write-Host "== Sample selection =="
+$pop = 1..500 | ForEach-Object { [pscustomobject]@{ Source = "$_"; Target = "t$_" } }
+T 'returns exactly n'             { Eq (@(Select-VaultSample -Items $pop -Count 40 -Seed 7).Count) 40 'count' }
+T 'no repeats'                    { $s = Select-VaultSample -Items $pop -Count 60 -Seed 7; Eq (@($s | Select-Object -ExpandProperty Source -Unique).Count) 60 'unique' }
+T 'same seed, same sample'        { $a = (Select-VaultSample -Items $pop -Count 30 -Seed 42 | ForEach-Object Source) -join ','
+                                    $b = (Select-VaultSample -Items $pop -Count 30 -Seed 42 | ForEach-Object Source) -join ','
+                                    Eq $a $b 'reproducible' }
+T 'different seed, different'     { $a = (Select-VaultSample -Items $pop -Count 30 -Seed 42 | ForEach-Object Source) -join ','
+                                    $b = (Select-VaultSample -Items $pop -Count 30 -Seed 43 | ForEach-Object Source) -join ','
+                                    if($a -eq $b){ throw 'two seeds gave the same sample' } }
+T 'n >= population returns all'   { Eq (@(Select-VaultSample -Items $pop -Count 900 -Seed 1).Count) 500 'all' }
+T 'zero returns none'             { Eq (@(Select-VaultSample -Items $pop -Count 0 -Seed 1).Count) 0 'none' }
+T 'draws from across the range'   { $s = @(Select-VaultSample -Items $pop -Count 100 -Seed 5 | ForEach-Object { [int]$_.Source })
+                                    if((($s | Measure-Object -Maximum).Maximum) -lt 250){ throw 'sample clustered at the start - not random' } }
+
 Write-Host "== Disk budget =="
 T 'budget throws when tight' { $t=$false; try{ Assert-VaultDiskBudget -Path $td -Needed ([long]999TB) -ReserveMB 2048 }catch{ $t=($_ -match 'not enough disk') }; if(-not $t){throw 'no throw'} }
 T 'budget ok when room'      { Assert-VaultDiskBudget -Path $td -Needed 1024 -ReserveMB 1 }

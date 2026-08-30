@@ -157,6 +157,59 @@ unless `-ReplaceDiffering` is set. Attachments are attached directly to the targ
 document in one upload — no File Staging is involved, because an attachment has somewhere
 to land the moment it arrives.
 
+## Is it migrated?
+
+The per-workflow checks each answer their own question. This one answers the question
+someone actually asks at the end, which is about a **document** rather than a step —
+source document to destination document, and everything that hangs off it.
+
+```
+.\vault.ps1 verify trial     a fixed handful at random - proves the check runs
+.\vault.ps1 verify sample    sized for a confidence level - evidence about the population
+.\vault.ps1 verify census    every mapped document
+```
+
+Read-only on both vaults. One row per source/target pair in
+`migration-validate-results.csv`, across four dimensions:
+
+| dimension | what it compares |
+| --- | --- |
+| both documents exist | the pair resolves on both sides at all |
+| the file | source document's file against the target document's, by MD5 (`-Depth FAST` compares size only) |
+| attachments | by name and MD5, from the listings — nothing is downloaded |
+| Sharing Settings | roles present and populated; `-WithRoleRules` also checks them against the lifecycle rules |
+
+`VERIFIED` means every dimension that could be checked passed. A dimension that could not
+be checked never counts as a pass — a document whose file has been staged but not yet
+loaded reports `PARTIAL` with `NO_FILE_ON_TARGET`, not a clean bill.
+
+**Sizing.** `sample` uses Cochran's formula with the finite population correction, at
+p=0.5 — the conservative assumption, and the one that does not require guessing the
+failure rate you are trying to measure. For 15,775 documents at 95% confidence and a ±5%
+margin that is 376. `-Confidence 90|95|99` and `-Margin <pct>` move it; a tighter margin
+costs more documents than a higher confidence does.
+
+**Reproducibility.** Pass `-Seed <n>` and the same seed over the same population selects
+the same documents. A sample nobody can reproduce is an anecdote, and "which documents
+did you check" is the first question anyone will ask. Every run states its mode, size,
+seed and what fraction of the population it covered, and a sample run says out loud that
+it does not certify the documents it did not check.
+
+**The anchor.** The pairs come from `[verify] map`. A static map says what somebody
+*intended*, goes stale when anyone loads a document outside it, and cannot tell you about
+a document it does not mention. If the load wrote the source id onto a field of the target
+document, there is a better anchor in the vault itself:
+
+```
+.\vault.ps1 verify anchors            which field, if any, relates the two vaults
+.\vault.ps1 verify map -Anchor <field>  build the pairs from the vault
+```
+
+`anchors` reads the target's document field definitions, queries every candidate, and
+reports which are populated and how many of their values are source ids the map knows —
+a field that is populated but matches nothing is worse than no field, because it looks
+like an anchor.
+
 ## Repair the Sharing Settings
 
 A document created through the API or Vault Loader does **not** get the lifecycle's role
