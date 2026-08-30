@@ -1862,6 +1862,13 @@ function Get-VaultCreatedByScope {
     $vql = "SELECT id FROM documents WHERE created_by__v = $uid AND created_date__v > '$iso'"
     $docs = @(Get-VaultDocumentsByQuery -Context $Context -Where $vql)
     Write-VaultLog "$($docs.Count) document(s) match both conditions" 'OK'
+
+    # A window wider than intended is the way this scope goes wrong, and it goes wrong
+    # quietly - the run simply touches more than anyone meant. Said out loud rather than
+    # left to be noticed in the results.
+    if ($docs.Count -gt 5000) {
+        Write-VaultLog "That is a lot for a $WithinHours hour window. Check the hours before letting this write." 'WARN'
+    }
     return $docs
 }
 
@@ -1875,13 +1882,20 @@ function Select-VaultScopeIntersection {
         [Parameter(Mandatory)][AllowEmptyCollection()][array]$Documents,
         [Parameter(Mandatory)]$Map
     )
+    # target id -> source id, so the intersection can carry the source through.
     $known = @{}
-    foreach ($v in $Map.Values) { $known["$v"] = $true }
+    foreach ($k in $Map.Keys) { $known["$($Map[$k])"] = "$k" }
 
+    # TargetId, not id: the query hands back {TargetId, SourceId}, which is the shape the
+    # rest of the roles flow reads. Matching on 'id' found nothing and quietly assigned
+    # nothing - an empty intersection looks exactly like "there was no work to do".
     $keep = New-Object System.Collections.ArrayList
     foreach ($d in $Documents) {
-        $id = "$(Get-VaultField $d 'id' '')"
-        if ($id -and $known.ContainsKey($id)) { [void]$keep.Add($d) }
+        $id = "$(Get-VaultField $d 'TargetId' '')"
+        if (-not $id -or -not $known.ContainsKey($id)) { continue }
+        # The map knows which source document this came from; the query does not. Filling
+        # it in here means the results file can say what a repaired document used to be.
+        [void]$keep.Add([pscustomobject]@{ TargetId = $id; SourceId = "$($known[$id])" })
     }
     $dropped = $Documents.Count - $keep.Count
     Write-VaultLog "$($Documents.Count) from the query, $($known.Count) in the map, $($keep.Count) in both"

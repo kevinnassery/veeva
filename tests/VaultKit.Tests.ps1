@@ -157,6 +157,19 @@ T 'real latin-1 is left alone' { Eq (Get-VaultAttachmentName -Header "attachment
 T 'no header gives nothing'    { Eq (Get-VaultAttachmentName -Header '') '' 'empty' }
 T 'no filename gives nothing'  { Eq (Get-VaultAttachmentName -Header 'attachment') '' 'none' }
 
+Write-Host "== Permission sync scope =="
+$m = @{ '55056' = '207311'; '55057' = '207312'; '55058' = '207313' }
+$fromQuery = @(
+  [pscustomobject]@{ TargetId='207311'; SourceId='' },
+  [pscustomobject]@{ TargetId='207312'; SourceId='' },
+  [pscustomobject]@{ TargetId='999999'; SourceId='' })   # made recently, not from this migration
+$hit = @(Select-VaultScopeIntersection -Documents $fromQuery -Map $m)
+T 'intersection keeps both'      { Eq $hit.Count 2 'kept' }
+T 'and drops what is not mapped' { if(@($hit | Where-Object { $_.TargetId -eq '999999' }).Count){ throw 'kept an unmapped document' } }
+T 'source id is carried through' { Eq (@($hit | Where-Object { $_.TargetId -eq '207311' })[0].SourceId) '55056' 'source' }
+T 'shape is what assign reads'   { if(-not $hit[0].PSObject.Properties['TargetId']){ throw 'no TargetId' } }
+T 'no map overlap is empty'      { Eq (@(Select-VaultScopeIntersection -Documents $fromQuery -Map @{ 'a'='zzz' }).Count) 0 'none' }
+
 Write-Host "== Throttle backoff =="
 T 'burst: eases off gently high' { $d = Get-VaultThrottleDelay -Kind 'burst' -Remaining 390; if($d -lt 1 -or $d -gt 12){ throw "got $d" } }
 T 'burst: waits longer when low' { $lo = 1..40 | ForEach-Object { Get-VaultThrottleDelay -Kind 'burst' -Remaining 10 }

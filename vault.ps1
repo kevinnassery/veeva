@@ -123,7 +123,7 @@ param(
     [int]$Workers = 0
 )
 
-$ScriptVersion = '2026.08.30-8'
+$ScriptVersion = '2026.08.30-9'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -771,7 +771,17 @@ Use roles survey or roles probe to look around; neither writes anything.
                 else { $found }
             }
             elseif ($Where) { Get-VaultDocumentsByQuery -Context $ctx -Where $Where }
-            elseif ($ctx.Map -and $ctx.Map.Count) { @($ctx.Map.Values | Select-Object -Unique) }
+            elseif ($ctx.Map -and $ctx.Map.Count) {
+                # {TargetId, SourceId} objects, which is what the roles flow reads. Bare
+                # ids are strings, and $doc.TargetId on a string is a terminating error
+                # under StrictMode - so this path threw the moment it was taken.
+                $byTarget = [ordered]@{}
+                foreach ($k in $ctx.Map.Keys) {
+                    $t = "$($ctx.Map[$k])"
+                    if ($t -and -not $byTarget.Contains($t)) { $byTarget[$t] = "$k" }
+                }
+                @($byTarget.Keys | ForEach-Object { [pscustomobject]@{ TargetId = "$_"; SourceId = "$($byTarget[$_])" } })
+            }
             elseif ($Action -eq 'probe') {
                 Write-VaultLog 'No map or -Where given, so sampling the vault in whatever order it returns.'
                 Write-VaultLog 'This can miss a subtype entirely. Set [roles] map or pass -Where.' 'WARN'
