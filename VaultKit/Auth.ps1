@@ -323,7 +323,16 @@ function Confirm-VaultSessions {
         return $rows
     }
 
-    $answer = Read-Host 'Are these the right two vaults? [y/N]'
+    # Ask about what was actually shown. This said "the right two vaults" however many it
+    # had listed, so a roles command - which reads one vault and lists one - asked about
+    # two. A confirmation that disagrees with the screen above it is one people learn to
+    # answer without reading, which is the opposite of what it is for.
+    $question = switch ($rows.Count) {
+        1       { "Is this the right vault? [y/N]" }
+        2       { "Are these the right two vaults? [y/N]" }
+        default { "Are these the right $($rows.Count) vaults? [y/N]" }
+    }
+    $answer = Read-Host $question
     if ($answer -notmatch '^[Yy]') { throw 'Stopped: the vaults were not confirmed.' }
     return $rows
 }

@@ -133,7 +133,7 @@ param(
     [int]$Workers = 0
 )
 
-$ScriptVersion = '2026.08.30-20'
+$ScriptVersion = '2026.08.30-21'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
