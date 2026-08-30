@@ -137,7 +137,7 @@ param(
     [int]$Workers = 0
 )
 
-$ScriptVersion = '2026.08.30-27'
+$ScriptVersion = '2026.08.30-28'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -748,6 +748,22 @@ function Invoke-Roles {
         [void](Confirm-VaultSessions -Vaults @(@{ Role = 'target'; Name = $script:TargetHost }) `
                    -ApiVersion $script:Api -Yes:$Yes)
 
+        # A command of its own, and it needs no document list and no map: it reads the
+        # claims out of the results file a run wrote. Ahead of everything that resolves a
+        # scope, because it has none - it asked for [roles] map and refused to run
+        # without one, for a file it never opens.
+        #
+        # Never chained onto assign either. Vault ignores group ids it cannot grant and
+        # still answers SUCCESS, so the run that made the claim is the last thing that
+        # should be trusted to check it.
+        if ($Action -eq 'verify') {
+            $ctxV = New-VaultContext -Section 'roles'
+            $bad = Invoke-VaultRolesVerify -Context $ctxV -Slow:$Slow -Limit $Limit
+            Write-VaultLog "Log: $script:VaultLogFile"
+            if ($bad -gt 0) { exit 1 }
+            return
+        }
+
         # Reads one document type's whole MDL component. No scope, no documents.
         if ($Action -eq 'mdl') {
             if (-not $Type) { throw "roles mdl needs -Type '<document type label>'. roles survey lists them." }
@@ -794,18 +810,6 @@ roles survey and roles probe write nothing and need no scope.
 
         $ctx = if ($Where -or ($scoped -and -not $mapSetting)) { New-VaultContext -Section 'roles' }
                else { New-VaultContext -Section 'roles' -MapKey 'map' }
-
-        # A command of its own, and it needs no document list: it reads the claims out
-        # of the results file a run wrote. Never chained onto assign - Vault ignores
-        # group ids it cannot grant and still answers SUCCESS, so the run that made the
-        # claim is the last thing that should be trusted to check it.
-        if ($Action -eq 'verify') {
-            $ctxV = New-VaultContext -Section 'roles'
-            $bad = Invoke-VaultRolesVerify -Context $ctxV -Slow:$Slow -Limit $Limit
-            Write-VaultLog "Log: $script:VaultLogFile"
-            if ($bad -gt 0) { exit 1 }
-            return
-        }
 
         # -Survey does its own single query and needs no document list, so it answers
         # before the enumeration every other mode depends on.
