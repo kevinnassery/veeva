@@ -113,9 +113,9 @@ Write-Host "== Run: resumable results =="
 $r = New-VaultResults -Path "$td/res.csv" -KeyColumn 'Key' -DoneStatuses @('ATTACHED') -Existing 'Resume'
 Add-VaultResult -Results $r -Row ([pscustomobject]@{Key='a';Status='ATTACHED';Msg='x'})
 Add-VaultResult -Results $r -Row ([pscustomobject]@{Key='b';Status='ERROR';Msg='y'})
-# Two rows are under the save cadence, so nothing is on disk yet - which is the whole
-# point of the cadence, and the reason every workflow saves explicitly when it finishes.
-T 'held under the cadence'   { if(Test-Path "$td/res.csv"){throw 'wrote every row again'} }
+# The rows are in the journal, not the CSV - which is the point: appending is linear
+# where rewriting the CSV per row is quadratic.
+T 'journal holds them'       { Eq (@(Get-Content "$td/res.csv.jsonl").Count) 2 'journal' }
 Save-VaultResults -Results $r
 T 'results csv written'      { if(-not(Test-Path "$td/res.csv")){throw 'no file'} }
 $r2 = New-VaultResults -Path "$td/res.csv" -KeyColumn 'Key' -DoneStatuses @('ATTACHED') -Existing 'Resume'
@@ -157,19 +157,50 @@ T 'real latin-1 is left alone' { Eq (Get-VaultAttachmentName -Header "attachment
 T 'no header gives nothing'    { Eq (Get-VaultAttachmentName -Header '') '' 'empty' }
 T 'no filename gives nothing'  { Eq (Get-VaultAttachmentName -Header 'attachment') '' 'none' }
 
-Write-Host "== Results save cadence =="
+Write-Host "== Burst headroom tracking =="
+$script:VaultBurstRemaining = @{}; $script:VaultBurstLowest = @{}
+$script:VaultBurstRemaining['a.example.com'] = 1400; $script:VaultBurstLowest['a.example.com'] = 310
+T 'reports per host'        { Eq (@(Get-VaultBurstReport).Count) 1 'one line' }
+# @() around the call: PowerShell unrolls a one-element array on return, so without it
+# [0] indexes the first CHARACTER of the string rather than the first line.
+T 'names both numbers'      { $r = @(Get-VaultBurstReport)[0]; if($r -notmatch '1400' -or $r -notmatch '310'){ throw $r } }
+$script:VaultBurstRemaining = @{}; $script:VaultBurstLowest = @{}
+T 'silent when never seen'  { Eq (@(Get-VaultBurstReport).Count) 0 'none' }
+
+Write-Host "== Results journal =="
 $cd = Join-Path $tmp ('vkcad-'+[guid]::NewGuid().ToString('N')); New-Item -ItemType Directory -Force $cd|Out-Null
 $cf = Join-Path $cd 'r.csv'
-$rc = New-VaultResults -Path $cf -KeyColumn 'Id' -DoneStatuses @() -Existing 'Fresh' -SaveEvery 5
+$rc = New-VaultResults -Path $cf -KeyColumn 'Id' -DoneStatuses @('SUCCESS') -Existing 'Fresh'
 1..4 | ForEach-Object { Add-VaultResult -Results $rc -Row ([pscustomobject]@{ Id="$_"; Status='SUCCESS' }) }
-T 'under the cadence, no file yet' { if(Test-Path $cf){ throw 'wrote too early' } }
-Add-VaultResult -Results $rc -Row ([pscustomobject]@{ Id='5'; Status='SUCCESS' })
-T 'at the cadence, it writes'      { Eq (@(Import-Csv $cf).Count) 5 'rows' }
-Add-VaultResult -Results $rc -Row ([pscustomobject]@{ Id='6'; Status='SUCCESS' })
-T 'tail is held, not written'      { Eq (@(Import-Csv $cf).Count) 5 'still 5' }
-T 'explicit save flushes the tail' { Save-VaultResults -Results $rc; Eq (@(Import-Csv $cf).Count) 6 'six' }
-T 'save resets the counter'        { Eq $rc.Unsaved 0 'reset' }
-T 'default cadence is set'         { $r2 = New-VaultResults -Path (Join-Path $cd 'r2.csv') -KeyColumn 'Id' -Existing 'Fresh'; Eq $r2.SaveEvery 25 'default' }
+T 'journal written as it goes'  { Eq (@(Get-Content "$cf.jsonl").Count) 4 'lines' }
+T 'csv not written yet'         { if(Test-Path $cf){ throw 'rewrote the csv per row again' } }
+T 'save produces the csv'       { Save-VaultResults -Results $rc; Eq (@(Import-Csv $cf).Count) 4 'rows' }
+T 'save clears the journal'     { if(Test-Path "$cf.jsonl"){ throw 'journal outlived the csv' } }
+
+Write-Host "== Journal recovery (a run that was killed) =="
+$kf = Join-Path $cd 'k.csv'
+$k1 = New-VaultResults -Path $kf -KeyColumn 'Id' -DoneStatuses @('SUCCESS') -Existing 'Fresh'
+1..7 | ForEach-Object { Add-VaultResult -Results $k1 -Row ([pscustomobject]@{ Id="$_"; Status='SUCCESS' }) }
+# no Save - this is the process being killed
+$k2 = New-VaultResults -Path $kf -KeyColumn 'Id' -DoneStatuses @('SUCCESS') -Existing 'Resume'
+T 'killed run loses nothing'    { Eq $k2.Prior.Count 7 'prior' }
+T 'and resume knows it is done' { Eq $k2.Done.Count 7 'done' }
+
+Write-Host "== A torn last line is survivable =="
+$tf = Join-Path $cd 't.csv'
+$t1 = New-VaultResults -Path $tf -KeyColumn 'Id' -DoneStatuses @('SUCCESS') -Existing 'Fresh'
+1..3 | ForEach-Object { Add-VaultResult -Results $t1 -Row ([pscustomobject]@{ Id="$_"; Status='SUCCESS' }) }
+[IO.File]::AppendAllText("$tf.jsonl", '{"Id":"4","Stat')   # power cut mid-write
+$t2 = New-VaultResults -Path $tf -KeyColumn 'Id' -DoneStatuses @('SUCCESS') -Existing 'Resume'
+T 'complete rows still recover' { Eq $t2.Prior.Count 3 'prior' }
+
+Write-Host "== Journal survives a column being added =="
+$vf = Join-Path $cd 'v.csv'
+$v1 = New-VaultResults -Path $vf -KeyColumn 'Id' -DoneStatuses @() -Existing 'Fresh'
+Add-VaultResult -Results $v1 -Row ([pscustomobject]@{ Id='1'; Status='SUCCESS' })
+Add-VaultResult -Results $v1 -Row ([pscustomobject]@{ Id='2'; Status='SUCCESS'; Renamed=$true })
+Save-VaultResults -Results $v1
+T 'late column reaches the csv' { Eq ((Import-Csv $vf)[0].PSObject.Properties.Name -join ',') 'Id,Status,Renamed' 'cols' }
 
 Write-Host "== Mixed-schema results =="
 $oldRow = [pscustomobject]@{ Id='1'; Name='a.pdf'; Status='SUCCESS' }

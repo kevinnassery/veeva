@@ -61,6 +61,56 @@ function Read-VaultWorkerLog {
     }
 }
 
+function Merge-VaultWorkerLog {
+    # One log out of many, in the order things actually happened.
+    #
+    # Each worker keeps its own log - that is what makes a single worker's story readable
+    # when it is the one that went wrong. But nobody wants to open nine files to find out
+    # what a run did, and "which worker was that" is not a question worth answering by
+    # hand. So the per-worker files stay as the raw evidence and this writes the narrative.
+    #
+    # Sorted on the timestamp each line already carries. A line without one is a
+    # continuation of the line above it - a wrapped error, say - so it inherits that
+    # timestamp and stays attached rather than being sorted to the top.
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][string]$Pattern,
+        [Parameter(Mandatory)][int]$Count,
+        [Parameter(Mandatory)][string]$OutPath,
+        [string]$SupervisorLog = ''
+    )
+    $entries = New-Object System.Collections.ArrayList
+
+    $sources = New-Object System.Collections.ArrayList
+    if ($SupervisorLog -and (Test-Path -LiteralPath $SupervisorLog)) {
+        [void]$sources.Add([pscustomobject]@{ Label = 'sup'; Path = $SupervisorLog })
+    }
+    for ($w = 1; $w -le $Count; $w++) {
+        $dir = Join-Path $Root "w$w"
+        $log = @(Get-ChildItem -LiteralPath $dir -Filter $Pattern -ErrorAction SilentlyContinue |
+                 Sort-Object LastWriteTime | Select-Object -Last 1)
+        if ($log.Count) { [void]$sources.Add([pscustomobject]@{ Label = "w$w"; Path = $log[0].FullName }) }
+    }
+    if (-not $sources.Count) { return '' }
+
+    foreach ($src in $sources) {
+        $seq = 0; $ts = '0000-00-00 00:00:00'
+        foreach ($line in (Get-Content -LiteralPath $src.Path -ErrorAction SilentlyContinue)) {
+            $seq++
+            if ("$line" -match '^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})') { $ts = $Matches[1] }
+            [void]$entries.Add([pscustomobject]@{ Ts = $ts; Label = $src.Label; Seq = $seq; Line = "$line" })
+        }
+    }
+
+    # Ts first, then the worker, then its own line order - so a worker's lines never
+    # shuffle among themselves when several share a second.
+    $sorted = @($entries | Sort-Object Ts, Label, Seq)
+    $out = New-Object System.Collections.ArrayList
+    foreach ($e in $sorted) { [void]$out.Add(('{0,-3} | {1}' -f $e.Label, $e.Line)) }
+    [IO.File]::WriteAllLines($OutPath, $out, (New-Object Text.UTF8Encoding $false))
+    return $OutPath
+}
+
 function Invoke-VaultShardedRun {
     # Returns the number of items that failed, so the caller's exit code is unchanged
     # whether the run was sequential or parallel.
@@ -291,11 +341,27 @@ function Invoke-VaultShardedRun {
             Write-VaultLog "$renamed document(s) were written under a changed name - the rows where Name and StagedName differ" 'WARN'
         }
 
+        # Merged before the summary is written, so the summary can name it. The few
+        # supervisor lines after this point are in the supervisor's own log rather than
+        # the merged one - which is the right way round, since they say where to look.
+        $merged = ''
+        try {
+            $stamp = if ($script:VaultLogFile -and ($script:VaultLogFile -match '(\d{8}-\d{6})')) { $Matches[1] } else { Get-Date -Format 'yyyyMMdd-HHmmss' }
+            $name  = ($LogPattern -replace '\*.*$', '') + $stamp + '-all.log'
+            $merged = Merge-VaultWorkerLog -Root $root -Pattern $LogPattern -Count $count `
+                          -OutPath (Join-Path $c.Out $name) -SupervisorLog $script:VaultLogFile
+        }
+        catch { Write-VaultLog "Could not merge the worker logs: $_" 'WARN' }
+
         $secs = ((Get-Date) - $started).TotalSeconds
         Write-VaultLog '----------------------------------------------------------------'
         $of = if ($RowsAreItems) { " of $($Pending.Count)" } else { '' }
         Write-VaultLog ("$Verb $ok$of item(s), $bad not $SuccessStatus, in $(Format-VaultDuration $secs) across $count worker(s)") $(if ($bad) { 'WARN' } else { 'OK' })
         Write-VaultLog "Results     : $resultsPath"
+        if ($merged) { Write-VaultLog "Merged log  : $merged" }
+        # Said at the end of every parallel run, because "should we use more workers" is
+        # a question about this number and nothing else.
+        foreach ($line in (Get-VaultBurstReport)) { Write-VaultLog "  $line" }
         $snap = Copy-VaultResultsSnapshot -Path $resultsPath
         if ($snap) { Write-VaultLog "This run    : $snap" }
         Write-VaultLog "Worker output: $root"

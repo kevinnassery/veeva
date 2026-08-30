@@ -4,6 +4,24 @@
 # drifted: one still caught only System.Net.WebException, which is a .NET Framework type,
 # so on PowerShell 7 it had no retry and no 429 handling at all.
 
+# What Vault last said was left of the burst allowance, per host. Kept because the
+# decision "should this run use more workers" is answerable from it and guesswork
+# otherwise: the documented limit is 2,000 calls per five minutes per user, and a run
+# that never drops below a few hundred remaining has headroom while one that keeps
+# bottoming out is already being throttled and would only thrash with more workers.
+$script:VaultBurstRemaining = @{}
+$script:VaultBurstLowest    = @{}
+
+function Get-VaultBurstReport {
+    # A line per vault, or nothing if no response ever carried the header.
+    $out = New-Object System.Collections.ArrayList
+    foreach ($h in ($script:VaultBurstRemaining.Keys | Sort-Object)) {
+        [void]$out.Add(('{0}  burst remaining {1}, lowest seen {2} of 2000 per 5 min' -f `
+                        $h, $script:VaultBurstRemaining[$h], $script:VaultBurstLowest[$h]))
+    }
+    return @($out)
+}
+
 function Invoke-VaultApi {
     param(
         [Parameter(Mandatory)][string]$VaultHost,
@@ -41,6 +59,13 @@ function Invoke-VaultApi {
             $resp = Invoke-WebRequest @req
 
             $remaining = $resp.Headers['X-VaultAPI-BurstLimitRemaining']
+            if ($remaining) {
+                $script:VaultBurstRemaining[$VaultHost] = [int]$remaining
+                if (-not $script:VaultBurstLowest.ContainsKey($VaultHost) -or
+                    [int]$remaining -lt $script:VaultBurstLowest[$VaultHost]) {
+                    $script:VaultBurstLowest[$VaultHost] = [int]$remaining
+                }
+            }
             if ($remaining -and [int]$remaining -lt 200) {
                 Write-VaultLog "$VaultHost burst limit low ($remaining) - pausing 30s" 'WARN'
                 Start-Sleep -Seconds 30

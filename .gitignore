@@ -45,6 +45,7 @@ transfer-work/
 attachment-work/
 validate-work/
 old-*/
+*.csv.jsonl
 .run-*.lock
 .vault-session.json
 scratch/

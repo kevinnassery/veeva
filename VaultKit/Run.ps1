@@ -110,15 +110,7 @@ function New-VaultResults {
         [Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)][string]$KeyColumn,
         [string[]]$DoneStatuses = @(),
-        [ValidateSet('Prompt', 'Resume', 'Fresh')][string]$Existing = 'Resume',
-        # How many rows may be held before the file is rewritten. Saving after every
-        # single row rewrites the WHOLE file each time, which is quadratic: measured on
-        # Windows PowerShell 5.1 that is 30ms a document at 200 documents and 77ms at
-        # 600, and a sequential run over 15,775 would spend more time writing CSV than
-        # moving files. The cost of a cadence is that a hard kill loses at most this many
-        # rows - and those are re-done on resume, which is safe because everything the
-        # workflows write is idempotent.
-        [int]$SaveEvery = 25
+        [ValidateSet('Prompt', 'Resume', 'Fresh')][string]$Existing = 'Resume'
     )
     $prior = [ordered]@{}
     $done  = @{}
@@ -153,14 +145,40 @@ function New-VaultResults {
         }
     }
 
+    # The journal. Every row is appended to it as it happens, which costs the same
+    # whether it is the first row or the ten-thousandth - where writing the CSV costs
+    # more with every row already in it.
+    #
+    # JSON lines rather than CSV lines: rows gain columns between versions, and a file
+    # with a header written at the start cannot absorb that. Each line stands alone, and
+    # ConvertTo-VaultUniformRows squares them up when the CSV is written.
+    $journal = "$Path.jsonl"
+    if ($Existing -eq 'Fresh') { Remove-Item -LiteralPath $journal -Force -WhatIf:$false -ErrorAction SilentlyContinue }
+    elseif (Test-Path -LiteralPath $journal) {
+        # Rows an interrupted run appended after its last CSV write. They are NEWER than
+        # anything in the CSV, so they win - that is the point of having them.
+        $recovered = 0
+        foreach ($line in (Get-Content -LiteralPath $journal -ErrorAction SilentlyContinue)) {
+            if (-not "$line".Trim()) { continue }
+            try { $row = $line | ConvertFrom-Json } catch { continue }   # a torn last line
+            $k = "$(Get-VaultField $row $KeyColumn '')"
+            if (-not $k) { continue }
+            $prior[$k] = $row
+            $recovered++
+            if ($DoneStatuses -contains "$(Get-VaultField $row 'Status' '')") { $done[$k] = $true }
+        }
+        if ($recovered) {
+            Write-VaultLog "$recovered row(s) recovered from the journal of an interrupted run" 'WARN'
+        }
+    }
+
     return [pscustomobject]@{
         Path      = $Path
+        Journal   = $journal
         KeyColumn = $KeyColumn
         Prior     = $prior
         Done      = $done
         Rows      = (New-Object System.Collections.ArrayList)
-        SaveEvery = [math]::Max(1, $SaveEvery)
-        Unsaved   = 0
     }
 }
 
@@ -216,7 +234,13 @@ function Save-VaultResults {
     }
     (ConvertTo-VaultUniformRows -Rows $out) |
         Export-Csv -LiteralPath $Results.Path -NoTypeInformation -Encoding UTF8 -WhatIf:$false
-    $Results.Unsaved = 0
+
+    # The journal has served its purpose the moment its rows are in the CSV. Removed only
+    # after the write above succeeded, so a failure there leaves the journal to recover
+    # from rather than leaving nothing at all.
+    if ($Results.PSObject.Properties['Journal'] -and $Results.Journal) {
+        Remove-Item -LiteralPath $Results.Journal -Force -WhatIf:$false -ErrorAction SilentlyContinue
+    }
 }
 
 function Format-VaultDuration {
@@ -257,14 +281,25 @@ function Copy-VaultResultsSnapshot {
 }
 
 function Add-VaultResult {
-    # Record a row, and write the file every SaveEvery rows rather than every row.
+    # Append, never rewrite. One line on the end of the journal costs the same at row ten
+    # thousand as at row one, where writing the CSV costs more with every row already in
+    # it - so recording n documents is linear rather than quadratic.
     #
-    # Every caller MUST call Save-VaultResults when it finishes, or the last few rows are
-    # only in memory. That is why the summary line in each workflow saves first.
+    # Every caller MUST call Save-VaultResults when it finishes: that is what turns the
+    # journal into the CSV people read.
     param([Parameter(Mandatory)]$Results, [Parameter(Mandatory)]$Row)
     [void]$Results.Rows.Add($Row)
-    $Results.Unsaved++
-    if ($Results.Unsaved -ge $Results.SaveEvery) { Save-VaultResults -Results $Results }
+    try {
+        [IO.File]::AppendAllText($Results.Journal, (($Row | ConvertTo-Json -Compress -Depth 5) + [Environment]::NewLine))
+    }
+    catch {
+        # A journal that cannot be written is not worth stopping a migration for - the
+        # rows are still in memory and still reach the CSV. Said once, not per row.
+        if (-not $script:VaultJournalWarned) {
+            Write-VaultLog "Could not append to the results journal: $_" 'WARN'
+            $script:VaultJournalWarned = $true
+        }
+    }
 }
 
 # --------------------------------------------------------------------------------------
@@ -273,6 +308,8 @@ function Add-VaultResult {
 # An update replaces the scripts in the operator's folder. Doing that mid-run is not
 # harmless, so a running job leaves a lock that the updater refuses to walk over.
 # --------------------------------------------------------------------------------------
+
+$script:VaultJournalWarned = $false
 
 $script:VaultLock = ''
 
