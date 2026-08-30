@@ -1917,15 +1917,26 @@ function Write-VaultScopeManifest {
     }
     $rows | Export-Csv -LiteralPath $Path -NoTypeInformation -Encoding UTF8 -WhatIf:$false
 
+    # The scope itself IS sampled on screen - fifteen thousand ids scrolling past tells
+    # nobody anything, and every one of them is in the file. The DIFFERENCES are the ones
+    # printed in full, because those are what somebody has to act on.
     $ids = @($rows | ForEach-Object { $_.TargetId })
     Write-VaultLog "Target ids in scope ($($ids.Count)):"
-    $first = @($ids | Select-Object -First $Show)
-    for ($i = 0; $i -lt $first.Count; $i += 10) {
-        Write-VaultLog ("  " + (($first[$i..([math]::Min($i + 9, $first.Count - 1))]) -join ' '))
-    }
-    if ($ids.Count -gt $Show) { Write-VaultLog "  ... and $($ids.Count - $Show) more" }
+    foreach ($line in (Format-VaultIdRows -Ids @($ids | Select-Object -First $Show))) { Write-VaultLog "  $line" }
+    if ($ids.Count -gt $Show) { Write-VaultLog "  ... and $($ids.Count - $Show) more - all of them are in the file below" }
     Write-VaultLog "Scope written to $Path" 'OK'
     return $Path
+}
+
+function Format-VaultIdRows {
+    # Ids in readable rows rather than one enormous line or one line each.
+    param([Parameter(Mandatory)][AllowEmptyCollection()][array]$Ids, [int]$PerRow = 10)
+    $out = New-Object System.Collections.ArrayList
+    $all = @($Ids)
+    for ($i = 0; $i -lt $all.Count; $i += $PerRow) {
+        [void]$out.Add(($all[$i..([math]::Min($i + $PerRow - 1, $all.Count - 1))] -join ' '))
+    }
+    return @($out)
 }
 
 function Compare-VaultScopeToList {
@@ -1961,15 +1972,16 @@ function Compare-VaultScopeToList {
     Write-VaultLog '----------------------------------------------------------------'
     Write-VaultLog "Reconciling the query against $($expected.Count) expected id(s)"
     Write-VaultLog ("  in both              {0}" -f $matched.Count) $(if ($matched.Count) { 'OK' } else { 'WARN' })
+    # Every one of them on screen, not a sample. A file is where you go afterwards; the
+    # question in front of somebody watching a run is "which documents", and answering it
+    # with the first ten and a count makes them go and open a file to find out.
     if ($missing.Count) {
         Write-VaultLog ("  expected, not found  {0}  - the filter is narrower than the list" -f $missing.Count) 'ERROR'
-        Write-VaultLog ("    " + (($missing | Select-Object -First $Show) -join ' ')) 'ERROR'
-        if ($missing.Count -gt $Show) { Write-VaultLog "    ... and $($missing.Count - $Show) more" 'ERROR' }
+        foreach ($line in (Format-VaultIdRows -Ids $missing)) { Write-VaultLog "    $line" 'ERROR' }
     }
     if ($extra.Count) {
         Write-VaultLog ("  found, not expected  {0}  - the filter is wider than the list" -f $extra.Count) 'ERROR'
-        Write-VaultLog ("    " + (($extra | Select-Object -First $Show) -join ' ')) 'ERROR'
-        if ($extra.Count -gt $Show) { Write-VaultLog "    ... and $($extra.Count - $Show) more" 'ERROR' }
+        foreach ($line in (Format-VaultIdRows -Ids $extra)) { Write-VaultLog "    $line" 'ERROR' }
     }
 
     # The mistake this catches before it wastes anyone's afternoon: a list of SOURCE ids

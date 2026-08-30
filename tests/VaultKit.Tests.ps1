@@ -198,6 +198,13 @@ T 'empty scope is still a file' { $ep = Join-Path $sm 'empty.csv'
                                   [void](Write-VaultScopeManifest -Documents @() -Path $ep)
                                   if(-not (Test-Path $ep)){ throw 'no file for an empty scope' } }
 
+Write-Host "== Id row formatting =="
+T 'wraps at ten per row'   { Eq (@(Format-VaultIdRows -Ids (1..25)).Count) 3 'rows' }
+T 'first row is full'      { Eq ((Format-VaultIdRows -Ids (1..25))[0]) '1 2 3 4 5 6 7 8 9 10' 'row' }
+T 'last row is the rest'   { Eq (@(Format-VaultIdRows -Ids (1..25))[2]) '21 22 23 24 25' 'tail' }
+T 'exact multiple is fine' { Eq (@(Format-VaultIdRows -Ids (1..20)).Count) 2 'rows' }
+T 'empty gives no rows'    { Eq (@(Format-VaultIdRows -Ids @()).Count) 0 'none' }
+
 Write-Host "== Scope reconciliation =="
 $rd = Join-Path $tmp ('vkrec-'+[guid]::NewGuid().ToString('N')); New-Item -ItemType Directory -Force $rd|Out-Null
 $found = @(
