@@ -271,7 +271,7 @@ fail, it just quietly gets slower.
 Every parallel run therefore ends with what Vault actually reported:
 
 ```
-endo-rim.veevavault.com  burst remaining 1240, lowest seen 380 of 2000 per 5 min
+your-target-vault.veevavault.com  burst remaining 1240, lowest seen 380 of 2000 per 5 min
 ```
 
 If the lowest stays well clear of zero there is room; if it bottoms out, more workers
