@@ -2104,8 +2104,8 @@ function Invoke-VaultRolesExplain {
     Write-VaultLog "Decomposing the reported defaults on $($docs.Count) document(s)"
 
     $rows = New-Object System.Collections.ArrayList
-    $stat = @{ Roles = 0; Explained = 0; Surplus = 0; Absent = 0; Both = 0; NoDefaults = 0
-               TypeAdded = 0; LifecycleOnly = 0 }
+    $stat = @{ Roles = 0; Explained = 0; Expanded = 0; ExpandedUsers = 0; Surplus = 0
+               Absent = 0; Both = 0; NoDefaults = 0; TypeAdded = 0; LifecycleOnly = 0 }
     $i = 0
     foreach ($doc in $docs) {
         $i++
@@ -2133,16 +2133,33 @@ function Invoke-VaultRolesExplain {
 
             $surplus = @($dSet | Where-Object { $union -notcontains $_ })
             $absent  = @($union | Where-Object { $dSet -notcontains $_ })
+
+            # Most of the "surplus" is not a third contributor: it is the SAME
+            # contributor, resolved. A lifecycle rule assigns a group; Vault reports
+            # defaultUsers as that group's expanded membership, so one configured group
+            # comes back as one group plus twenty-five individual users.
+            #
+            # That distinction decides the whole job. Assigning the group is what the
+            # configuration says; assigning the expansion writes direct user assignments
+            # that OUTLIVE the group - remove someone from the group afterwards and they
+            # keep the access - which is a mess to unpick across fifteen thousand
+            # documents.
+            $wantGroups = @($union | Where-Object { $_ -like 'g:*' } | ForEach-Object { $_.Substring(2) })
+            $surplusUsers = @($surplus | Where-Object { $_ -like 'u:*' } | ForEach-Object { $_.Substring(2) })
+            $byMembership = Get-VaultRedundantUserCount -Directory $Directory -Groups $wantGroups -Users $surplusUsers
+            $trueSurplus  = @($surplus | Where-Object { $_ -like 'g:*' }).Count + ($surplusUsers.Count - $byMembership)
             # What the type defaults contribute that the lifecycle rule does not - the
             # quantity `probe` saw as a surplus, now attributed rather than inferred.
             $tOnly   = @($tSet | Where-Object { $lSet -notcontains $_ })
 
             $verdict =
-                if (-not $dSet.Count -and -not $union.Count) { $stat.NoDefaults++;    'NO_DEFAULTS' }
-                elseif ($surplus.Count -and $absent.Count)   { $stat.Both++;          'BOTH_WAYS' }
-                elseif ($surplus.Count)                      { $stat.Surplus++;       'UNEXPLAINED_SURPLUS' }
-                elseif ($absent.Count)                       { $stat.Absent++;        'CONFIG_NOT_IN_DEFAULTS' }
-                else                                         { $stat.Explained++;     'EXPLAINED' }
+                if (-not $dSet.Count -and -not $union.Count)      { $stat.NoDefaults++;  'NO_DEFAULTS' }
+                elseif ($trueSurplus -gt 0 -and $absent.Count)    { $stat.Both++;        'BOTH_WAYS' }
+                elseif ($trueSurplus -gt 0)                       { $stat.Surplus++;     'UNEXPLAINED_SURPLUS' }
+                elseif ($absent.Count)                            { $stat.Absent++;      'CONFIG_NOT_IN_DEFAULTS' }
+                elseif ($byMembership -gt 0)                      { $stat.Expanded++;    'EXPLAINED_GROUP_EXPANSION' }
+                else                                              { $stat.Explained++;   'EXPLAINED' }
+            $stat.ExpandedUsers += $byMembership
             if ($tOnly.Count) { $stat.TypeAdded++ } elseif ($lSet.Count) { $stat.LifecycleOnly++ }
 
             [void]$rows.Add([pscustomobject]@{
@@ -2150,7 +2167,8 @@ function Invoke-VaultRolesExplain {
                 Role = $name
                 ReportedDefaults = $dSet.Count; FromLifecycle = $lSet.Count; FromTypeDefaults = $tSet.Count
                 TypeAddsBeyondLifecycle = $tOnly.Count
-                UnexplainedSurplus = $surplus.Count; ConfigNotInDefaults = $absent.Count
+                SurplusTotal = $surplus.Count; SurplusIsGroupMembership = $byMembership
+                UnexplainedSurplus = $trueSurplus; ConfigNotInDefaults = $absent.Count
                 Verdict = $verdict
                 SurplusNames = (($surplus | Select-Object -First 8) -join '; ')
                 AbsentNames  = (($absent  | Select-Object -First 8) -join '; ')
@@ -2161,16 +2179,24 @@ function Invoke-VaultRolesExplain {
     Write-VaultLog '----------------------------------------------------------------'
     Write-VaultLog "$($stat.Roles) role(s) examined across $($docs.Count) document(s)"
     Write-VaultLog ("  EXPLAINED               {0}  - reported defaults are exactly lifecycle + type defaults" -f $stat.Explained) 'OK'
+    Write-VaultLog ("  EXPLAINED_GROUP_EXPANSION {0} - and the rest is the membership of those groups, resolved" -f $stat.Expanded) 'OK'
     Write-VaultLog ("  NO_DEFAULTS             {0}  - nothing reported and nothing configured" -f $stat.NoDefaults)
     if ($stat.Surplus) { Write-VaultLog ("  UNEXPLAINED_SURPLUS     {0}  - reported defaults hold names NEITHER source accounts for" -f $stat.Surplus) 'ERROR' }
     if ($stat.Absent)  { Write-VaultLog ("  CONFIG_NOT_IN_DEFAULTS  {0}  - configured but not reported as a default" -f $stat.Absent) 'WARN' }
     if ($stat.Both)    { Write-VaultLog ("  BOTH_WAYS               {0}" -f $stat.Both) 'ERROR' }
     Write-VaultLog ("  type defaults add something beyond the lifecycle rule on {0} role(s)" -f $stat.TypeAdded)
 
-    $decided = $stat.Explained + $stat.NoDefaults
+    $decided = $stat.Explained + $stat.Expanded + $stat.NoDefaults
     if ($stat.Roles -and $decided -eq $stat.Roles) {
         Write-VaultLog 'PROVEN: every reported default is accounted for by the lifecycle rules plus the type defaults.' 'OK'
-        Write-VaultLog '-DesiredFrom Document is therefore exactly those two sources, and needs no -WithTypeDefaults.' 'OK'
+        if ($stat.Expanded) {
+            Write-VaultLog ("{0} user(s) appear in the reported defaults only as the membership of a group that is already there." -f $stat.ExpandedUsers) 'WARN'
+            Write-VaultLog 'So -DesiredFrom Document would assign every one of them DIRECTLY, in addition to the group.' 'WARN'
+            Write-VaultLog 'A direct assignment outlives the group. Use -DesiredFrom Lifecycle, which assigns the group.' 'WARN'
+        }
+        else {
+            Write-VaultLog '-DesiredFrom Document is therefore exactly those two sources.' 'OK'
+        }
     }
     elseif ($stat.Surplus -or $stat.Both) {
         Write-VaultLog 'NOT PROVEN: some reported defaults come from somewhere neither source explains.' 'ERROR'
