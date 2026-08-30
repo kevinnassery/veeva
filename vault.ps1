@@ -105,6 +105,7 @@ param(
     # roles mdl: which document type, and optionally which subtype.
     [string]$Type = '',
     [string]$Subtype = '',
+    [string]$Classification = '',
     # update: go ahead even though a run is holding a lock.
     [switch]$Force,
     # update: fetch this exact commit instead of whatever main points at. Pins a known
@@ -136,7 +137,7 @@ param(
     [int]$Workers = 0
 )
 
-$ScriptVersion = '2026.08.30-26'
+$ScriptVersion = '2026.08.30-27'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -751,7 +752,8 @@ function Invoke-Roles {
         if ($Action -eq 'mdl') {
             if (-not $Type) { throw "roles mdl needs -Type '<document type label>'. roles survey lists them." }
             $ctxM = New-VaultContext -Section 'roles'
-            $bad = Invoke-VaultDocTypeMdlDump -Context $ctxM -TypeLabel $Type -SubtypeLabel $Subtype
+            $bad = Invoke-VaultDocTypeMdlDump -Context $ctxM -TypeLabel $Type -SubtypeLabel $Subtype `
+                       -ClassificationLabel $Classification
             Write-VaultLog "Log: $script:VaultLogFile"
             if ($bad -gt 0) { exit 1 }
             return
@@ -1167,7 +1169,8 @@ Options
   -WithRoleRules           verify: check roles against the lifecycle rules as well
   -Anchor <field>          verify map: the target field holding the source id
   -Match <regex>           verify fields: show only fields matching this
-  -Type / -Subtype         roles mdl: which document type to dump
+  -Type / -Subtype / -Classification
+                           roles mdl: which document type to dump, to three levels
   -MapFile <csv>           map: which file to read
   -OutFile <csv>           map write: where to put the canonical copy
   -SourceColumn <name>     map: name the id columns instead of detecting them

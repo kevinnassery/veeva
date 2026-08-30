@@ -232,7 +232,7 @@ function Get-VaultDocTypeNameIndex {
         $name = ($url -split '/')[-1]
         if ($name) { $types[(ConvertTo-VaultNameKey $label)] = $name }
     }
-    $script:DocTypeNames = [pscustomobject]@{ Types = $types; Subtypes = $subs }
+    $script:DocTypeNames = [pscustomobject]@{ Types = $types; Subtypes = $subs; Classifications = @{} }
     return $script:DocTypeNames
 }
 
@@ -318,6 +318,38 @@ function Get-VaultMdlAttributeValue {
     return @()
 }
 
+function Get-VaultClassificationName {
+    # label -> api name for a classification, the THIRD level of the document type
+    # hierarchy. Type, then subtype, then classification: a vault that uses all three
+    # configures defaults at whichever level it chooses, and reading only two of them
+    # means the most specific configuration - the one deliberately set closest to the
+    # document - is the one missed.
+    param(
+        [Parameter(Mandatory)]$Context,
+        [Parameter(Mandatory)][string]$TypeName,
+        [Parameter(Mandatory)][string]$SubtypeName,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$ClassificationLabel
+    )
+    if (-not $ClassificationLabel) { return '' }
+    $idx = Get-VaultDocTypeNameIndex -Context $Context
+    $key = "$TypeName|$SubtypeName|$(ConvertTo-VaultNameKey $ClassificationLabel)"
+    if ($idx.Classifications.ContainsKey($key)) { return $idx.Classifications[$key] }
+    try {
+        $r = Invoke-VaultApi -VaultHost $Context.VaultHost -ApiVersion $Context.Api -Method GET `
+                -Path "/metadata/objects/documents/types/$TypeName/subtypes/$SubtypeName"
+        foreach ($cl in @(Get-VaultField $r 'classifications' @())) {
+            $label = "$(Get-VaultField $cl 'label' '')"
+            $url   = "$(Get-VaultField $cl 'value' '')"
+            if (-not $label -or -not $url) { continue }
+            $nm = ($url -split '/')[-1]
+            if ($nm) { $idx.Classifications["$TypeName|$SubtypeName|$(ConvertTo-VaultNameKey $label)"] = $nm }
+        }
+    }
+    catch { Write-VaultLog "  could not list the classifications of $TypeName/${SubtypeName}: $_" 'WARN' }
+    if ($idx.Classifications.ContainsKey($key)) { return $idx.Classifications[$key] }
+    return ''
+}
+
 function Get-VaultDocTypeRoleDefault {
     # editor__v / viewer__v / consumer__v defaults for one subtype, from its MDL component.
     # Cached, so a run over 15,000 documents of six subtypes makes six of these calls.
@@ -325,9 +357,11 @@ function Get-VaultDocTypeRoleDefault {
         [Parameter(Mandatory)]$Context,
         [Parameter(Mandatory)][AllowEmptyString()][string]$TypeLabel,
         [Parameter(Mandatory)][AllowEmptyString()][string]$SubtypeLabel,
-        [Parameter(Mandatory)]$Directory
+        [Parameter(Mandatory)]$Directory,
+        # The third level of the hierarchy. Empty on a vault that does not use them.
+        [AllowEmptyString()][string]$ClassificationLabel = ''
     )
-    $cacheKey = "$TypeLabel|$SubtypeLabel"
+    $cacheKey = "$TypeLabel|$SubtypeLabel|$ClassificationLabel"
     if ($script:DocTypeDefaults.ContainsKey($cacheKey)) { return $script:DocTypeDefaults[$cacheKey] }
 
     $empty = @{}
@@ -351,11 +385,20 @@ function Get-VaultDocTypeRoleDefault {
     # First level that defines a role wins for that role, which is what inheritance means.
     # Roles are filled independently: a subtype may override Editors while still
     # inheriting Viewers from its type.
+    # Most specific first, and there are THREE levels, not two. Classification is where
+    # a vault that uses it puts the configuration meant for these documents in
+    # particular, so skipping it reads the general answer and calls it the specific one.
     $candidates = New-Object System.Collections.ArrayList
+    $subName = ''
     if ($SubtypeLabel -and (ConvertTo-VaultNameKey $SubtypeLabel) -ne $typeKey) {
         $subName = Get-VaultSubtypeName -Context $Context -TypeName $typeName -SubtypeLabel $SubtypeLabel
-        if ($subName) { [void]$candidates.Add("Doctype.$typeName.$subName") }
     }
+    if ($subName -and $ClassificationLabel) {
+        $clsName = Get-VaultClassificationName -Context $Context -TypeName $typeName `
+                       -SubtypeName $subName -ClassificationLabel $ClassificationLabel
+        if ($clsName) { [void]$candidates.Add("Doctype.$typeName.$subName.$clsName") }
+    }
+    if ($subName) { [void]$candidates.Add("Doctype.$typeName.$subName") }
     [void]$candidates.Add("Doctype.$typeName")
     [void]$candidates.Add('Doctype.base_document__v')
 
@@ -662,6 +705,9 @@ function Get-VaultDocumentInfo {
         $d = Get-VaultField $r 'document' $null
         $type    = "$(Get-VaultField $d 'type__v' '')"
         $subtype = "$(Get-VaultField $d 'subtype__v' '')"
+        # The third level. A vault that does not use classifications reports nothing
+        # here and everything below behaves exactly as it did.
+        $classification = "$(Get-VaultField $d 'classification__v' '')"
         # A type with no subtypes configured reports none. Falling back to the type keeps
         # every document in exactly one bucket, which is what the grouping needs.
         if (-not $subtype) { $subtype = $type }
@@ -677,6 +723,7 @@ function Get-VaultDocumentInfo {
         return [pscustomobject]@{
             Type       = $type
             Subtype    = $subtype
+            Classification = $classification
             Lifecycle  = "$(Get-VaultField $d 'lifecycle__v' '')"
             Conditions = $cond
             Read       = $true
@@ -1291,7 +1338,8 @@ function Invoke-VaultRolesAssign {
             # document - so repairing only one of them leaves the job half done.
             if ($WithTypeDefaults -and $info) {
                 $td = Get-VaultDocTypeRoleDefault -Context $c -TypeLabel $info.Type `
-                          -SubtypeLabel $info.Subtype -Directory $dir
+                          -SubtypeLabel $info.Subtype -Directory $dir `
+                          -ClassificationLabel $info.Classification
                 if ($td.ContainsKey($name)) {
                     $want = [pscustomobject]@{
                         Users   = @(@($want.Users)  + @($td[$name].Users)  | Select-Object -Unique)
@@ -2112,7 +2160,8 @@ function Invoke-VaultRolesExplain {
         $docId = $doc.TargetId
         $info  = Get-VaultDocumentInfo -Context $c -DocId $docId
         if (-not $info.Read) { Write-VaultLog "[$i] $docId - could not read the document, skipped" 'WARN'; continue }
-        $td = Get-VaultDocTypeRoleDefault -Context $c -TypeLabel $info.Type -SubtypeLabel $info.Subtype -Directory $Directory
+        $td = Get-VaultDocTypeRoleDefault -Context $c -TypeLabel $info.Type -SubtypeLabel $info.Subtype `
+                  -Directory $Directory -ClassificationLabel $info.Classification
 
         foreach ($r in @(Get-VaultDocumentRole -Context $c -DocId $docId)) {
             $name = "$(Get-VaultField $r 'name' '')"
@@ -2224,7 +2273,8 @@ function Invoke-VaultDocTypeMdlDump {
     param(
         [Parameter(Mandatory)]$Context,
         [Parameter(Mandatory)][AllowEmptyString()][string]$TypeLabel,
-        [AllowEmptyString()][string]$SubtypeLabel = ''
+        [AllowEmptyString()][string]$SubtypeLabel = '',
+        [AllowEmptyString()][string]$ClassificationLabel = ''
     )
     $c = $Context
     $idx = Get-VaultDocTypeNameIndex -Context $c
@@ -2269,6 +2319,16 @@ function Invoke-VaultDocTypeMdlDump {
     }
     [void]$candidates.Add("Doctype.$typeName")
     [void]$candidates.Add('Doctype.base_document__v')
+
+    if ($SubtypeLabel -and $ClassificationLabel) {
+        $sn = Get-VaultSubtypeName -Context $c -TypeName $typeName -SubtypeLabel $SubtypeLabel
+        if ($sn) {
+            $cn = Get-VaultClassificationName -Context $c -TypeName $typeName -SubtypeName $sn `
+                      -ClassificationLabel $ClassificationLabel
+            if ($cn) { $candidates.Insert(0, "Doctype.$typeName.$sn.$cn") }
+            else { Write-VaultLog "No classification called '$ClassificationLabel' under $typeName/$sn" 'WARN' }
+        }
+    }
 
     $rows = New-Object System.Collections.ArrayList
     foreach ($component in $candidates) {
