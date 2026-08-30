@@ -175,6 +175,10 @@ T 'numeric id needs no lookup' { $t = $false
                                  try { Get-VaultCreatedByScope -Context ([pscustomobject]@{VaultHost='x';Api='v26.2'}) -CreatedBy '11013315' -WithinHours 24 -Directory $null }
                                  catch { $t = "$_" -notmatch 'has to be looked up' }   # fails at the API call, not the lookup
                                  if(-not $t){ throw 'a numeric id still demanded a directory' } }
+T 'me needs no directory either' { $t = $false
+                                   try { Get-VaultCreatedByScope -Context ([pscustomobject]@{VaultHost='x';Api='v26.2'}) -CreatedBy 'me' -WithinHours 24 -Directory $null }
+                                   catch { $t = "$_" -notmatch 'has to be looked up' }
+                                   if(-not $t){ throw "me demanded a directory" } }
 T 'a name without one is refused' { $t = $false
                                     try { Get-VaultCreatedByScope -Context ([pscustomobject]@{VaultHost='x';Api='v26.2'}) -CreatedBy 'someone@x.com' -WithinHours 24 -Directory $null }
                                     catch { $t = "$_" -match 'has to be looked up' }

@@ -1847,12 +1847,24 @@ function Get-VaultCreatedByScope {
     # created_by__v holds a user ID, not a name - so a name has to be resolved, and a
     # name that resolves to nothing must stop the run. Falling back to "everyone" here
     # would turn the narrowest possible scope into the widest.
-    if ($CreatedBy -match '^\d+$') {
+    if ($CreatedBy -match '^(?i)me$') {
+        # The account doing the repair is usually the account that created the documents,
+        # because both are the migration's own service user. Asking Vault who that is
+        # costs one call and removes the step where somebody types the wrong id - which
+        # would not fail, it would quietly repair somebody else's documents.
+        $me = Get-VaultWhoAmI -VaultHost $Context.VaultHost -ApiVersion $Context.Api
+        if (-not $me -or -not $me.UserId) {
+            throw 'Could not ask the vault who this session belongs to, so -CreatedBy me cannot be resolved. Pass the numeric user id.'
+        }
+        $uid = $me.UserId
+        $who = "$($me.User) (this session)"
+    }
+    elseif ($CreatedBy -match '^\d+$') {
         $uid = $CreatedBy
         $who = "user id $uid"
     }
     elseif (-not $Directory) {
-        throw "'$CreatedBy' is not a user id, so it has to be looked up - and no directory was read. Pass the numeric id, or let the command read the directory."
+        throw "'$CreatedBy' is not a user id or 'me', so it has to be looked up - and no directory was read. Pass the numeric id, or 'me' for this session's own user."
     }
     else {
         $uid = Resolve-VaultNameToId -Directory $Directory -Kind 'user' -Name $CreatedBy

@@ -71,11 +71,12 @@ param(
     [string[]]$Role = @(),
     [string[]]$ExcludeRole = @(),
     [ValidateRange(1, 1000)][int]$BatchSize = 200,
-    # The permission sync touches only documents this user created, within this many
-    # hours before now. Both are required for roles plan and roles assign: a run that
-    # grants people access should not be able to reach further than it was told to, and
-    # one condition without the other is not a bound worth having.
-    [string]$CreatedBy = '',
+    # The permission sync touches only documents created by this user within this many
+    # hours before now. The user defaults to whoever the session belongs to, since the
+    # account doing the repair is the account that made them; the window has no sensible
+    # default and is required, because a run that grants people access must not be able
+    # to reach further back than it was told to.
+    [string]$CreatedBy = 'me',
     [int]$WithinHours = 0,
     # Optional: a file of document ids, one per line, that the scope query is expected to
     # return. Reported both ways, because a count agreeing is not the sets agreeing.
@@ -126,7 +127,7 @@ param(
     [int]$Workers = 0
 )
 
-$ScriptVersion = '2026.08.30-14'
+$ScriptVersion = '2026.08.30-16'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -745,27 +746,28 @@ function Invoke-Roles {
             Write-VaultLog "-Where given, so [roles] map is ignored for this run" 'WARN'
         }
 
-        # Both, or neither. One alone is not a scope: a user with no window is all of
-        # their work ever, and a window with no user is everyone's.
-        $scoped = $false
-        if ($CreatedBy -or $WithinHours -gt 0) {
-            if (-not $CreatedBy -or $WithinHours -le 0) {
-                throw '-CreatedBy and -WithinHours go together. One without the other is not a scope.'
-            }
-            if ($Where) { throw '-Where and -CreatedBy/-WithinHours both name the scope. Pass one.' }
-            $scoped = $true
-        }
+        # The window is the required half. The user defaults to this session's own
+        # account - which is the one that created the documents, so asking for it again
+        # only creates the chance to type a different id by mistake. There is no
+        # equivalent default for "how far back": every answer is a different blast
+        # radius, and none of them is the obvious one.
+        $scoped = ($WithinHours -gt 0)
+        if ($scoped -and $Where) { throw '-Where and -WithinHours both name the scope. Pass one.' }
         if ($Action -in @('scope', 'plan', 'assign') -and -not $scoped) {
             throw @'
-A permission sync has to say whose documents, and how recent:
+A permission sync has to say how far back to go:
 
-    roles scope  -CreatedBy <user> -WithinHours <n>     just the ids, nothing else
-    roles plan   -CreatedBy <user> -WithinHours <n>
-    roles assign -CreatedBy <user> -WithinHours <n>
+    roles scope  -WithinHours <n>     just the ids, nothing else
+    roles plan   -WithinHours <n>
+    roles assign -WithinHours <n>
 
-Both are required. This command grants people access to documents, so it does not
-default to a scope - there is no safe guess about which documents that should be.
-Use roles survey or roles probe to look around; neither writes anything.
+-WithinHours is required. This command grants people access to documents, and there
+is no safe default for how much of the past that should cover.
+
+-CreatedBy defaults to this session's own user, which is normally the account that
+created the documents. Pass a numeric user id to name a different one.
+
+roles survey and roles probe write nothing and need no scope.
 '@
         }
 
@@ -802,7 +804,7 @@ Use roles survey or roles probe to look around; neither writes anything.
                 # The directory is read ONLY to turn a name into an id. A numeric id
                 # needs no lookup, and reading every user and group to print a nicer
                 # log line is pages of calls out of the allowance the run itself needs.
-                $dirForScope = if ($CreatedBy -match '^\d+$') { $null } else { Get-VaultDirectory -Context $ctx }
+                $dirForScope = if ($CreatedBy -match '^(?i)(me|\d+)$') { $null } else { Get-VaultDirectory -Context $ctx }
                 $found = Get-VaultCreatedByScope -Context $ctx -CreatedBy $CreatedBy -WithinHours $WithinHours `
                              -Directory $dirForScope
                 # Narrowed again by the map where there is one: only documents the
@@ -1073,7 +1075,7 @@ vault $v
   roles scope              Which documents the filter selects. One query, changes nothing
   roles plan               Exactly who would be added to which role. Changes nothing
   roles assign             Fill in the Sharing Settings the migration left empty
-                           Needs -CreatedBy and -WithinHours. Both. Every time
+                           Needs -WithinHours. Every time
   roles verify             Prove what a run recorded is actually on the documents
 
   verify trial             Is it migrated? A fixed handful at random, to prove the check
@@ -1105,8 +1107,9 @@ Options
   -Defaults <csv>          roles: a defaults table. Overrides [roles] defaults
   -Role / -ExcludeRole     roles: only these roles, or all but these
   -BatchSize <n>           roles: assignments per request (default 200)
-  -CreatedBy <user>        roles plan/assign: only documents this user created
-  -WithinHours <n>         roles plan/assign: only from this many hours ago. Required
+  -CreatedBy <user>        roles: only documents this user created. 'me' is this
+                           session's own user, which is usually the one that made them
+  -WithinHours <n>         roles scope/plan/assign: how far back. REQUIRED
   -ExpectIds <txt>         roles: check the query returns exactly these ids, one per line
   -Slow                    roles verify: read roles per document, not in bulk
   -TrialSize <n>           verify trial: how many (default 25)
