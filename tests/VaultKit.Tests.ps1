@@ -170,6 +170,16 @@ T 'source id is carried through' { Eq (@($hit | Where-Object { $_.TargetId -eq '
 T 'shape is what assign reads'   { if(-not $hit[0].PSObject.Properties['TargetId']){ throw 'no TargetId' } }
 T 'no map overlap is empty'      { Eq (@(Select-VaultScopeIntersection -Documents $fromQuery -Map @{ 'a'='zzz' }).Count) 0 'none' }
 
+Write-Host "== Scope: a uid needs no directory =="
+T 'numeric id needs no lookup' { $t = $false
+                                 try { Get-VaultCreatedByScope -Context ([pscustomobject]@{VaultHost='x';Api='v26.2'}) -CreatedBy '11013315' -WithinHours 24 -Directory $null }
+                                 catch { $t = "$_" -notmatch 'has to be looked up' }   # fails at the API call, not the lookup
+                                 if(-not $t){ throw 'a numeric id still demanded a directory' } }
+T 'a name without one is refused' { $t = $false
+                                    try { Get-VaultCreatedByScope -Context ([pscustomobject]@{VaultHost='x';Api='v26.2'}) -CreatedBy 'someone@x.com' -WithinHours 24 -Directory $null }
+                                    catch { $t = "$_" -match 'has to be looked up' }
+                                    if(-not $t){ throw 'a name was accepted with no directory' } }
+
 Write-Host "== Scope manifest =="
 $sm = Join-Path $tmp ('vksc-'+[guid]::NewGuid().ToString('N')); New-Item -ItemType Directory -Force $sm|Out-Null
 $sp = Join-Path $sm 'scope.csv'

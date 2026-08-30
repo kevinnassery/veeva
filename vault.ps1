@@ -126,7 +126,7 @@ param(
     [int]$Workers = 0
 )
 
-$ScriptVersion = '2026.08.30-13'
+$ScriptVersion = '2026.08.30-14'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -799,8 +799,12 @@ Use roles survey or roles probe to look around; neither writes anything.
         # worse than not having run it.
         $documents =
             if ($scoped) {
+                # The directory is read ONLY to turn a name into an id. A numeric id
+                # needs no lookup, and reading every user and group to print a nicer
+                # log line is pages of calls out of the allowance the run itself needs.
+                $dirForScope = if ($CreatedBy -match '^\d+$') { $null } else { Get-VaultDirectory -Context $ctx }
                 $found = Get-VaultCreatedByScope -Context $ctx -CreatedBy $CreatedBy -WithinHours $WithinHours `
-                             -Directory (Get-VaultDirectory -Context $ctx)
+                             -Directory $dirForScope
                 # Narrowed again by the map where there is one: only documents the
                 # migration produced AND this person made in the window.
                 if ($ctx.Map -and $ctx.Map.Count) { Select-VaultScopeIntersection -Documents $found -Map $ctx.Map }

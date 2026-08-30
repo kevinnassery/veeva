@@ -1839,16 +1839,28 @@ function Get-VaultCreatedByScope {
         [Parameter(Mandatory)]$Context,
         [Parameter(Mandatory)][string]$CreatedBy,
         [Parameter(Mandatory)][int]$WithinHours,
-        [Parameter(Mandatory)]$Directory
+        # Only needed to turn a NAME into an id. A numeric id needs nothing, and the
+        # directory is every user and group in the vault - pages of calls against the
+        # same burst allowance the run needs, spent on a lookup that was already done.
+        [AllowNull()]$Directory
     )
     # created_by__v holds a user ID, not a name - so a name has to be resolved, and a
     # name that resolves to nothing must stop the run. Falling back to "everyone" here
     # would turn the narrowest possible scope into the widest.
-    $uid = Resolve-VaultNameToId -Directory $Directory -Kind 'user' -Name $CreatedBy
-    if (-not $uid) {
-        throw "No user in this vault answers to '$CreatedBy'. created_by__v holds a user id, so the name has to resolve to one - check the spelling, or pass the id."
+    if ($CreatedBy -match '^\d+$') {
+        $uid = $CreatedBy
+        $who = "user id $uid"
     }
-    $who = Get-VaultDisplayName -Directory $Directory -Kind 'user' -Id $uid
+    elseif (-not $Directory) {
+        throw "'$CreatedBy' is not a user id, so it has to be looked up - and no directory was read. Pass the numeric id, or let the command read the directory."
+    }
+    else {
+        $uid = Resolve-VaultNameToId -Directory $Directory -Kind 'user' -Name $CreatedBy
+        if (-not $uid) {
+            throw "No user in this vault answers to '$CreatedBy'. created_by__v holds a user id, so the name has to resolve to one - check the spelling, or pass the id."
+        }
+        $who = Get-VaultDisplayName -Directory $Directory -Kind 'user' -Id $uid
+    }
 
     # Hours before NOW, in UTC, because that is what Vault stores and compares against.
     # Both are logged: an operator reads the local time, and the query uses the other.
