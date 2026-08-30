@@ -77,6 +77,9 @@ param(
     # one condition without the other is not a bound worth having.
     [string]$CreatedBy = '',
     [int]$WithinHours = 0,
+    # Optional: a file of document ids, one per line, that the scope query is expected to
+    # return. Reported both ways, because a count agreeing is not the sets agreeing.
+    [string]$ExpectIds = '',
 
     # ---- verify ----
     # trial: a fixed handful, at random. sample: sized for a confidence level.
@@ -123,7 +126,7 @@ param(
     [int]$Workers = 0
 )
 
-$ScriptVersion = '2026.08.30-9'
+$ScriptVersion = '2026.08.30-11'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -689,8 +692,8 @@ function Invoke-Roles {
     # command will not touch teaches people to say yes without reading.
     param([string]$Action)
 
-    if ($Action -notin @('survey', 'probe', 'plan', 'assign', 'verify')) {
-        Write-Host 'vault.ps1 roles <survey|probe|plan|assign|verify>' -ForegroundColor Red
+    if ($Action -notin @('survey', 'probe', 'scope', 'plan', 'assign', 'verify')) {
+        Write-Host 'vault.ps1 roles <survey|probe|scope|plan|assign|verify>' -ForegroundColor Red
         exit 2
     }
 
@@ -720,10 +723,11 @@ function Invoke-Roles {
             if ($Where) { throw '-Where and -CreatedBy/-WithinHours both name the scope. Pass one.' }
             $scoped = $true
         }
-        if ($Action -in @('plan', 'assign') -and -not $scoped) {
+        if ($Action -in @('scope', 'plan', 'assign') -and -not $scoped) {
             throw @'
 A permission sync has to say whose documents, and how recent:
 
+    roles scope  -CreatedBy <user> -WithinHours <n>     just the ids, nothing else
     roles plan   -CreatedBy <user> -WithinHours <n>
     roles assign -CreatedBy <user> -WithinHours <n>
 
@@ -793,6 +797,29 @@ Use roles survey or roles probe to look around; neither writes anything.
                 # scope of a run that grants people access costs a great deal more.
                 throw 'No documents named. Set [roles] map, or pass -Where "<VQL condition>".'
             }
+
+        # The ids the scope resolved to, recorded before anything is read or written. A
+        # count cannot tell a right filter from a wrong one; the ids can.
+        if ($scoped) {
+            $stamp = if ($script:VaultLogFile -and ($script:VaultLogFile -match '(\d{8}-\d{6})')) { $Matches[1] } else { Get-Date -Format 'yyyyMMdd-HHmmss' }
+            [void](Write-VaultScopeManifest -Documents $documents -Path (Join-Path $ctx.Out "roles-scope-$stamp.csv"))
+        }
+
+        $drift = 0
+        if ($scoped -and $ExpectIds) {
+            $stamp2 = if ($script:VaultLogFile -and ($script:VaultLogFile -match '(\d{8}-\d{6})')) { $Matches[1] } else { Get-Date -Format 'yyyyMMdd-HHmmss' }
+            $drift = Compare-VaultScopeToList -Documents $documents -Path $ExpectIds `
+                         -OutPath (Join-Path $ctx.Out "roles-scope-reconcile-$stamp2.csv")
+        }
+
+        # scope stops here on purpose: one query, no document reads, nothing written. It
+        # is the cheapest way to check the filter before spending anything on it.
+        if ($Action -eq 'scope') {
+            Write-VaultLog 'Nothing was read or changed. Run roles plan next to see the assignments.' 'OK'
+            Write-VaultLog "Log: $script:VaultLogFile"
+            if ($drift -gt 0) { exit 1 }
+            return
+        }
 
         if ($Action -eq 'probe') {
             $bad = Invoke-VaultRolesProbe -Context $ctx -Documents $documents -Limit $Limit
@@ -973,6 +1000,7 @@ vault $v
 
   roles survey             What is in scope: subtypes, roles, defaults. Changes nothing
   roles probe              Whether a defaults table is needed, and what it should say
+  roles scope              Which documents the filter selects. One query, changes nothing
   roles plan               Exactly who would be added to which role. Changes nothing
   roles assign             Fill in the Sharing Settings the migration left empty
                            Needs -CreatedBy and -WithinHours. Both. Every time
@@ -1009,6 +1037,7 @@ Options
   -BatchSize <n>           roles: assignments per request (default 200)
   -CreatedBy <user>        roles plan/assign: only documents this user created
   -WithinHours <n>         roles plan/assign: only from this many hours ago. Required
+  -ExpectIds <txt>         roles: check the query returns exactly these ids, one per line
   -Slow                    roles verify: read roles per document, not in bulk
   -TrialSize <n>           verify trial: how many (default 25)
   -Confidence 90|95|99     verify sample: confidence level (default 95)

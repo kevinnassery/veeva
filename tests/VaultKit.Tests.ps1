@@ -170,6 +170,42 @@ T 'source id is carried through' { Eq (@($hit | Where-Object { $_.TargetId -eq '
 T 'shape is what assign reads'   { if(-not $hit[0].PSObject.Properties['TargetId']){ throw 'no TargetId' } }
 T 'no map overlap is empty'      { Eq (@(Select-VaultScopeIntersection -Documents $fromQuery -Map @{ 'a'='zzz' }).Count) 0 'none' }
 
+Write-Host "== Scope manifest =="
+$sm = Join-Path $tmp ('vksc-'+[guid]::NewGuid().ToString('N')); New-Item -ItemType Directory -Force $sm|Out-Null
+$sp = Join-Path $sm 'scope.csv'
+$docs = @(
+  [pscustomobject]@{ TargetId='207311'; SourceId='55056' },
+  [pscustomobject]@{ TargetId='207312'; SourceId='55057' })
+[void](Write-VaultScopeManifest -Documents $docs -Path $sp -Show 20)
+T 'manifest written'          { Eq (@(Import-Csv $sp).Count) 2 'rows' }
+T 'holds both ids'            { $r = @(Import-Csv $sp)[0]; Eq "$($r.TargetId)/$($r.SourceId)" '207311/55056' 'pair' }
+T 'columns are named'         { Eq ((Import-Csv $sp)[0].PSObject.Properties.Name -join ',') 'TargetId,SourceId' 'cols' }
+T 'empty scope is still a file' { $ep = Join-Path $sm 'empty.csv'
+                                  [void](Write-VaultScopeManifest -Documents @() -Path $ep)
+                                  if(-not (Test-Path $ep)){ throw 'no file for an empty scope' } }
+
+Write-Host "== Scope reconciliation =="
+$rd = Join-Path $tmp ('vkrec-'+[guid]::NewGuid().ToString('N')); New-Item -ItemType Directory -Force $rd|Out-Null
+$found = @(
+  [pscustomobject]@{ TargetId='207311'; SourceId='55056' },
+  [pscustomobject]@{ TargetId='207312'; SourceId='55057' },
+  [pscustomobject]@{ TargetId='207313'; SourceId='55058' })
+
+$exact = Join-Path $rd 'exact.txt'; Set-Content $exact -Encoding ASCII -Value @('207311','207312','207313')
+T 'exact match reports no drift' { Eq (Compare-VaultScopeToList -Documents $found -Path $exact -OutPath (Join-Path $rd 'o1.csv')) 0 'drift' }
+
+$narrow = Join-Path $rd 'narrow.txt'; Set-Content $narrow -Encoding ASCII -Value @('207311','207312','207313','999999')
+T 'expected-not-found counts'    { Eq (Compare-VaultScopeToList -Documents $found -Path $narrow -OutPath (Join-Path $rd 'o2.csv')) 1 'one missing' }
+T 'and is named in the csv'      { Eq (@(Import-Csv (Join-Path $rd 'o2.csv') | Where-Object { $_.Verdict -eq 'EXPECTED_NOT_FOUND' })[0].Id) '999999' 'id' }
+
+$wide = Join-Path $rd 'wide.txt'; Set-Content $wide -Encoding ASCII -Value @('207311')
+T 'found-not-expected counts'    { Eq (Compare-VaultScopeToList -Documents $found -Path $wide -OutPath (Join-Path $rd 'o3.csv')) 2 'two extra' }
+T 'both directions in one file'  { $v = @(Import-Csv (Join-Path $rd 'o3.csv') | Where-Object { $_.Verdict -eq 'FOUND_NOT_EXPECTED' }); Eq $v.Count 2 'extra rows' }
+
+$srcList = Join-Path $rd 'src.txt'; Set-Content $srcList -Encoding ASCII -Value @('55056','55057','55058')
+T 'a source-id list is spotted'  { $d = Compare-VaultScopeToList -Documents $found -Path $srcList -OutPath (Join-Path $rd 'o4.csv')
+                                   if($d -eq 0){ throw 'source ids should not match target ids' } }
+
 Write-Host "== Throttle backoff =="
 T 'burst: eases off gently high' { $d = Get-VaultThrottleDelay -Kind 'burst' -Remaining 390; if($d -lt 1 -or $d -gt 12){ throw "got $d" } }
 T 'burst: waits longer when low' { $lo = 1..40 | ForEach-Object { Get-VaultThrottleDelay -Kind 'burst' -Remaining 10 }

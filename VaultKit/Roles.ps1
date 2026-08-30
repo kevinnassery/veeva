@@ -1872,6 +1872,110 @@ function Get-VaultCreatedByScope {
     return $docs
 }
 
+function Write-VaultScopeManifest {
+    # Exactly which documents a scope resolved to, on screen and on disk.
+    #
+    # A count is not a check. "412 documents matched" is equally consistent with the
+    # right filter and with a wrong one, and the only way to tell is to look at the ids -
+    # so the ids are written every time, before anything is read or changed, and a sample
+    # goes to the log where somebody will actually see it.
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][array]$Documents,
+        [Parameter(Mandatory)][string]$Path,
+        [int]$Show = 20
+    )
+    $rows = New-Object System.Collections.ArrayList
+    foreach ($d in $Documents) {
+        [void]$rows.Add([pscustomobject]@{
+            TargetId = "$(Get-VaultField $d 'TargetId' '')"
+            SourceId = "$(Get-VaultField $d 'SourceId' '')"
+        })
+    }
+    $rows | Export-Csv -LiteralPath $Path -NoTypeInformation -Encoding UTF8 -WhatIf:$false
+
+    $ids = @($rows | ForEach-Object { $_.TargetId })
+    Write-VaultLog "Target ids in scope ($($ids.Count)):"
+    $first = @($ids | Select-Object -First $Show)
+    for ($i = 0; $i -lt $first.Count; $i += 10) {
+        Write-VaultLog ("  " + (($first[$i..([math]::Min($i + 9, $first.Count - 1))]) -join ' '))
+    }
+    if ($ids.Count -gt $Show) { Write-VaultLog "  ... and $($ids.Count - $Show) more" }
+    Write-VaultLog "Scope written to $Path" 'OK'
+    return $Path
+}
+
+function Compare-VaultScopeToList {
+    # Does the query return exactly the documents somebody expected?
+    #
+    # A count agreeing proves nothing: 412 from the query and 412 in the list can still
+    # be 412 DIFFERENT documents. This compares the sets, and reports both directions,
+    # because they mean opposite things - an id in the list the query missed says the
+    # filter is too narrow, and one the query found that is not in the list says it is
+    # too wide. Either is worth knowing before anything is granted.
+    param(
+        [Parameter(Mandatory)][AllowEmptyCollection()][array]$Documents,
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$OutPath,
+        [int]$Show = 10
+    )
+    # One id per line, and tolerant of a header, blanks, quotes and repeats - the same
+    # reader the document workflows use, so a list that works there works here.
+    $expected = @(Import-VaultIdList -Path $Path)
+
+    $got = @{}; $src = @{}
+    foreach ($d in $Documents) {
+        $t = "$(Get-VaultField $d 'TargetId' '')"; if ($t) { $got[$t] = $true }
+        $s = "$(Get-VaultField $d 'SourceId' '')"; if ($s) { $src[$s] = $true }
+    }
+    $want = @{}
+    foreach ($e in $expected) { $want["$e"] = $true }
+
+    $matched = @($expected | Where-Object { $got.ContainsKey("$_") })
+    $missing = @($expected | Where-Object { -not $got.ContainsKey("$_") })
+    $extra   = @($got.Keys | Where-Object { -not $want.ContainsKey("$_") })
+
+    Write-VaultLog '----------------------------------------------------------------'
+    Write-VaultLog "Reconciling the query against $($expected.Count) expected id(s)"
+    Write-VaultLog ("  in both              {0}" -f $matched.Count) $(if ($matched.Count) { 'OK' } else { 'WARN' })
+    if ($missing.Count) {
+        Write-VaultLog ("  expected, not found  {0}  - the filter is narrower than the list" -f $missing.Count) 'ERROR'
+        Write-VaultLog ("    " + (($missing | Select-Object -First $Show) -join ' ')) 'ERROR'
+        if ($missing.Count -gt $Show) { Write-VaultLog "    ... and $($missing.Count - $Show) more" 'ERROR' }
+    }
+    if ($extra.Count) {
+        Write-VaultLog ("  found, not expected  {0}  - the filter is wider than the list" -f $extra.Count) 'ERROR'
+        Write-VaultLog ("    " + (($extra | Select-Object -First $Show) -join ' ')) 'ERROR'
+        if ($extra.Count -gt $Show) { Write-VaultLog "    ... and $($extra.Count - $Show) more" 'ERROR' }
+    }
+
+    # The mistake this catches before it wastes anyone's afternoon: a list of SOURCE ids
+    # compared against target ids matches nothing at all, which reads as a catastrophically
+    # wrong filter rather than as the wrong column.
+    if (-not $matched.Count -and $expected.Count -and $src.Count) {
+        $asSource = @($expected | Where-Object { $src.ContainsKey("$_") }).Count
+        if ($asSource) {
+            Write-VaultLog "$asSource of them match the SOURCE ids instead. That list looks like source document ids, not target." 'WARN'
+        }
+    }
+
+    $rows = New-Object System.Collections.ArrayList
+    foreach ($e in $expected) {
+        [void]$rows.Add([pscustomobject]@{ Id = "$e"; InList = $true; InQuery = $got.ContainsKey("$e")
+                                           Verdict = $(if ($got.ContainsKey("$e")) { 'BOTH' } else { 'EXPECTED_NOT_FOUND' }) })
+    }
+    foreach ($g in $extra) {
+        [void]$rows.Add([pscustomobject]@{ Id = "$g"; InList = $false; InQuery = $true; Verdict = 'FOUND_NOT_EXPECTED' })
+    }
+    (ConvertTo-VaultUniformRows -Rows $rows) |
+        Export-Csv -LiteralPath $OutPath -NoTypeInformation -Encoding UTF8 -WhatIf:$false
+    Write-VaultLog "Reconciliation written to $OutPath"
+
+    if (-not $missing.Count -and -not $extra.Count) {
+        Write-VaultLog 'The query returns exactly the expected documents.' 'OK'
+    }
+    return ($missing.Count + $extra.Count)
+}
+
 function Select-VaultScopeIntersection {
     # Where a map is also configured, take only what is in BOTH.
     #

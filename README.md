@@ -228,6 +228,7 @@ in is a separate job from moving the files, and it touches only the **target** v
 ```
 .\vault.ps1 roles survey     what is in scope: subtypes, roles, defaults
 .\vault.ps1 roles probe      whether a defaults table is needed, and what it should say
+.\vault.ps1 roles scope  -CreatedBy <user> -WithinHours <n>   which documents the filter selects
 .\vault.ps1 roles plan   -CreatedBy <user> -WithinHours <n>   who would be added to which role
 .\vault.ps1 roles assign -CreatedBy <user> -WithinHours <n>   add them
 .\vault.ps1 roles verify     prove what the run recorded is on the documents
@@ -254,7 +255,28 @@ which is the combination a migrated document is missing, since neither is applie
 documents created through the API or Vault Loader.
 
 `survey` and `probe` change nothing and take no scope flags, so you can look around
-first. `assign` never removes anyone and never invents an
+first.
+
+**Check the filter before spending anything on it.** `roles scope` runs the pre-query and
+stops: one VQL call, no document reads, nothing written. It prints the target ids it
+selected and records every one of them in `roles-scope-<when>.csv`, because a count is
+not a check — *"412 documents matched"* is equally consistent with the right filter and
+the wrong one, and only the ids can tell them apart. Every scoped run writes that file,
+not just `scope`.
+
+If you already know which documents should come back, hand the list over:
+
+```
+.\vault.ps1 roles scope -CreatedBy <user> -WithinHours 24 -ExpectIds expected.txt
+```
+
+One id per line. It reports **both** directions, because they mean opposite things: an id
+in your list the query did not return means the filter is narrower than you think, and one
+the query returned that is not in your list means it is wider. Either way it exits
+non-zero and writes `roles-scope-reconcile-<when>.csv` naming every difference. If nothing
+matches at all but the ids line up against the *source* column, it says so — a list of
+source ids compared against target ids reads as a catastrophically wrong filter when it is
+really the wrong column. `assign` never removes anyone and never invents an
 assignment: everything it writes is something the configuration already names as a
 default.
 
