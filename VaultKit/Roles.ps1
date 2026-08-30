@@ -2065,3 +2065,125 @@ function Select-VaultScopeIntersection {
     }
     return @($keep)
 }
+
+# --------------------------------------------------------------------------------------
+# Proving where the defaults come from
+#
+# `probe` observes that defaultUsers/defaultGroups holds MORE than the lifecycle rules
+# and infers the surplus is the document type's default security. That is a reasonable
+# inference and it is still an inference - and it decides which source a run that grants
+# people access should take its answer from.
+#
+# This settles it by arithmetic instead. For each role on each document it reads all
+# three independently and asks whether they reconcile:
+#
+#     D  what Vault reports as the default for this document and role
+#     L  what the lifecycle's role assignment rule says
+#     T  what the document type's default security says, read from MDL
+#
+# If D = L union T, then -DesiredFrom Document is exactly lifecycle plus type defaults
+# and the question is answered. If D holds names neither source accounts for, something
+# else is contributing and nobody should be granting access on the strength of a guess
+# about what.
+# --------------------------------------------------------------------------------------
+
+function Invoke-VaultRolesExplain {
+    param(
+        [Parameter(Mandatory)]$Context,
+        [Parameter(Mandatory)][array]$Documents,
+        [Parameter(Mandatory)]$Rules,
+        [Parameter(Mandatory)]$Directory,
+        [int]$Limit = 25
+    )
+    $c = $Context
+    $docs = @($Documents)
+    if ($Limit -gt 0 -and $docs.Count -gt $Limit) {
+        Write-VaultLog "Limit $Limit - explaining the first $Limit of $($docs.Count) document(s)" 'WARN'
+        $docs = @($docs | Select-Object -First $Limit)
+    }
+    Write-VaultLog "Decomposing the reported defaults on $($docs.Count) document(s)"
+
+    $rows = New-Object System.Collections.ArrayList
+    $stat = @{ Roles = 0; Explained = 0; Surplus = 0; Absent = 0; Both = 0; NoDefaults = 0
+               TypeAdded = 0; LifecycleOnly = 0 }
+    $i = 0
+    foreach ($doc in $docs) {
+        $i++
+        $docId = $doc.TargetId
+        $info  = Get-VaultDocumentInfo -Context $c -DocId $docId
+        if (-not $info.Read) { Write-VaultLog "[$i] $docId - could not read the document, skipped" 'WARN'; continue }
+        $td = Get-VaultDocTypeRoleDefault -Context $c -TypeLabel $info.Type -SubtypeLabel $info.Subtype -Directory $Directory
+
+        foreach ($r in @(Get-VaultDocumentRole -Context $c -DocId $docId)) {
+            $name = "$(Get-VaultField $r 'name' '')"
+            if (-not $name) { continue }
+            $stat.Roles++
+
+            $D = Get-VaultDesiredForRole -From 'Document' -RoleRecord $r -Table $null -Rules $null `
+                     -Subtype $info.Subtype -DocumentInfo $info
+            $L = Get-VaultDesiredForRole -From 'Lifecycle' -RoleRecord $r -Table $null -Rules $Rules `
+                     -Subtype $info.Subtype -DocumentInfo $info
+            $tU = @(); $tG = @()
+            if ($td.ContainsKey($name)) { $tU = @($td[$name].Users); $tG = @($td[$name].Groups) }
+
+            $dSet = @(@($D.Users | ForEach-Object { "u:$_" }) + @($D.Groups | ForEach-Object { "g:$_" }))
+            $lSet = @(@($L.Users | ForEach-Object { "u:$_" }) + @($L.Groups | ForEach-Object { "g:$_" }))
+            $tSet = @(@($tU        | ForEach-Object { "u:$_" }) + @($tG        | ForEach-Object { "g:$_" }))
+            $union = @(@($lSet + $tSet) | Select-Object -Unique)
+
+            $surplus = @($dSet | Where-Object { $union -notcontains $_ })
+            $absent  = @($union | Where-Object { $dSet -notcontains $_ })
+            # What the type defaults contribute that the lifecycle rule does not - the
+            # quantity `probe` saw as a surplus, now attributed rather than inferred.
+            $tOnly   = @($tSet | Where-Object { $lSet -notcontains $_ })
+
+            $verdict =
+                if (-not $dSet.Count -and -not $union.Count) { $stat.NoDefaults++;    'NO_DEFAULTS' }
+                elseif ($surplus.Count -and $absent.Count)   { $stat.Both++;          'BOTH_WAYS' }
+                elseif ($surplus.Count)                      { $stat.Surplus++;       'UNEXPLAINED_SURPLUS' }
+                elseif ($absent.Count)                       { $stat.Absent++;        'CONFIG_NOT_IN_DEFAULTS' }
+                else                                         { $stat.Explained++;     'EXPLAINED' }
+            if ($tOnly.Count) { $stat.TypeAdded++ } elseif ($lSet.Count) { $stat.LifecycleOnly++ }
+
+            [void]$rows.Add([pscustomobject]@{
+                DocId = $docId; Type = $info.Type; Subtype = $info.Subtype; Lifecycle = $info.Lifecycle
+                Role = $name
+                ReportedDefaults = $dSet.Count; FromLifecycle = $lSet.Count; FromTypeDefaults = $tSet.Count
+                TypeAddsBeyondLifecycle = $tOnly.Count
+                UnexplainedSurplus = $surplus.Count; ConfigNotInDefaults = $absent.Count
+                Verdict = $verdict
+                SurplusNames = (($surplus | Select-Object -First 8) -join '; ')
+                AbsentNames  = (($absent  | Select-Object -First 8) -join '; ')
+            })
+        }
+    }
+
+    Write-VaultLog '----------------------------------------------------------------'
+    Write-VaultLog "$($stat.Roles) role(s) examined across $($docs.Count) document(s)"
+    Write-VaultLog ("  EXPLAINED               {0}  - reported defaults are exactly lifecycle + type defaults" -f $stat.Explained) 'OK'
+    Write-VaultLog ("  NO_DEFAULTS             {0}  - nothing reported and nothing configured" -f $stat.NoDefaults)
+    if ($stat.Surplus) { Write-VaultLog ("  UNEXPLAINED_SURPLUS     {0}  - reported defaults hold names NEITHER source accounts for" -f $stat.Surplus) 'ERROR' }
+    if ($stat.Absent)  { Write-VaultLog ("  CONFIG_NOT_IN_DEFAULTS  {0}  - configured but not reported as a default" -f $stat.Absent) 'WARN' }
+    if ($stat.Both)    { Write-VaultLog ("  BOTH_WAYS               {0}" -f $stat.Both) 'ERROR' }
+    Write-VaultLog ("  type defaults add something beyond the lifecycle rule on {0} role(s)" -f $stat.TypeAdded)
+
+    $decided = $stat.Explained + $stat.NoDefaults
+    if ($stat.Roles -and $decided -eq $stat.Roles) {
+        Write-VaultLog 'PROVEN: every reported default is accounted for by the lifecycle rules plus the type defaults.' 'OK'
+        Write-VaultLog '-DesiredFrom Document is therefore exactly those two sources, and needs no -WithTypeDefaults.' 'OK'
+    }
+    elseif ($stat.Surplus -or $stat.Both) {
+        Write-VaultLog 'NOT PROVEN: some reported defaults come from somewhere neither source explains.' 'ERROR'
+        Write-VaultLog 'Look at SurplusNames in the report before granting anything on -DesiredFrom Document.' 'ERROR'
+    }
+    else {
+        Write-VaultLog 'Reported defaults are a SUBSET of what the two sources configure - see ConfigNotInDefaults.' 'WARN'
+        Write-VaultLog 'Document mode would then assign less than Lifecycle + -WithTypeDefaults would.' 'WARN'
+    }
+
+    $report = Join-Path $c.Out 'roles-explain.csv'
+    (ConvertTo-VaultUniformRows -Rows $rows) |
+        Export-Csv -LiteralPath $report -NoTypeInformation -Encoding UTF8 -WhatIf:$false
+    Write-VaultLog "Report: $report"
+    return ($stat.Surplus + $stat.Both)
+}

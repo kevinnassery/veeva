@@ -133,7 +133,7 @@ param(
     [int]$Workers = 0
 )
 
-$ScriptVersion = '2026.08.30-21'
+$ScriptVersion = '2026.08.30-22'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -731,8 +731,8 @@ function Invoke-Roles {
     # command will not touch teaches people to say yes without reading.
     param([string]$Action)
 
-    if ($Action -notin @('survey', 'probe', 'scope', 'plan', 'assign', 'verify')) {
-        Write-Host 'vault.ps1 roles <survey|probe|scope|plan|assign|verify>' -ForegroundColor Red
+    if ($Action -notin @('survey', 'probe', 'explain', 'scope', 'plan', 'assign', 'verify')) {
+        Write-Host 'vault.ps1 roles <survey|probe|explain|scope|plan|assign|verify>' -ForegroundColor Red
         exit 2
     }
 
@@ -862,6 +862,19 @@ roles survey and roles probe write nothing and need no scope.
             Write-VaultLog 'Nothing was read or changed. Run roles plan next to see the assignments.' 'OK'
             Write-VaultLog "Log: $script:VaultLogFile"
             if ($drift -gt 0) { exit 1 }
+            return
+        }
+
+        # Reads all three sources and checks they reconcile. Answers the question probe
+        # can only infer: whether the reported defaults ARE the lifecycle rules plus the
+        # type defaults, or whether something else is contributing.
+        if ($Action -eq 'explain') {
+            $dirX   = Get-VaultDirectory -Context $ctx
+            $rulesX = Get-VaultRoleAssignmentRule -Context $ctx -Directory $dirX
+            $bad = Invoke-VaultRolesExplain -Context $ctx -Documents $documents -Rules $rulesX `
+                       -Directory $dirX -Limit $(if ($Limit -gt 0) { $Limit } else { 25 })
+            Write-VaultLog "Log: $script:VaultLogFile"
+            if ($bad -gt 0) { exit 1 }
             return
         }
 
@@ -1089,6 +1102,7 @@ vault $v
 
   roles survey             What is in scope: subtypes, roles, defaults. Changes nothing
   roles probe              Whether a defaults table is needed, and what it should say
+  roles explain            Prove where the reported defaults come from. Changes nothing
   roles scope              Which documents the filter selects. One query, changes nothing
   roles plan               Exactly who would be added to which role. Changes nothing
   roles assign             Fill in the Sharing Settings the migration left empty
