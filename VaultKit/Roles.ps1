@@ -1940,7 +1940,7 @@ function Compare-VaultScopeToList {
         [Parameter(Mandatory)][AllowEmptyCollection()][array]$Documents,
         [Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)][string]$OutPath,
-        [int]$Show = 10
+        [int]$Show = 20
     )
     # One id per line, and tolerant of a header, blanks, quotes and repeats - the same
     # reader the document workflows use, so a list that works there works here.
@@ -1982,17 +1982,29 @@ function Compare-VaultScopeToList {
         }
     }
 
+    # Only the differences. A file holding fifteen thousand rows that agree, with the
+    # eleven that do not somewhere among them, is a file nobody reads - and the rows that
+    # agree are already recorded in the scope manifest. This one is the work list.
     $rows = New-Object System.Collections.ArrayList
-    foreach ($e in $expected) {
-        [void]$rows.Add([pscustomobject]@{ Id = "$e"; InList = $true; InQuery = $got.ContainsKey("$e")
-                                           Verdict = $(if ($got.ContainsKey("$e")) { 'BOTH' } else { 'EXPECTED_NOT_FOUND' }) })
+    foreach ($e in $missing) {
+        [void]$rows.Add([pscustomobject]@{ Id = "$e"; Verdict = 'EXPECTED_NOT_FOUND'
+                                           Means = 'in the list, not returned by the filter' })
     }
     foreach ($g in $extra) {
-        [void]$rows.Add([pscustomobject]@{ Id = "$g"; InList = $false; InQuery = $true; Verdict = 'FOUND_NOT_EXPECTED' })
+        [void]$rows.Add([pscustomobject]@{ Id = "$g"; Verdict = 'FOUND_NOT_EXPECTED'
+                                           Means = 'returned by the filter, not in the list' })
     }
-    (ConvertTo-VaultUniformRows -Rows $rows) |
-        Export-Csv -LiteralPath $OutPath -NoTypeInformation -Encoding UTF8 -WhatIf:$false
-    Write-VaultLog "Reconciliation written to $OutPath"
+    if ($rows.Count) {
+        (ConvertTo-VaultUniformRows -Rows $rows) |
+            Export-Csv -LiteralPath $OutPath -NoTypeInformation -Encoding UTF8 -WhatIf:$false
+        Write-VaultLog "$($rows.Count) difference(s) written to $OutPath - that file is the work list" 'ERROR'
+    }
+    else {
+        # Written even when empty: "we reconciled and found nothing" is a result worth
+        # having on disk, and an absent file cannot be told from a check nobody ran.
+        'Id,Verdict,Means' | Set-Content -LiteralPath $OutPath -Encoding UTF8 -WhatIf:$false
+        Write-VaultLog "No differences. Empty reconciliation written to $OutPath"
+    }
 
     if (-not $missing.Count -and -not $extra.Count) {
         Write-VaultLog 'The query returns exactly the expected documents.' 'OK'

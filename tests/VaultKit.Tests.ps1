@@ -211,6 +211,9 @@ T 'exact match reports no drift' { Eq (Compare-VaultScopeToList -Documents $foun
 $narrow = Join-Path $rd 'narrow.txt'; Set-Content $narrow -Encoding ASCII -Value @('207311','207312','207313','999999')
 T 'expected-not-found counts'    { Eq (Compare-VaultScopeToList -Documents $found -Path $narrow -OutPath (Join-Path $rd 'o2.csv')) 1 'one missing' }
 T 'and is named in the csv'      { Eq (@(Import-Csv (Join-Path $rd 'o2.csv') | Where-Object { $_.Verdict -eq 'EXPECTED_NOT_FOUND' })[0].Id) '999999' 'id' }
+T 'csv holds ONLY differences'   { Eq (@(Import-Csv (Join-Path $rd 'o2.csv')).Count) 1 'one row, not 4' }
+T 'clean run still writes a file'{ if(-not (Test-Path (Join-Path $rd 'o1.csv'))){ throw 'no file for a clean reconciliation' } }
+T 'and that file is empty'       { Eq (@(Import-Csv (Join-Path $rd 'o1.csv')).Count) 0 'no rows' }
 
 $wide = Join-Path $rd 'wide.txt'; Set-Content $wide -Encoding ASCII -Value @('207311')
 T 'found-not-expected counts'    { Eq (Compare-VaultScopeToList -Documents $found -Path $wide -OutPath (Join-Path $rd 'o3.csv')) 2 'two extra' }
