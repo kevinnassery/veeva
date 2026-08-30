@@ -2229,10 +2229,30 @@ function Invoke-VaultDocTypeMdlDump {
     $c = $Context
     $idx = Get-VaultDocTypeNameIndex -Context $c
     $typeKey = ConvertTo-VaultNameKey $TypeLabel
+
     if (-not $idx.Types.ContainsKey($typeKey)) {
-        throw "No document type called '$TypeLabel'. Run roles survey to see the labels this vault uses."
+        # What the Library shows, and therefore what anyone has to hand, is the SUBTYPE
+        # label - "Study Protocol" is a subtype of "Clinical". Insisting on the type name
+        # would mean knowing the hierarchy before being allowed to ask about it.
+        $foundType = ''; $foundSub = ''
+        foreach ($tk in @($idx.Types.Keys)) {
+            $tn = $idx.Types[$tk]
+            $sn = Get-VaultSubtypeName -Context $c -TypeName $tn -SubtypeLabel $TypeLabel
+            if ($sn) { $foundType = $tn; $foundSub = $TypeLabel; break }
+        }
+        if ($foundType) {
+            Write-VaultLog "'$TypeLabel' is a subtype of $foundType - reading that type and this subtype." 'WARN'
+            $typeName = $foundType
+            $SubtypeLabel = $foundSub
+        }
+        else {
+            # Name them. "Run roles survey" is an instruction to go and find out
+            # something this already knows.
+            $labels = @($idx.Types.Keys | ForEach-Object { $idx.Types[$_] } | Sort-Object)
+            throw ("No document type or subtype called '$TypeLabel'. This vault's types are:`n    " + ($labels -join "`n    "))
+        }
     }
-    $typeName = $idx.Types[$typeKey]
+    else { $typeName = $idx.Types[$typeKey] }
 
     $candidates = New-Object System.Collections.ArrayList
     if ($SubtypeLabel -and (ConvertTo-VaultNameKey $SubtypeLabel) -ne $typeKey) {
