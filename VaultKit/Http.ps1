@@ -22,6 +22,44 @@ function Get-VaultBurstReport {
     return @($out)
 }
 
+function Register-VaultBurstLimit {
+    # Record what a response said was left of the allowance, and ease off if it is low.
+    #
+    # A function rather than a few lines inside Invoke-VaultApi, because not every call
+    # goes through Invoke-VaultApi: the attachment upload builds its own HttpWebRequest
+    # so a 2GB body can stream from disk, and while it recorded nothing the end-of-run
+    # "lowest seen" was blind to the calls the workers spend their time in - so the one
+    # number that answers "should this run use more workers" was reading only the cheap
+    # listing calls beside them.
+    #
+    # The value arrives as whatever the response type hands back: a string from
+    # WebHeaderCollection on 5.1, a single-element string[] from Invoke-WebRequest on 7.
+    param(
+        [Parameter(Mandatory)][string]$VaultHost,
+        [AllowNull()][AllowEmptyString()]$HeaderValue
+    )
+    if ($null -eq $HeaderValue) { return }
+    $val = "$(@($HeaderValue)[0])".Trim()
+    if ($val -notmatch '^\d+$') { return }
+    $n = [int]$val
+
+    $script:VaultBurstRemaining[$VaultHost] = $n
+    if (-not $script:VaultBurstLowest.ContainsKey($VaultHost) -or
+        $n -lt $script:VaultBurstLowest[$VaultHost]) {
+        $script:VaultBurstLowest[$VaultHost] = $n
+    }
+
+    # Eased off from 400 rather than stopped dead at 200: the allowance is 2,000 every
+    # five minutes, and a run that keeps reaching the floor is one already being delayed
+    # 500ms a call by Vault - which looks like slowness, not like throttling, and is the
+    # failure this is meant to stay ahead of.
+    if ($n -lt 400) {
+        $wait = Get-VaultThrottleDelay -Kind 'burst' -Remaining $n
+        Write-VaultLog "$VaultHost burst allowance low ($n of 2000) - easing off ${wait}s" 'WARN'
+        Start-Sleep -Seconds $wait
+    }
+}
+
 # --------------------------------------------------------------------------------------
 # Backing off without thrashing
 #
@@ -122,23 +160,8 @@ function Invoke-VaultApi {
 
             $resp = Invoke-WebRequest @req
 
-            $remaining = $resp.Headers['X-VaultAPI-BurstLimitRemaining']
-            if ($remaining) {
-                $script:VaultBurstRemaining[$VaultHost] = [int]$remaining
-                if (-not $script:VaultBurstLowest.ContainsKey($VaultHost) -or
-                    [int]$remaining -lt $script:VaultBurstLowest[$VaultHost]) {
-                    $script:VaultBurstLowest[$VaultHost] = [int]$remaining
-                }
-            }
-            # Eased off from 400 rather than stopped dead at 200: the allowance is 2,000
-            # every five minutes, and a run that keeps reaching the floor is one already
-            # being delayed 500ms a call by Vault - which looks like slowness, not like
-            # throttling, and is the failure this is meant to stay ahead of.
-            if ($remaining -and [int]$remaining -lt 400) {
-                $wait = Get-VaultThrottleDelay -Kind 'burst' -Remaining ([int]$remaining)
-                Write-VaultLog "$VaultHost burst allowance low ($remaining of 2000) - easing off ${wait}s" 'WARN'
-                Start-Sleep -Seconds $wait
-            }
+            Register-VaultBurstLimit -VaultHost $VaultHost `
+                -HeaderValue $resp.Headers['X-VaultAPI-BurstLimitRemaining']
 
             $json = $null
             if ($resp.Content) { try { $json = $resp.Content | ConvertFrom-Json } catch { } }

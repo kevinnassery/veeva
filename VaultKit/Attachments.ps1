@@ -86,24 +86,36 @@ function Send-VaultDocumentAttachment {
             }
             finally { $rs.Dispose() }
 
-            $resp = $req.GetResponse()
+            $resp  = $req.GetResponse()
+            $body  = ''
+            $burst = $null
             try {
                 $sr = New-Object IO.StreamReader($resp.GetResponseStream())
                 $body = $sr.ReadToEnd(); $sr.Dispose()
-                $json = $null
-                try { $json = $body | ConvertFrom-Json } catch { }
-                if ($null -eq $json) { throw "attachment upload returned no JSON: $body" }
-                if ((Get-VaultField $json 'responseStatus') -ne 'SUCCESS') {
-                    $errs = @(Get-VaultField $json 'errors' @())
-                    throw (($errs | ForEach-Object { "$(Get-VaultField $_ 'type'): $(Get-VaultField $_ 'message')" }) -join '; ')
-                }
-                $d = Get-VaultField $json 'data' $null
-                return [pscustomobject]@{
-                    AttachmentId = "$(Get-VaultField $d 'id' '')"
-                    Version      = "$(Get-VaultField $d 'version__v' (Get-VaultField $d 'version' ''))"
-                }
+                # Read the allowance while the response is still open, act on it after.
+                # Easing off means sleeping, and a response held open for a minute is a
+                # socket held open for a minute.
+                try { $burst = $resp.Headers['X-VaultAPI-BurstLimitRemaining'] } catch { }
             }
             finally { $resp.Dispose() }
+
+            # This call never went through Invoke-VaultApi, so without this nothing
+            # records what it consumed. Uploads are what a worker spends its time on, so
+            # a burst report blind to them measured the listing calls and not the run.
+            Register-VaultBurstLimit -VaultHost $VaultHost -HeaderValue $burst
+
+            $json = $null
+            try { $json = $body | ConvertFrom-Json } catch { }
+            if ($null -eq $json) { throw "attachment upload returned no JSON: $body" }
+            if ((Get-VaultField $json 'responseStatus') -ne 'SUCCESS') {
+                $errs = @(Get-VaultField $json 'errors' @())
+                throw (($errs | ForEach-Object { "$(Get-VaultField $_ 'type'): $(Get-VaultField $_ 'message')" }) -join '; ')
+            }
+            $d = Get-VaultField $json 'data' $null
+            return [pscustomobject]@{
+                AttachmentId = "$(Get-VaultField $d 'id' '')"
+                Version      = "$(Get-VaultField $d 'version__v' (Get-VaultField $d 'version' ''))"
+            }
         }
         catch [Net.WebException] {
             $status = $null
@@ -114,12 +126,21 @@ function Send-VaultDocumentAttachment {
                 $detail = $er.ReadToEnd(); $er.Dispose()
             } catch { }
 
+            # Waits come from the same helper every other call uses, for the reason it
+            # exists: eight workers that all pause for exactly sixty seconds resume in
+            # the same instant and hit the vault together, which is what turns being
+            # throttled into thrashing. This is the path where waiting in lockstep costs
+            # the most, since the upload is the call the workers are all inside. Vault's
+            # own Retry-After is honoured as a floor - jitter only ever moves it later.
+            $after = Get-VaultRetryAfter $_.Exception.Response
+
             if ($status -eq 429 -and $attempt -lt $MaxRetries) {
-                Write-VaultLog "HTTP 429 attaching $FileName - waiting 60s" 'WARN'
-                Start-Sleep -Seconds 60; continue
+                $wait = Get-VaultThrottleDelay -Kind 'throttled' -Attempt $attempt -RetryAfter $after
+                Write-VaultLog "HTTP 429 attaching $FileName - waiting ${wait}s (attempt $attempt/$MaxRetries)" 'WARN'
+                Start-Sleep -Seconds $wait; continue
             }
             if (((-not $status) -or ($status -ge 500)) -and $attempt -lt $MaxRetries) {
-                $wait = [math]::Pow(2, $attempt) * 5
+                $wait = Get-VaultThrottleDelay -Kind 'transient' -Attempt $attempt -RetryAfter $after
                 Write-VaultLog "Transient error attaching $FileName (HTTP $status) - retry $attempt/$MaxRetries in ${wait}s" 'WARN'
                 Start-Sleep -Seconds $wait; continue
             }
