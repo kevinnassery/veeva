@@ -1213,7 +1213,14 @@ function Invoke-VaultRolesAssign {
         Write-VaultLog "Limit $Limit - examining the first $Limit of $($docs.Count) document(s)" 'WARN'
         $docs = @($docs | Select-Object -First $Limit)
     }
-    Write-VaultLog "$($docs.Count) document(s) to examine"
+    Write-VaultLog "$($docs.Count) document(s) in scope"
+    if ($Resume) {
+        # Said BEFORE the read, not after. The results file runs to tens of megabytes,
+        # and loading it is a silent half minute - during which the only thing on screen
+        # was a count of everything in scope, which is indistinguishable from a run that
+        # ignored -Resume. Somebody watching that will kill it, and be right to.
+        Write-VaultLog '-Resume: reading what earlier runs finished. A large results file takes a moment.' 'WARN'
+    }
 
     # Prior rows are loaded either way - from the CSV and from the journal of a run that
     # was killed - because they are carried through into the results file. Whether they
@@ -1247,14 +1254,17 @@ function Invoke-VaultRolesAssign {
         $before = $docs.Count
         $docs = @($docs | Where-Object { -not $doneIds.ContainsKey("$($_.TargetId)") })
         $skipped = $before - $docs.Count
+        Write-VaultLog "-Resume: $($res.Prior.Count) row(s) read, covering $($finished.Count) document(s)"
         if ($skipped) {
-            Write-VaultLog "-Resume: $skipped document(s) finished by an earlier run - not read again" 'OK'
-            Write-VaultLog "$($docs.Count) left to do. roles verify is what confirms the skipped ones." 'WARN'
+            Write-VaultLog "-Resume: $skipped finished already - not read again. $($docs.Count) left to do." 'OK'
+            Write-VaultLog 'roles verify is what confirms the skipped ones.' 'WARN'
         }
         else {
-            Write-VaultLog '-Resume: nothing in the results file is finished, so everything is still to do.'
+            Write-VaultLog '-Resume: none of them count as finished, so all of them are still to do.' 'WARN'
+            Write-VaultLog 'A document counts only when every row says ASSIGNED or IN_STEP - a WOULD_ASSIGN row from a plan run does not.' 'WARN'
         }
     }
+    Write-VaultLog "$($docs.Count) document(s) to examine"
 
     $stat = @{ Docs = 0; InStep = 0; NeedWork = 0; Changed = 0; Users = 0; Groups = 0
                Errors = 0; NoRoles = 0; RedundantUsers = 0 }

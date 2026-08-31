@@ -135,7 +135,7 @@ param(
     [int]    $MaxRetries = 4
 )
 
-$ScriptVersion = '2026.08.30-30'
+$ScriptVersion = '2026.08.30-31'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
