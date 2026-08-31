@@ -2557,7 +2557,7 @@ function Invoke-VaultRolesAudit {
                -KeyColumn 'DocId' -DoneStatuses @() -Existing 'Fresh'
 
     $stat = @{ Correct = 0; Incomplete = 0; NoRoles = 0; Unreadable = 0
-               GroupsMissing = 0; UsersMissing = 0 }
+               GroupsMissing = 0; UsersMissing = 0; GroupsPresentTotal = 0 }
     $i = 0
     foreach ($doc in $docs) {
         $i++
@@ -2607,8 +2607,11 @@ function Invoke-VaultRolesAudit {
                     $wantU = @(@($wantU) + @($td[$name].Users)  | Select-Object -Unique)
                 }
 
-                $haveG = @(@(Get-VaultField $r 'groups' @()) | ForEach-Object { "$_" })
-                $haveU = @(@(Get-VaultField $r 'users'  @()) | ForEach-Object { "$_" })
+                # assignedGroups / assignedUsers, which is what /documents/{id}/roles
+                # actually returns. Reading 'groups' and 'users' gets an empty array and
+                # every document then looks like it is missing everything.
+                $haveG = @(@(Get-VaultField $r 'assignedGroups' @()) | ForEach-Object { "$_" })
+                $haveU = @(@(Get-VaultField $r 'assignedUsers'  @()) | ForEach-Object { "$_" })
 
                 $row.GroupsExpected += $wantG.Count
                 foreach ($g in $wantG) {
@@ -2623,8 +2626,9 @@ function Invoke-VaultRolesAudit {
                 }
             }
 
-            $stat.GroupsMissing += $row.GroupsMissing
-            $stat.UsersMissing  += $row.UsersMissing
+            $stat.GroupsMissing      += $row.GroupsMissing
+            $stat.UsersMissing       += $row.UsersMissing
+            $stat.GroupsPresentTotal += $row.GroupsPresent
             if ($row.GroupsMissing -or $row.UsersMissing) {
                 $row.Status = 'INCOMPLETE'; $stat.Incomplete++
                 $row.MissingDetail = (($missing | Select-Object -First 12) -join '; ')
@@ -2642,6 +2646,14 @@ function Invoke-VaultRolesAudit {
     Save-VaultResults -Results $res
     Write-VaultLog '----------------------------------------------------------------'
     Write-VaultLog "$($docs.Count) document(s) audited against the configuration"
+
+    # Every document short, and not one group found present anywhere. That is not a vault
+    # in which every document is wrong - it is this code reading the wrong field, which is
+    # exactly how it failed the first time. Said before the totals, so nobody acts on them.
+    if ($stat.Incomplete -eq $docs.Count -and $docs.Count -gt 5 -and $stat.GroupsPresentTotal -eq 0) {
+        Write-VaultLog 'EVERY document is short and NOTHING was found present. Suspect this audit, not the vault.' 'ERROR'
+        Write-VaultLog 'That is the signature of reading the wrong field off the roles response.' 'ERROR'
+    }
     Write-VaultLog ("  CORRECT       {0,7}  - has every group and user the configuration names" -f $stat.Correct) 'OK'
     if ($stat.Incomplete) {
         Write-VaultLog ("  INCOMPLETE    {0,7}  - {1} group and {2} user assignment(s) short" -f $stat.Incomplete, $stat.GroupsMissing, $stat.UsersMissing) 'ERROR'

@@ -459,8 +459,9 @@ function Test-VaultMigratedDocument {
             $roles = @(Get-VaultDocumentRole -Context $c -DocId $TargetId)
             $row.RolesTotal = $roles.Count
             foreach ($r in $roles) {
-                $u = @(Get-VaultField $r 'users' @()).Count
-                $g = @(Get-VaultField $r 'groups' @()).Count
+                # assignedUsers / assignedGroups - what the roles endpoint returns.
+                $u = @(Get-VaultField $r 'assignedUsers' @()).Count
+                $g = @(Get-VaultField $r 'assignedGroups' @()).Count
                 if ($u -or $g) { $row.RolesWithPeople++ }
             }
 
@@ -473,8 +474,8 @@ function Test-VaultMigratedDocument {
                 foreach ($r in $roles) {
                     $want = Get-VaultDesiredForRole -From 'Lifecycle' -RoleRecord $r -Table $null `
                                 -Rules $Rules -Subtype $subtype -DocumentInfo $info
-                    $haveU = @(Get-VaultField $r 'users' @())
-                    $haveG = @(Get-VaultField $r 'groups' @())
+                    $haveU = @(Get-VaultField $r 'assignedUsers' @())
+                    $haveG = @(Get-VaultField $r 'assignedGroups' @())
                     foreach ($g in @($want.Groups)) { if ($haveG -notcontains $g) { $row.GroupsMissing++ } }
                     foreach ($u in @($want.Users))  { if ($haveU -notcontains $u) { $row.UsersMissing++ } }
                 }
