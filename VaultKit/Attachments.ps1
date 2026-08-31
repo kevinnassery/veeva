@@ -29,6 +29,58 @@ function Get-VaultDocumentAttachment {
     return $out
 }
 
+function Get-VaultDocumentsWithAttachment {
+    # Which documents in a vault carry attachments at all, asked once instead of
+    # discovered one listing at a time.
+    #
+    # The sync spends one source listing per mapped document - 15,757 of them to find the
+    # ~800 that carry anything. Vault's allowance is 2,000 calls per five minutes per
+    # USER, so workers cannot buy their way past it: four processes and two processes
+    # finish together, the four just spend more of it asleep. The only lever is making
+    # fewer calls, and 95% of those calls exist to learn that a document has nothing.
+    #
+    # attachments__sysr is queryable as a subquery in a WHERE clause from v24.1.
+    #
+    # Returns $null - not an empty hashtable - when the query cannot be answered. "No
+    # document has attachments" and "I could not ask" must not look the same to the
+    # caller: the first means skip the scan, the second means do it.
+    param(
+        [Parameter(Mandatory)][string]$VaultHost,
+        [Parameter(Mandatory)][string]$ApiVersion
+    )
+    $vql = 'SELECT id FROM documents WHERE id IN (SELECT document_id__sys FROM attachments__sysr)'
+    Write-VaultLog "Asking $VaultHost which documents carry attachments: $vql"
+
+    $ids   = @{}
+    $path  = '/query'
+    $body  = "q=$([Uri]::EscapeDataString($vql))"
+    $pages = 0
+    try {
+        while ($path -and $pages -lt 1000) {
+            $pages++
+            # Page 1 is a POST carrying the query; every page after is a GET on the URL
+            # Vault hands back, which already has the query baked in.
+            $r = if ($pages -eq 1) {
+                    Invoke-VaultApi -VaultHost $VaultHost -ApiVersion $ApiVersion -Method POST `
+                        -Path $path -Body $body -ContentType 'application/x-www-form-urlencoded'
+                 } else {
+                    Invoke-VaultApi -VaultHost $VaultHost -ApiVersion $ApiVersion -Method GET -Path $path
+                 }
+            foreach ($row in @(Get-VaultField $r 'data' @())) {
+                $id = "$(Get-VaultField $row 'id' '')"
+                if ($id) { $ids[$id] = $true }
+            }
+            $path = "$(Get-VaultField (Get-VaultField $r 'responseDetails' $null) 'next_page' '')"
+        }
+    }
+    catch {
+        Write-VaultLog "The attachment query failed, so every document will be listed instead: $_" 'WARN'
+        return $null
+    }
+    Write-VaultLog "$($ids.Count) document(s) in $VaultHost carry attachments, from $pages page(s)" 'OK'
+    return $ids
+}
+
 function Send-VaultDocumentAttachment {
     # Upload straight onto the target document - no File Staging anywhere.
     #
@@ -165,6 +217,7 @@ function Invoke-VaultAttachmentsSync {
         [Parameter(Mandatory)]$Context,
         [switch]$Plan,
         [switch]$ReplaceDiffering,
+        [switch]$Prefilter,
         [int]$TestCount = 0,
         [int]$Limit = 0
     )
@@ -176,6 +229,28 @@ function Invoke-VaultAttachmentsSync {
         $ids = @($ids | Select-Object -First $Limit)
     }
     Write-VaultLog "$($ids.Count) mapped document(s) to examine"
+
+    # Ask the vault which documents carry anything, rather than finding out one listing
+    # at a time. Applied here, before the shard, so the workers inherit the reduced set
+    # and none of them repeats the query.
+    #
+    # Opt-in, and it says so loudly: a document the query does not name is a document
+    # this run never looks at. A slow run is a nuisance; an attachment that silently
+    # never migrates is the thing this whole kit exists to prevent.
+    if ($Prefilter) {
+        $have = Get-VaultDocumentsWithAttachment -VaultHost $c.SourceHost -ApiVersion $c.Api
+        if ($null -ne $have) {
+            $before = $ids.Count
+            $ids    = @($ids | Where-Object { $have.ContainsKey($_) })
+            Write-VaultLog ("Prefilter: {0} of {1} mapped document(s) carry attachments - {2} source listing(s) skipped" -f `
+                            $ids.Count, $before, ($before - $ids.Count)) 'OK'
+            Write-VaultLog 'Documents the query did not name are NOT examined by this run.' 'WARN'
+            if ($ids.Count -eq 0) {
+                Write-VaultLog 'Nothing to do: no mapped document carries an attachment on the source.' 'OK'
+                return 0
+            }
+        }
+    }
 
     # Sharded by DOCUMENT, because that is what the map keys are and what a worker can be
     # handed. The rows it produces are per attachment, which is why the supervisor is

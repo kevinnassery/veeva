@@ -160,6 +160,22 @@ unless `-ReplaceDiffering` is set. Attachments are attached directly to the targ
 document in one upload — no File Staging is involved, because an attachment has somewhere
 to land the moment it arrives.
 
+**`-Prefilter` when the map is large and mostly empty.** The sync spends one source
+listing per mapped document to discover which carry anything. On a map of 15,775 where
+around 800 have attachments, that is 95% of the calls spent learning that documents have
+nothing — and since Vault's 2,000-per-five-minutes allowance is per **user**, workers
+cannot outrun it. Four processes and two finish together; the four just spend more of it
+asleep. `-Prefilter` asks the vault instead, with one paginated VQL query against
+`attachments__sysr`, and examines only the documents it names. That is the only lever
+that makes a large map faster.
+
+It is opt-in on purpose. A document the query does not name is a document the run never
+looks at, so a wrong answer there is an attachment that silently never migrates — which
+is worse than a slow run, and is the failure this kit exists to prevent. The run says how
+many it skipped and says out loud that it skipped them. If the query cannot be answered
+at all the run says so and lists everything, rather than treating "I could not ask" as
+"nothing has attachments".
+
 ## Is it migrated?
 
 The per-workflow checks each answer their own question. This one answers the question
@@ -394,6 +410,7 @@ up to sixteen files on disk rather than two.
 | `-Test 5` | stop once 5 are genuinely done |
 | `-Limit 50` | cap the input examined |
 | `-Workers 4` | move the work with 4 processes |
+| `-Prefilter` | ask which documents have attachments instead of listing all of them |
 | `-Out <dir>` | put logs, results and scratch somewhere else |
 | `-Yes` | skip the vault confirmation |
 | `-WhatIf` | rehearse, write nothing to Vault |

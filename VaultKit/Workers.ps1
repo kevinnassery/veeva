@@ -253,20 +253,33 @@ function Invoke-VaultShardedRun {
         while ($procs | Where-Object { -not $_.HasExited }) {
             Start-Sleep -Seconds 30
             $moved = 0
+            $rows  = 0
             for ($w = 1; $w -le $count; $w++) {
                 $wDir = Join-Path $root "w$w"
                 Read-VaultWorkerLog -Dir $wDir -Label "w$w" -Pattern $LogPattern -Offsets $offsets
                 $f = Join-Path $wDir $ResultsName
                 if (Test-Path -LiteralPath $f) {
-                    try { $moved += @(Import-Csv -LiteralPath $f | Where-Object { $_.Status -eq $SuccessStatus }).Count } catch { }
+                    # Both numbers, because they answer different questions. Successes
+                    # say how much of the job is done; rows say whether anything is
+                    # happening at all - and on a verify of a population that has not
+                    # been migrated yet, almost nothing is a success, so a progress line
+                    # counting only those sat at zero for half an hour while four
+                    # workers churned. That reads as a hang.
+                    try {
+                        $csv    = @(Import-Csv -LiteralPath $f)
+                        $rows  += $csv.Count
+                        $moved += @($csv | Where-Object { $_.Status -eq $SuccessStatus }).Count
+                    } catch { }
                 }
             }
             $elapsed = ((Get-Date) - $started).TotalSeconds
             $alive   = @($procs | Where-Object { -not $_.HasExited }).Count
             if (-not $RowsAreItems) {
-                $rate = if ($elapsed -gt 0) { $moved / $elapsed } else { 0 }
-                Write-VaultLog ("progress {0:N0} row(s) at {1:N2}/s overall, {2} of {3} worker(s) alive" -f `
-                                $moved, $rate, $alive, $count)
+                # Rate from rows, not successes: it is a measure of how fast the run is
+                # moving, and a run finding nothing to do is still moving.
+                $rate = if ($elapsed -gt 0) { $rows / $elapsed } else { 0 }
+                Write-VaultLog ("progress {0:N0} row(s), {1:N0} {2}, at {3:N2}/s overall, {4} of {5} worker(s) alive" -f `
+                                $rows, $moved, $SuccessStatus, $rate, $alive, $count)
             }
             elseif ($moved -gt 0 -and $elapsed -gt 0) {
                 $rate = $moved / $elapsed

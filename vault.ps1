@@ -49,6 +49,11 @@ param(
     [ValidateSet('FAST', 'DEEP')][string]$Depth = 'DEEP',
     # Send a same-name attachment whose bytes differ, as a new version.
     [switch]$ReplaceDiffering,
+    # attachments sync: ask the vault which documents carry attachments and examine only
+    # those, instead of listing every mapped document to find out. Vault's 2,000-calls-
+    # per-five-minutes allowance is per user, so this is the only lever that makes a
+    # large map faster - workers cannot outrun a budget they share.
+    [switch]$Prefilter,
     [ValidateSet('Prompt', 'Resume', 'Fresh')][string]$Existing = 'Resume',
     # documents: the folder on the target vault's File Staging to upload into.
     # Overrides [documents] path.
@@ -142,7 +147,7 @@ param(
     [int]$Workers = 0
 )
 
-$ScriptVersion = '2026.08.31-2'
+$ScriptVersion = '2026.08.31-3'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -658,7 +663,8 @@ function Invoke-Attachments {
                 [void](Confirm-VaultsForRun)
                 $ctx = New-VaultContext -Section 'attachments' -MapKey 'map'
                 $bad = Invoke-VaultAttachmentsSync -Context $ctx -Plan:$Plan `
-                          -ReplaceDiffering:$ReplaceDiffering -TestCount $Test -Limit $Limit
+                          -ReplaceDiffering:$ReplaceDiffering -Prefilter:$Prefilter `
+                          -TestCount $Test -Limit $Limit
                 Write-VaultLog "Log: $script:VaultLogFile"
                 if ($bad -gt 0) { exit 1 }
             }
