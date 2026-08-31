@@ -5,6 +5,22 @@
 # called "Created By", headers written for people rather than parsers, a row per file so
 # one document appears eight times, and #N/A where a lookup found nothing.
 
+function Resolve-VaultOutputPath {
+    # An absolute path for something about to be written.
+    #
+    # [IO.File]::WriteAllLines and [IO.Path]::GetFullPath resolve a relative path against
+    # the PROCESS working directory, and PowerShell's Set-Location does not move that.
+    # So `cd C:\vault-work` followed by `-OutFile attachments-map.csv` wrote to
+    # U:\attachments-map.csv - the drive the shell happened to start on - and where that
+    # was not writable it failed with an access error naming a path nobody had typed.
+    #
+    # Reads already went through the provider location, in Resolve-VaultInput and
+    # Import-VaultDelimitedFile. Writes did not. An absolute path passes through
+    # unchanged, so this is safe to apply to anything.
+    param([Parameter(Mandatory)][string]$Path)
+    return [IO.Path]::GetFullPath([IO.Path]::Combine((Get-Location).ProviderPath, $Path))
+}
+
 function Export-VaultIdMap {
     # Write the canonical map. One shape out, whatever went in.
     param(
@@ -22,7 +38,7 @@ function Export-VaultIdMap {
     foreach ($k in ($Map.Keys | Sort-Object { [long]$_ })) {
         [void]$lines.Add(('{0},{1}' -f $k, $Map[$k]))
     }
-    [IO.File]::WriteAllLines($Path, $lines, (New-Object Text.UTF8Encoding $false))
+    [IO.File]::WriteAllLines((Resolve-VaultOutputPath -Path $Path), $lines, (New-Object Text.UTF8Encoding $false))
     return ($lines.Count - 1)
 }
 

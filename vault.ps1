@@ -142,7 +142,7 @@ param(
     [int]$Workers = 0
 )
 
-$ScriptVersion = '2026.08.31-1'
+$ScriptVersion = '2026.08.31-2'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -1015,7 +1015,11 @@ function Invoke-Map {
         if ($Action -eq 'write') {
             $out = $OutFile
             if (-not $out) { $out = Join-Path $script:Out 'ids.txt' }
-            if ([IO.Path]::GetFullPath($out) -eq [IO.Path]::GetFullPath($resolved)) {
+            # Resolved before the guard, not only before the write: the comparison has
+            # the same process-working-directory problem, so an unresolved -OutFile could
+            # read as a different file from the one it was about to overwrite.
+            $out = Resolve-VaultOutputPath -Path $out
+            if ($out -eq (Resolve-VaultOutputPath -Path $resolved)) {
                 throw "That would overwrite the file it just read ($out). Name a different -OutFile."
             }
             [IO.File]::WriteAllLines($out, $ids, (New-Object Text.UTF8Encoding $false))
@@ -1044,7 +1048,8 @@ function Invoke-Map {
     if ($Action -eq 'write') {
         $out = $OutFile
         if (-not $out) { $out = Join-Path $script:Out 'map.csv' }
-        if ([IO.Path]::GetFullPath($out) -eq [IO.Path]::GetFullPath($st.Path)) {
+        $out = Resolve-VaultOutputPath -Path $out
+        if ($out -eq (Resolve-VaultOutputPath -Path $st.Path)) {
             throw "That would overwrite the map it just read ($out). Name a different -OutFile."
         }
         $n = Export-VaultIdMap -Map $map -Path $out
