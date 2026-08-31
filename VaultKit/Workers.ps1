@@ -257,14 +257,32 @@ function Invoke-VaultShardedRun {
             for ($w = 1; $w -le $count; $w++) {
                 $wDir = Join-Path $root "w$w"
                 Read-VaultWorkerLog -Dir $wDir -Label "w$w" -Pattern $LogPattern -Offsets $offsets
+                # The JOURNAL while the worker is running, the CSV once it has finished.
+                #
+                # A worker writes its CSV exactly once, from Save-VaultResults, at the
+                # end of its run - so polling the CSV of a live worker reads nothing, and
+                # progress sat at zero for the whole run however long it was. The journal
+                # is the file that grows: one JSON line appended per row as it happens.
+                # Save-VaultResults deletes it once the CSV is safely written, which is
+                # what makes the fallback below the right way round.
+                #
+                # Both numbers, because they answer different questions. Successes say
+                # how much of the job is done; rows say whether anything is happening at
+                # all - and on a verify of a population that has not been migrated yet,
+                # almost nothing is a success.
                 $f = Join-Path $wDir $ResultsName
-                if (Test-Path -LiteralPath $f) {
-                    # Both numbers, because they answer different questions. Successes
-                    # say how much of the job is done; rows say whether anything is
-                    # happening at all - and on a verify of a population that has not
-                    # been migrated yet, almost nothing is a success, so a progress line
-                    # counting only those sat at zero for half an hour while four
-                    # workers churned. That reads as a hang.
+                $j = "$f.jsonl"
+                if (Test-Path -LiteralPath $j) {
+                    # Matched as text rather than parsed: this runs every 30 seconds over
+                    # a file that only grows, and ConvertFrom-Json on every line of a
+                    # 15,000-row journal to count them is not what the poll is for.
+                    try {
+                        $lines  = @(Get-Content -LiteralPath $j -ErrorAction SilentlyContinue)
+                        $rows  += $lines.Count
+                        $moved += @($lines | Where-Object { $_ -like "*`"Status`":`"$SuccessStatus`"*" }).Count
+                    } catch { }
+                }
+                elseif (Test-Path -LiteralPath $f) {
                     try {
                         $csv    = @(Import-Csv -LiteralPath $f)
                         $rows  += $csv.Count
