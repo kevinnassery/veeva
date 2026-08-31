@@ -11,6 +11,11 @@ manifest-*.csv
 # Invoke-VaultDocumentAction.ps1 run artifacts
 documents.csv
 documents-*.csv
+role-audit-results.csv
+role-audit-results-*.csv
+role-results.csv
+role-results-*.csv
+roles-*.log
 document-results.csv
 document-results-*.csv
 document-fields.csv
@@ -24,6 +29,11 @@ attachments-map.csv
 map.csv
 session.txt
 
+role-audit-results.csv
+role-audit-results-*.csv
+role-results.csv
+role-results-*.csv
+roles-*.log
 document-results.csv
 document-results-*.csv
 document-validate-results.csv

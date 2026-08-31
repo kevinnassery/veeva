@@ -2664,5 +2664,10 @@ function Invoke-VaultRolesAudit {
     Write-VaultLog 'cannot catch a mistake in that logic - roles explain checks it against the'
     Write-VaultLog 'configuration. It catches everything between intent and outcome.'
     Write-VaultLog "Report: $($res.Path)"
+    # Stamped, and never written again. This file is the evidence that the permissions
+    # are right - the working copy is rotated aside by the next run, so the record of
+    # what THIS audit found has to survive independently of it.
+    $snap = Copy-VaultResultsSnapshot -Path $res.Path
+    if ($snap) { Write-VaultLog "This run : $snap" }
     return ($stat.Incomplete + $stat.Unreadable)
 }
