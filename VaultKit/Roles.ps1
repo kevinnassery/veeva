@@ -2522,3 +2522,135 @@ function Invoke-VaultDocTypeMdlDump {
     Write-VaultLog "Every attribute written to $out"
     return $unparsed.Count
 }
+
+function Invoke-VaultRolesAudit {
+    # Do these documents have the settings the configuration says they should?
+    #
+    # A different question from "did the run do what it recorded", and the one people
+    # actually mean. For every document it reads the roles Vault holds now, works out
+    # what the lifecycle's role assignment rules and the document type's defaults name
+    # for it, and reports the difference.
+    #
+    # Be clear about what this proves. It recomputes the desired state with the same
+    # logic the assign used, so it cannot catch a mistake in that logic - `roles explain`
+    # is what checks the logic against the configuration itself. What it does catch is
+    # everything between intent and outcome: a document no run ever reached, an
+    # assignment Vault accepted and silently did not make, a role emptied since, a
+    # lifecycle changed underneath.
+    param(
+        [Parameter(Mandatory)]$Context,
+        [Parameter(Mandatory)][array]$Documents,
+        [Parameter(Mandatory)]$Rules,
+        [Parameter(Mandatory)]$Directory,
+        [switch]$WithTypeDefaults,
+        [int]$Limit = 0
+    )
+    $c = $Context
+    $docs = @($Documents)
+    if ($Limit -gt 0 -and $docs.Count -gt $Limit) {
+        Write-VaultLog "Limit $Limit - auditing the first $Limit of $($docs.Count)" 'WARN'
+        $docs = @($docs | Select-Object -First $Limit)
+    }
+    Write-VaultLog "Auditing $($docs.Count) document(s) against the lifecycle rules$(if ($WithTypeDefaults) { ' and the document type defaults' })"
+
+    $res = New-VaultResults -Path (Join-Path $c.Out 'role-audit-results.csv') `
+               -KeyColumn 'DocId' -DoneStatuses @() -Existing 'Fresh'
+
+    $stat = @{ Correct = 0; Incomplete = 0; NoRoles = 0; Unreadable = 0
+               GroupsMissing = 0; UsersMissing = 0 }
+    $i = 0
+    foreach ($doc in $docs) {
+        $i++
+        $docId = "$(Get-VaultField $doc 'TargetId' '')"
+        if (-not $docId) { $docId = "$doc" }
+        if (($i % 200) -eq 0) { Write-VaultLog "  audited $i of $($docs.Count)" }
+
+        $row = [ordered]@{
+            DocId = $docId; Lifecycle = ''; Type = ''; Subtype = ''; Classification = ''
+            RolesChecked = 0; GroupsExpected = 0; GroupsPresent = 0
+            GroupsMissing = 0; UsersMissing = 0
+            MissingDetail = ''; Status = ''
+        }
+        try {
+            $info = Get-VaultDocumentInfo -Context $c -DocId $docId
+            if (-not $info.Read) {
+                $row.Status = 'UNREADABLE'; $stat.Unreadable++
+                Add-VaultResult -Results $res -Row ([pscustomobject]$row); continue
+            }
+            $row.Lifecycle = $info.Lifecycle; $row.Type = $info.Type
+            $row.Subtype = $info.Subtype; $row.Classification = $info.Classification
+
+            $td = @{}
+            if ($WithTypeDefaults) {
+                $td = Get-VaultDocTypeRoleDefault -Context $c -TypeLabel $info.Type `
+                          -SubtypeLabel $info.Subtype -Directory $Directory `
+                          -ClassificationLabel $info.Classification
+            }
+
+            $roles = @(Get-VaultDocumentRole -Context $c -DocId $docId)
+            if (-not $roles.Count) {
+                $row.Status = 'NO_ROLES'; $stat.NoRoles++
+                Add-VaultResult -Results $res -Row ([pscustomobject]$row); continue
+            }
+
+            $missing = New-Object System.Collections.ArrayList
+            foreach ($r in $roles) {
+                $name = "$(Get-VaultField $r 'name' '')"
+                if (-not $name) { continue }
+                $row.RolesChecked++
+
+                $want = Get-VaultDesiredForRole -From 'Lifecycle' -RoleRecord $r -Table $null `
+                            -Rules $Rules -Subtype $info.Subtype -DocumentInfo $info
+                $wantG = @($want.Groups); $wantU = @($want.Users)
+                if ($td.ContainsKey($name)) {
+                    $wantG = @(@($wantG) + @($td[$name].Groups) | Select-Object -Unique)
+                    $wantU = @(@($wantU) + @($td[$name].Users)  | Select-Object -Unique)
+                }
+
+                $haveG = @(@(Get-VaultField $r 'groups' @()) | ForEach-Object { "$_" })
+                $haveU = @(@(Get-VaultField $r 'users'  @()) | ForEach-Object { "$_" })
+
+                $row.GroupsExpected += $wantG.Count
+                foreach ($g in $wantG) {
+                    if ($haveG -contains $g) { $row.GroupsPresent++; continue }
+                    $row.GroupsMissing++
+                    [void]$missing.Add("$name needs group $(Get-VaultDisplayName -Directory $Directory -Kind 'group' -Id $g)")
+                }
+                foreach ($u in $wantU) {
+                    if ($haveU -contains $u) { continue }
+                    $row.UsersMissing++
+                    [void]$missing.Add("$name needs user $(Get-VaultDisplayName -Directory $Directory -Kind 'user' -Id $u)")
+                }
+            }
+
+            $stat.GroupsMissing += $row.GroupsMissing
+            $stat.UsersMissing  += $row.UsersMissing
+            if ($row.GroupsMissing -or $row.UsersMissing) {
+                $row.Status = 'INCOMPLETE'; $stat.Incomplete++
+                $row.MissingDetail = (($missing | Select-Object -First 12) -join '; ')
+                Write-VaultLog "[$i] $docId - INCOMPLETE: $($row.MissingDetail)" 'ERROR'
+            }
+            else { $row.Status = 'CORRECT'; $stat.Correct++ }
+        }
+        catch {
+            $row.Status = 'ERROR'; $row.MissingDetail = "$_"; $stat.Unreadable++
+            Write-VaultLog "[$i] $docId - ERROR: $_" 'ERROR'
+        }
+        Add-VaultResult -Results $res -Row ([pscustomobject]$row)
+    }
+
+    Save-VaultResults -Results $res
+    Write-VaultLog '----------------------------------------------------------------'
+    Write-VaultLog "$($docs.Count) document(s) audited against the configuration"
+    Write-VaultLog ("  CORRECT       {0,7}  - has every group and user the configuration names" -f $stat.Correct) 'OK'
+    if ($stat.Incomplete) {
+        Write-VaultLog ("  INCOMPLETE    {0,7}  - {1} group and {2} user assignment(s) short" -f $stat.Incomplete, $stat.GroupsMissing, $stat.UsersMissing) 'ERROR'
+    }
+    if ($stat.NoRoles)    { Write-VaultLog ("  NO_ROLES      {0,7}  - the document reports no roles at all" -f $stat.NoRoles) 'WARN' }
+    if ($stat.Unreadable) { Write-VaultLog ("  UNREADABLE    {0,7}" -f $stat.Unreadable) 'ERROR' }
+    Write-VaultLog 'This recomputes the desired state with the same logic the assign used, so it'
+    Write-VaultLog 'cannot catch a mistake in that logic - roles explain checks it against the'
+    Write-VaultLog 'configuration. It catches everything between intent and outcome.'
+    Write-VaultLog "Report: $($res.Path)"
+    return ($stat.Incomplete + $stat.Unreadable)
+}

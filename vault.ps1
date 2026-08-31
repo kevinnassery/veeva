@@ -142,7 +142,7 @@ param(
     [int]$Workers = 0
 )
 
-$ScriptVersion = '2026.08.30-34'
+$ScriptVersion = '2026.08.30-35'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -740,8 +740,8 @@ function Invoke-Roles {
     # command will not touch teaches people to say yes without reading.
     param([string]$Action)
 
-    if ($Action -notin @('survey', 'probe', 'explain', 'mdl', 'scope', 'plan', 'assign', 'verify')) {
-        Write-Host 'vault.ps1 roles <survey|probe|explain|mdl|scope|plan|assign|verify>' -ForegroundColor Red
+    if ($Action -notin @('survey', 'probe', 'explain', 'mdl', 'scope', 'plan', 'assign', 'verify', 'audit')) {
+        Write-Host 'vault.ps1 roles <survey|probe|explain|mdl|scope|plan|assign|verify|audit>' -ForegroundColor Red
         exit 2
     }
 
@@ -897,6 +897,20 @@ roles survey and roles probe write nothing and need no scope.
             $rulesX = Get-VaultRoleAssignmentRule -Context $ctx -Directory $dirX
             $bad = Invoke-VaultRolesExplain -Context $ctx -Documents $documents -Rules $rulesX `
                        -Directory $dirX -Limit $(if ($Limit -gt 0) { $Limit } else { 25 })
+            Write-VaultLog "Log: $script:VaultLogFile"
+            if ($bad -gt 0) { exit 1 }
+            return
+        }
+
+        # Are the documents right, per the lifecycle rules and the type defaults? Not
+        # "did the run do what it recorded" - that is verify - but the question underneath
+        # it, asked of the vault as it stands.
+        if ($Action -eq 'audit') {
+            $dirA   = Get-VaultDirectory -Context $ctx
+            $rulesA = Get-VaultRoleAssignmentRule -Context $ctx -Directory $dirA
+            if (-not $rulesA.Count) { throw 'No lifecycle role assignment rules were returned, so there is nothing to audit against.' }
+            $bad = Invoke-VaultRolesAudit -Context $ctx -Documents $documents -Rules $rulesA `
+                       -Directory $dirA -WithTypeDefaults:$WithTypeDefaults -Limit $Limit
             Write-VaultLog "Log: $script:VaultLogFile"
             if ($bad -gt 0) { exit 1 }
             return
@@ -1134,6 +1148,7 @@ vault $v
   roles assign             Fill in the Sharing Settings the migration left empty
                            Needs -WithinHours. Every time
   roles verify             Prove what a run recorded is actually on the documents
+  roles audit              Do the documents have what the configuration says? Reads only
 
   verify trial             Is it migrated? A fixed handful at random, to prove the check
   verify sample            The same, sized for a confidence level (95% by default)
