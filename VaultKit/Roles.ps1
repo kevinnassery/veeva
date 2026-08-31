@@ -1728,7 +1728,12 @@ function Invoke-VaultRolesVerify {
         [Parameter(Mandatory)]$Context,
         [string]$ResultsFile = '',
         [switch]$Slow,
-        [int]$Limit = 0
+        [int]$Limit = 0,
+        # The documents that were SUPPOSED to be done. Without it this reports how many
+        # of its own claims held up, which is true and is not the question anyone is
+        # asking - "14,928 confirmed" against an unstated denominator is a number, not
+        # evidence.
+        [string]$ExpectIds = ''
     )
     $c = $Context
 
@@ -1921,7 +1926,60 @@ function Invoke-VaultRolesVerify {
     Write-VaultLog "Report: $report"
 
     Write-VaultLog "Report: $report"
-    return $stat.Missing
+
+    # Every expected document in exactly one bucket, and the buckets that should be
+    # empty named even when they are. Three different things were invisible in a bare
+    # confirmed count: a document already correct and so never claimed, one that failed,
+    # and one that was never processed at all. The first is fine and the other two are
+    # not, and they looked identical.
+    $unprocessed = 0
+    if ($ExpectIds) {
+        $expected = @(Import-VaultIdList -Path $ExpectIds)
+
+        # What the results file knows about each expected document, whether or not this
+        # verify had a claim to check.
+        $seen   = @{}
+        $failed = @{}
+        foreach ($row in $rows) {
+            $d = "$(Get-VaultField $row 'DocId' '')"
+            if (-not $d) { continue }
+            $seen[$d] = $true
+            if ("$(Get-VaultField $row 'Status' '')" -in @('ERROR', 'UNRESOLVED')) { $failed[$d] = $true }
+        }
+        $claimed = @{}
+        foreach ($cl in $claims) { $claimed["$($cl.DocId)"] = $true }
+
+        $bChecked = @($expected | Where-Object { $claimed.ContainsKey("$_") }).Count
+        $bFailed  = @($expected | Where-Object { $failed.ContainsKey("$_") -and -not $claimed.ContainsKey("$_") }).Count
+        $bQuiet   = @($expected | Where-Object { $seen.ContainsKey("$_") -and -not $claimed.ContainsKey("$_") -and -not $failed.ContainsKey("$_") }).Count
+        $missingIds = @($expected | Where-Object { -not $seen.ContainsKey("$_") })
+        $unprocessed = $missingIds.Count
+
+        Write-VaultLog '----------------------------------------------------------------'
+        Write-VaultLog ("expected                      {0,7}   from $ExpectIds" -f $expected.Count)
+        Write-VaultLog ("checked and CONFIRMED         {0,7}" -f ($bChecked - $stat.Missing - $stat.Unresolved)) 'OK'
+        if ($stat.Missing -or $stat.Unresolved) {
+            Write-VaultLog ("checked and NOT confirmed     {0,7}   the vault does not have them" -f ($stat.Missing + $stat.Unresolved)) 'ERROR'
+        }
+        Write-VaultLog ("in results, nothing claimed   {0,7}   already correct - nothing to verify" -f $bQuiet)
+        if ($bFailed) { Write-VaultLog ("in results, failed            {0,7}   ERROR or UNRESOLVED" -f $bFailed) 'ERROR' }
+        if ($unprocessed) {
+            Write-VaultLog ("no record at all              {0,7}   NEVER PROCESSED" -f $unprocessed) 'ERROR'
+            foreach ($line in (Format-VaultIdRows -Ids $missingIds)) { Write-VaultLog "  $line" 'ERROR' }
+        }
+        else {
+            Write-VaultLog ("no record at all              {0,7}" -f 0) 'OK'
+        }
+
+        if (-not $unprocessed -and -not $bFailed -and -not $stat.Missing -and -not $stat.Unresolved) {
+            Write-VaultLog 'Every expected document is accounted for, and everything claimed is on its document.' 'OK'
+        }
+    }
+    else {
+        Write-VaultLog 'No -ExpectIds given, so this says how many of its own claims held up and nothing about coverage.' 'WARN'
+    }
+
+    return ($stat.Missing + $unprocessed)
 }
 
 # --------------------------------------------------------------------------------------

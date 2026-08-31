@@ -314,6 +314,27 @@ it cannot grant **and still answers SUCCESS**, so a run can report an assignment
 not make — and re-running the assign will not fix it. The run that made the claim is the
 last thing that should be trusted to check it.
 
+Give it the documents that were supposed to be done and it accounts for every one:
+
+```
+.\vault.ps1 roles verify -ExpectIds cmp-ids.txt
+```
+
+```
+expected                        15757   from cmp-ids.txt
+checked and CONFIRMED           14928
+in results, nothing claimed       829   already correct - nothing to verify
+in results, failed                  0   ERROR or UNRESOLVED
+no record at all                    0
+```
+
+Without `-ExpectIds` it reports how many of its **own claims** held up, which is true and
+is not the question anyone is asking. Three different things hide behind a bare confirmed
+count: a document that was already correct and so claimed nothing, one that failed, and
+one that was never processed at all. The first is fine and the other two are not, and
+they look identical. With a denominator every expected document lands in exactly one
+bucket, three of them are zero, and that is a closed account rather than a number.
+
 ## Going faster
 
 `[limits] workers` starts at 1. Above 1, the command shards what is outstanding, runs

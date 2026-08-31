@@ -157,6 +157,35 @@ T 'real latin-1 is left alone' { Eq (Get-VaultAttachmentName -Header "attachment
 T 'no header gives nothing'    { Eq (Get-VaultAttachmentName -Header '') '' 'empty' }
 T 'no filename gives nothing'  { Eq (Get-VaultAttachmentName -Header 'attachment') '' 'none' }
 
+Write-Host "== Verify coverage: every expected document in one bucket =="
+# The partition, exercised on the shapes role-results.csv actually holds.
+function Buckets($expected, $rows, $claimedIds) {
+  $seen = @{}; $failed = @{}
+  foreach ($r in $rows) {
+    $d = "$($r.DocId)"; if(-not $d){ continue }
+    $seen[$d] = $true
+    if ("$($r.Status)" -in @('ERROR','UNRESOLVED')) { $failed[$d] = $true }
+  }
+  $claimed = @{}; foreach($c in $claimedIds){ $claimed["$c"] = $true }
+  return [pscustomobject]@{
+    Checked = @($expected | Where-Object { $claimed.ContainsKey("$_") }).Count
+    Failed  = @($expected | Where-Object { $failed.ContainsKey("$_") -and -not $claimed.ContainsKey("$_") }).Count
+    Quiet   = @($expected | Where-Object { $seen.ContainsKey("$_") -and -not $claimed.ContainsKey("$_") -and -not $failed.ContainsKey("$_") }).Count
+    Missing = @($expected | Where-Object { -not $seen.ContainsKey("$_") }).Count
+  }
+}
+$exp  = @('1','2','3','4')
+$rows = @(@{DocId='1';Status='ASSIGNED'}, @{DocId='2';Status='IN_STEP'}, @{DocId='3';Status='ERROR'})
+$b = Buckets $exp $rows @('1')
+T 'claimed lands in checked'   { Eq $b.Checked 1 'checked' }
+T 'IN_STEP is quiet not missing'{ Eq $b.Quiet 1 'quiet' }
+T 'ERROR is its own bucket'    { Eq $b.Failed 1 'failed' }
+T 'absent is NEVER PROCESSED'  { Eq $b.Missing 1 'missing' }
+T 'buckets sum to expected'    { Eq ($b.Checked + $b.Quiet + $b.Failed + $b.Missing) $exp.Count 'partition' }
+$b2 = Buckets @('1','2') @(@{DocId='1';Status='ASSIGNED'},@{DocId='2';Status='IN_STEP'}) @('1')
+T 'a clean run leaves 0 missing'{ Eq $b2.Missing 0 'none' }
+T 'and 0 failed'                { Eq $b2.Failed 0 'none' }
+
 Write-Host "== Resume: which documents count as finished =="
 # The rule, exercised directly on the shapes the results file actually holds.
 function DoneSet($rows) {

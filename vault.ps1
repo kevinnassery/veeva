@@ -140,7 +140,7 @@ param(
     [int]$Workers = 0
 )
 
-$ScriptVersion = '2026.08.30-31'
+$ScriptVersion = '2026.08.30-33'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -761,7 +761,7 @@ function Invoke-Roles {
         # should be trusted to check it.
         if ($Action -eq 'verify') {
             $ctxV = New-VaultContext -Section 'roles'
-            $bad = Invoke-VaultRolesVerify -Context $ctxV -Slow:$Slow -Limit $Limit
+            $bad = Invoke-VaultRolesVerify -Context $ctxV -Slow:$Slow -Limit $Limit -ExpectIds $ExpectIds
             Write-VaultLog "Log: $script:VaultLogFile"
             if ($bad -gt 0) { exit 1 }
             return
@@ -1168,7 +1168,8 @@ Options
   -WithinHours <n>         roles scope/plan/assign: how far back. REQUIRED
   -DateField <name>        roles: default document_creation_date__v (a DateTime)
   -CreatorField <name>     roles: default created_by__v
-  -ExpectIds <txt>         roles: check the query returns exactly these ids, one per line
+  -ExpectIds <txt>         roles scope: check the query returns exactly these ids
+                           roles verify: account for every one of them, one per line
   -Resume                  roles assign: skip what an earlier run finished
   -Slow                    roles verify: read roles per document, not in bulk
   -TrialSize <n>           verify trial: how many (default 25)
