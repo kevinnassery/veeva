@@ -85,6 +85,9 @@ param(
     # Optional: a file of document ids, one per line, that the scope query is expected to
     # return. Reported both ways, because a count agreeing is not the sets agreeing.
     [string]$ExpectIds = '',
+    # roles assign: skip documents an earlier run already finished, rather than reading
+    # every one of them again. roles verify is what confirms the skipped ones.
+    [switch]$Resume,
 
     # ---- verify ----
     # trial: a fixed handful, at random. sample: sized for a confidence level.
@@ -137,7 +140,7 @@ param(
     [int]$Workers = 0
 )
 
-$ScriptVersion = '2026.08.30-28'
+$ScriptVersion = '2026.08.30-30'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -943,7 +946,8 @@ roles survey and roles probe write nothing and need no scope.
         $planning = $Plan -or ($Action -eq 'plan')
         $bad = Invoke-VaultRolesAssign -Context $ctx -Documents $documents -From $from -Table $table -Rules $rules `
                    -Assign $Assign -WithTypeDefaults:$WithTypeDefaults -Plan:$planning `
-                   -Role $Role -ExcludeRole $ExcludeRole -BatchSize $BatchSize -Test $Test -Limit $Limit
+                   -Role $Role -ExcludeRole $ExcludeRole -BatchSize $BatchSize -Test $Test -Limit $Limit `
+                   -Resume:$Resume
         Write-VaultLog "Log: $script:VaultLogFile"
         if ($bad -gt 0) { exit 1 }
     }
@@ -1165,6 +1169,7 @@ Options
   -DateField <name>        roles: default document_creation_date__v (a DateTime)
   -CreatorField <name>     roles: default created_by__v
   -ExpectIds <txt>         roles: check the query returns exactly these ids, one per line
+  -Resume                  roles assign: skip what an earlier run finished
   -Slow                    roles verify: read roles per document, not in bulk
   -TrialSize <n>           verify trial: how many (default 25)
   -Confidence 90|95|99     verify sample: confidence level (default 95)

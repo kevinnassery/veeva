@@ -157,6 +157,27 @@ T 'real latin-1 is left alone' { Eq (Get-VaultAttachmentName -Header "attachment
 T 'no header gives nothing'    { Eq (Get-VaultAttachmentName -Header '') '' 'empty' }
 T 'no filename gives nothing'  { Eq (Get-VaultAttachmentName -Header 'attachment') '' 'none' }
 
+Write-Host "== Resume: which documents count as finished =="
+# The rule, exercised directly on the shapes the results file actually holds.
+function DoneSet($rows) {
+  $finished = @{}
+  foreach ($row in $rows) {
+    $d = "$($row.DocId)"; if(-not $d){ continue }
+    if (-not $finished.ContainsKey($d)) { $finished[$d] = $true }
+    if ("$($row.Status)" -notin @('ASSIGNED','IN_STEP')) { $finished[$d] = $false }
+  }
+  return @(@($finished.Keys | Where-Object { $finished[$_] }))
+}
+T 'all ASSIGNED is finished'   { Eq (DoneSet @(@{DocId='1';Status='ASSIGNED'},@{DocId='1';Status='ASSIGNED'})) '1' 'done' }
+T 'IN_STEP counts as finished' { Eq (DoneSet @(@{DocId='1';Status='IN_STEP'})) '1' 'done' }
+T 'mixed done statuses ok'     { Eq (DoneSet @(@{DocId='1';Status='ASSIGNED'},@{DocId='1';Status='IN_STEP'})) '1' 'done' }
+T 'WOULD_ASSIGN is NOT done'   { Eq (@(DoneSet @(@{DocId='1';Status='WOULD_ASSIGN'})).Count) 0 'plan rows must not skip work' }
+T 'one plan row taints a doc'  { Eq (@(DoneSet @(@{DocId='1';Status='ASSIGNED'},@{DocId='1';Status='WOULD_ASSIGN'})).Count) 0 'partial' }
+T 'ERROR is NOT done'          { Eq (@(DoneSet @(@{DocId='1';Status='ERROR'})).Count) 0 'retry the failures' }
+T 'UNRESOLVED is NOT done'     { Eq (@(DoneSet @(@{DocId='1';Status='UNRESOLVED'})).Count) 0 'retry' }
+T 'one bad row taints a doc'   { Eq (@(DoneSet @(@{DocId='1';Status='ASSIGNED'},@{DocId='1';Status='ERROR'})).Count) 0 'partial' }
+T 'other documents unaffected' { Eq ((DoneSet @(@{DocId='1';Status='ERROR'},@{DocId='2';Status='ASSIGNED'})) -join ',') '2' 'independent' }
+
 Write-Host "== Permission sync scope =="
 $m = @{ '55056' = '207311'; '55057' = '207312'; '55058' = '207313' }
 $fromQuery = @(

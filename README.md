@@ -261,6 +261,26 @@ documents created through the API or Vault Loader.
 `survey` and `probe` change nothing and take no scope flags, so you can look around
 first.
 
+**Resuming.** By default `assign` reads every document in scope, whether or not an
+earlier run finished it — reading current state is the honest thing to do, since an
+assignment recorded yesterday says nothing about today. Documents already correct come
+back `IN_STEP` and are not rewritten, but they are still read, so an interrupted run
+costs the whole read again.
+
+`-Resume` skips the ones an earlier run finished:
+
+```
+.\vault.ps1 roles assign -WithinHours 12 -DesiredFrom Lifecycle -WithTypeDefaults -Resume
+```
+
+A document counts as finished only when **every** row it has says so. `WOULD_ASSIGN` does
+not: a plan run writes those to the same file and they mean the opposite — those are
+exactly the documents still needing work. `ERROR` and `UNRESOLVED` do not either, since
+those are the ones most worth retrying.
+
+What makes skipping safe is `roles verify`, which reads the vault afterwards and says
+whether the claims were true. Use `-Resume` to finish a run; use `verify` to believe it.
+
 **Check the filter before spending anything on it.** `roles scope` runs the pre-query and
 stops: one VQL call, no document reads, nothing written. It prints the target ids it
 selected and records every one of them in `roles-scope-<when>.csv`, because a count is

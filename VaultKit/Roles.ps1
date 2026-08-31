@@ -1191,7 +1191,12 @@ function Invoke-VaultRolesAssign {
         [string[]]$ExcludeRole = @(),
         [int]$BatchSize = 200,
         [int]$Test = 0,
-        [int]$Limit = 0
+        [int]$Limit = 0,
+        # Skip documents an earlier run already finished, instead of reading all of them
+        # again. Off by default: reading current state is the safer thing to do, and the
+        # only reason it is safe to stop doing it is that roles verify reads the vault
+        # afterwards and says whether the claim was true.
+        [switch]$Resume
     )
 
     $c   = $Context
@@ -1210,10 +1215,46 @@ function Invoke-VaultRolesAssign {
     }
     Write-VaultLog "$($docs.Count) document(s) to examine"
 
-    # Nothing is skipped on the strength of an earlier run: the point of the read is the
-    # CURRENT state, and an assignment recorded yesterday says nothing about today.
+    # Prior rows are loaded either way - from the CSV and from the journal of a run that
+    # was killed - because they are carried through into the results file. Whether they
+    # SKIP anything is what -Resume decides.
     $res = New-VaultResults -Path (Join-Path $c.Out 'role-results.csv') `
                -KeyColumn 'Key' -DoneStatuses @() -Existing $c.Existing
+
+    if ($Resume) {
+        # A document counts as finished only if every row it has says the work is done.
+        #
+        # WOULD_ASSIGN is the trap. A plan run writes those rows to this same file, and
+        # they mean the opposite of done - they are precisely the documents that need
+        # assigning. Treating a row's mere existence as completion would skip every
+        # document anybody had ever planned.
+        #
+        # ERROR and UNRESOLVED are not done either. Those are the ones most worth
+        # retrying, so a resume that skipped them would quietly abandon exactly the
+        # documents that failed.
+        $finished = @{}
+        foreach ($k in $res.Prior.Keys) {
+            $row = $res.Prior[$k]
+            $docId = "$(Get-VaultField $row 'DocId' '')"
+            if (-not $docId) { continue }
+            $st = "$(Get-VaultField $row 'Status' '')"
+            if (-not $finished.ContainsKey($docId)) { $finished[$docId] = $true }
+            if ($st -notin @('ASSIGNED', 'IN_STEP')) { $finished[$docId] = $false }
+        }
+        $doneIds = @{}
+        foreach ($d in $finished.Keys) { if ($finished[$d]) { $doneIds[$d] = $true } }
+
+        $before = $docs.Count
+        $docs = @($docs | Where-Object { -not $doneIds.ContainsKey("$($_.TargetId)") })
+        $skipped = $before - $docs.Count
+        if ($skipped) {
+            Write-VaultLog "-Resume: $skipped document(s) finished by an earlier run - not read again" 'OK'
+            Write-VaultLog "$($docs.Count) left to do. roles verify is what confirms the skipped ones." 'WARN'
+        }
+        else {
+            Write-VaultLog '-Resume: nothing in the results file is finished, so everything is still to do.'
+        }
+    }
 
     $stat = @{ Docs = 0; InStep = 0; NeedWork = 0; Changed = 0; Users = 0; Groups = 0
                Errors = 0; NoRoles = 0; RedundantUsers = 0 }
