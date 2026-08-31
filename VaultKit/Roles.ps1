@@ -1733,7 +1733,11 @@ function Invoke-VaultRolesVerify {
         # of its own claims held up, which is true and is not the question anyone is
         # asking - "14,928 confirmed" against an unstated denominator is a number, not
         # evidence.
-        [string]$ExpectIds = ''
+        [string]$ExpectIds = '',
+        # Check every document the run touched, not only the ones it changed. An IN_STEP
+        # row records that the groups were ALREADY there - which is a statement about the
+        # document just as much as an assignment is, and one nothing was checking.
+        [switch]$All
     )
     $c = $Context
 
@@ -1750,8 +1754,20 @@ function Invoke-VaultRolesVerify {
     foreach ($row in $rows) {
         $st = "$(Get-VaultField $row 'Status' '')"
         if ($st) { $statuses[$st] = 1 + $(if ($statuses.ContainsKey($st)) { $statuses[$st] } else { 0 }) }
-        if ($st -ne 'ASSIGNED') { continue }
-        $groups = "$(Get-VaultField $row 'MissingGroups' '')"
+        if ($All) {
+            if ($st -notin @('ASSIGNED', 'IN_STEP')) { continue }
+            # The full expected end state, from what the run itself recorded: the groups
+            # it found already on the document plus the ones it added. No desired state is
+            # re-derived here - that would be the same logic agreeing with itself, which
+            # is the thing this tool exists not to do.
+            $groups = ((@("$(Get-VaultField $row 'AssignedGroups' '')",
+                          "$(Get-VaultField $row 'MissingGroups' '')") |
+                        Where-Object { $_ }) -join ';')
+        }
+        else {
+            if ($st -ne 'ASSIGNED') { continue }
+            $groups = "$(Get-VaultField $row 'MissingGroups' '')"
+        }
         if (-not $groups) { continue }
         [void]$claims.Add([pscustomobject]@{
             DocId     = "$(Get-VaultField $row 'DocId' '')"
@@ -1782,6 +1798,9 @@ function Invoke-VaultRolesVerify {
         $claims = @($claims | Where-Object { $keep.ContainsKey($_.DocId) })
     }
 
+    if ($All) {
+        Write-VaultLog '-All: checking the groups each row recorded as present OR assigned, not only the assignments.' 'WARN'
+    }
     Write-VaultLog "$($claims.Count) claim(s) over $($docIds.Count) document(s)"
 
     $groups  = Get-VaultGroupIndex -VaultHost $c.VaultHost -ApiVersion $c.Api

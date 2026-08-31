@@ -101,6 +101,8 @@ param(
     [switch]$WithRoleRules,
     # roles verify: read each document's roles individually instead of in bulk.
     [switch]$Slow,
+    # roles verify: check every document the run touched, not only the ones it changed.
+    [switch]$All,
     # verify map: the target document field that holds the source document's id.
     [string]$Anchor = '',
     # verify fields: show only fields whose name matches this.
@@ -140,7 +142,7 @@ param(
     [int]$Workers = 0
 )
 
-$ScriptVersion = '2026.08.30-33'
+$ScriptVersion = '2026.08.30-34'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -761,7 +763,7 @@ function Invoke-Roles {
         # should be trusted to check it.
         if ($Action -eq 'verify') {
             $ctxV = New-VaultContext -Section 'roles'
-            $bad = Invoke-VaultRolesVerify -Context $ctxV -Slow:$Slow -Limit $Limit -ExpectIds $ExpectIds
+            $bad = Invoke-VaultRolesVerify -Context $ctxV -Slow:$Slow -Limit $Limit -ExpectIds $ExpectIds -All:$All
             Write-VaultLog "Log: $script:VaultLogFile"
             if ($bad -gt 0) { exit 1 }
             return
@@ -1172,6 +1174,7 @@ Options
                            roles verify: account for every one of them, one per line
   -Resume                  roles assign: skip what an earlier run finished
   -Slow                    roles verify: read roles per document, not in bulk
+  -All                     roles verify: check documents that were already correct too
   -TrialSize <n>           verify trial: how many (default 25)
   -Confidence 90|95|99     verify sample: confidence level (default 95)
   -Margin <pct>            verify sample: margin of error (default 5)
