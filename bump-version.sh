@@ -10,18 +10,28 @@ if [ $# -ge 1 ]; then
   V="$1"
 else
   today=$(date '+%Y.%m.%d')
-  cur=$(find . -name '*.ps1' -not -path './docs/*' -exec grep -ho "ScriptVersion = '$today-[0-9]*'" {} + 2>/dev/null | tr -d "'" | sed 's/.*-//' | sort -n | tail -1 || true)
+  cur=$(find . \( -path ./.claude -o -path ./docs \) -prune -o -name '*.ps1' -print0 \
+          | xargs -0 grep -ho "ScriptVersion = '$today-[0-9]*'" 2>/dev/null \
+          | tr -d "'" | sed 's/.*-//' | sort -n | tail -1 || true)
+  # || true, and a default below: on the first bump of a day nothing carries today's
+  # date, grep exits 1, and `set -o pipefail` turns that into the whole script exiting
+  # without a word. It looks exactly like a bump that worked.
+  [ -z "${cur:-}" ] && cur=0
   V="$today-$(( ${cur:-0} + 1 ))"
 fi
 
-for f in $(find . -name '*.ps1' -not -path './docs/*'); do
+# -prune ./.claude, not just ./docs. A git worktree lives under .claude/worktrees, and
+# `find .` walked straight into it - so every bump also stamped the files of whatever
+# branch was checked out there. Thirty-seven bumps in one day left another branch's
+# working tree modified, which is not this script's business to touch.
+for f in $(find . \( -path ./.claude -o -path ./docs \) -prune -o -name '*.ps1' -print); do
   if grep -q "^\$ScriptVersion" "$f"; then
     sed -i '' "s|^\$ScriptVersion = '.*'|\$ScriptVersion = '$V'|" "$f"
   else
     echo "  no version line in $f" >&2
   fi
 done
-for f in $(find . -name '*.bat' -not -path './docs/*'); do
+for f in $(find . \( -path ./.claude -o -path ./docs \) -prune -o -name '*.bat' -print); do
   if grep -q '^REM VERSION' "$f"; then
     sed -i '' "s|^REM VERSION .*|REM VERSION $V|" "$f"
   else
