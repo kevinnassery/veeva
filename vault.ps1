@@ -147,7 +147,7 @@ param(
     [int]$Workers = 0
 )
 
-$ScriptVersion = '2026.09.02-2'
+$ScriptVersion = '2026.09.02-3'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -710,7 +710,7 @@ function Invoke-Submissions {
             Write-VaultLog "vault $ScriptVersion - submissions list"
             [void](Confirm-VaultsForRun)
             $ctx = New-VaultContext -Section 'submissions'
-            if (-not $ctx.StagingPath) { throw "[submissions] path is not set in $($script:CfgPath)" }
+            $ctx.StagingPath = Confirm-VaultStagingPath -ConfigPath $script:CfgPath -Path $ctx.StagingPath -Yes:$Yes
             [void](Invoke-VaultSubmissionsList -Context $ctx -Limit $Limit)
             Write-VaultLog "Log: $script:VaultLogFile"
         }
@@ -721,7 +721,7 @@ function Invoke-Submissions {
                 Write-VaultLog "vault $ScriptVersion - submissions import$(if ($Plan) { ' (plan)' })"
                 [void](Confirm-VaultsForRun)
                 $ctx = New-VaultContext -Section 'submissions'
-                if (-not $ctx.StagingPath) { throw "[submissions] path is not set in $($script:CfgPath)" }
+                $ctx.StagingPath = Confirm-VaultStagingPath -ConfigPath $script:CfgPath -Path $ctx.StagingPath -Yes:$Yes
                 $bad = Invoke-VaultSubmissionsImport -Context $ctx -Plan:$Plan -TestCount $Test -Limit $Limit
                 Write-VaultLog "Log: $script:VaultLogFile"
                 if ($bad -gt 0) { exit 1 }

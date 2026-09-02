@@ -80,6 +80,63 @@ function Get-VaultRequired {
     return $v
 }
 
+function Set-VaultSetting {
+    # Write ONE key back into the ini, leaving everything else exactly as it was.
+    #
+    # Line surgery rather than re-serialising the parsed config: vault.ini is mostly
+    # comments explaining why each setting is what it is, and a writer that round-tripped
+    # through the hashtable would hand back a correct file with all of that deleted.
+    # `update` deliberately never overwrites this file; neither does this.
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Section,
+        [Parameter(Mandatory)][string]$Key,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Value
+    )
+    $lines = @(Get-Content -LiteralPath $Path)
+    $sec   = $Section.ToLowerInvariant()
+    $key   = $Key.ToLowerInvariant()
+
+    # Where the section starts, and where it ends - the next header, or the end.
+    $start = -1; $end = $lines.Count
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        $t = "$($lines[$i])".Trim().TrimStart([char]0xFEFF)
+        if ($t.StartsWith('[') -and $t.EndsWith(']')) {
+            $name = $t.Trim('[', ']').Trim().ToLowerInvariant()
+            if ($start -lt 0) { if ($name -eq $sec) { $start = $i } }
+            else              { $end = $i; break }
+        }
+    }
+
+    $out = New-Object System.Collections.ArrayList
+    if ($start -lt 0) {
+        # No such section: append it rather than guessing where it belongs.
+        foreach ($l in $lines) { [void]$out.Add($l) }
+        [void]$out.Add('')
+        [void]$out.Add("[$Section]")
+        [void]$out.Add("$Key = $Value")
+    }
+    else {
+        $hit = -1
+        for ($i = $start + 1; $i -lt $end; $i++) {
+            $t = "$($lines[$i])".Trim()
+            if (-not $t -or $t.StartsWith('#') -or $t.StartsWith(';')) { continue }
+            $eq = $t.IndexOf('=')
+            if ($eq -lt 1) { continue }
+            if ($t.Substring(0, $eq).Trim().ToLowerInvariant() -eq $key) { $hit = $i; break }
+        }
+        for ($i = 0; $i -lt $lines.Count; $i++) {
+            if ($hit -ge 0 -and $i -eq $hit) { [void]$out.Add("$Key = $Value"); continue }
+            [void]$out.Add($lines[$i])
+            # Key absent from an existing section: put it directly under the header,
+            # where the comments above it still apply to it.
+            if ($hit -lt 0 -and $i -eq $start) { [void]$out.Add("$Key = $Value") }
+        }
+    }
+
+    [IO.File]::WriteAllLines($Path, $out, (New-Object Text.UTF8Encoding $false))
+}
+
 function Get-VaultHostName {
     # Accepts a full URL or a bare host and returns the host. Operators paste what is in
     # the address bar, which includes the scheme and a path.
