@@ -152,7 +152,7 @@ param(
     [int]$Workers = 0
 )
 
-$ScriptVersion = '2026.09.02-7'
+$ScriptVersion = '2026.09.02-8'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -1073,17 +1073,23 @@ function Invoke-Query {
     param([string]$Action)
     $vql = "$Action".Trim()
     if (-not $vql) {
-        Write-Host 'vault.ps1 query "<VQL>" [-VaultHost host] [-OutFile results.csv]' -ForegroundColor Red
+        Write-Host 'vault.ps1 query "<VQL>" -VaultHost <host> [-OutFile results.csv]' -ForegroundColor Red
+        Write-Host '  -VaultHost is required - a query aimed at the wrong vault still answers' -ForegroundColor Red
         Write-Host '  e.g. vault.ps1 query "SELECT id, name__v FROM submission__v"' -ForegroundColor Red
         exit 2
     }
     Initialize-VaultRun -LogName 'query'
     Write-VaultLog "vault $ScriptVersion - query"
 
-    $h = $VaultHost
-    if (-not $h) { $h = $script:TargetHost }
-    $h = Get-VaultHostName $h
-    if (-not $h) { throw 'No vault. Set [vault] target, or pass -VaultHost.' }
+    # No silent default. Every other command composes its own query against a vault it
+    # was designed for; this one runs whatever it is handed, wherever it is pointed, and
+    # is the command most likely to be typed ad hoc with a flag forgotten. Falling back
+    # to [vault] target would mean a forgotten -VaultHost reads a live migration vault
+    # and returns rows that look like they describe the one you meant.
+    $h = Get-VaultHostName $VaultHost
+    if (-not $h) {
+        throw 'query needs -VaultHost. It is not defaulted, because a query aimed at the wrong vault still answers.'
+    }
     [void](Confirm-VaultSessions -Vaults @(@{ Role = 'query'; Name = $h }) -ApiVersion $script:Api -Yes:$Yes)
 
     Write-VaultLog $vql
