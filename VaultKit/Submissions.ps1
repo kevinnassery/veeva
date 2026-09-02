@@ -24,21 +24,30 @@ function Get-VaultSubmissionDossier {
         [Parameter(Mandatory)][string]$Path,
         [string[]]$ArchiveSuffix = @('.zip', '.tar.gz', '.tgz')
     )
-    $out  = New-Object System.Collections.ArrayList
+    $out     = New-Object System.Collections.ArrayList
+    $skipped = New-Object System.Collections.ArrayList
     $next = "/services/file_staging/items/$(ConvertTo-VaultStagingPath $Path)?recursive=false&limit=500"
     while ($next) {
         $r = Invoke-VaultApi -VaultHost $Context.VaultHost -ApiVersion $Context.Api -Method GET -Path $next
         foreach ($d in @(Get-VaultField $r 'data' @())) {
             $name = "$(Get-VaultField $d 'name' '')"
             if (-not $name) { continue }
+            # VFMTemp is Vault's OWN scratch folder and it sits right beside the
+            # dossiers. It is a folder, so every rule below would take it for a
+            # submission, fail to resolve a submission__v called VFMTemp, and write an
+            # ERROR row on every run in every vault that has one. Dotted names go the
+            # same way for the same reason.
+            if ($name -ieq 'VFMTemp' -or $name.StartsWith('.')) { continue }
             $kind = "$(Get-VaultField $d 'kind' 'file')"
             if ($kind -ne 'folder') {
                 $isArchive = $false
                 foreach ($s in $ArchiveSuffix) { if ($name.ToLowerInvariant().EndsWith($s)) { $isArchive = $true; break } }
-                # export_results.csv and any other loose file beside the dossiers is not
-                # a submission. Skipping quietly would hide a layout that is not what the
-                # caller thinks it is, so the caller counts these and says so.
-                if (-not $isArchive) { continue }
+                # export_results.csv and any other loose file beside the dossiers is
+                # not a submission. Named rather than skipped in silence: a folder full
+                # of loose files is a path pointed one level too deep, and
+                # export_results.csv specifically is the mapping sheet Bulk Submission
+                # Export leaves behind - worth knowing is there.
+                if (-not $isArchive) { [void]$skipped.Add($name); continue }
             }
             # The base name is the submission number: the folder name as-is, or the
             # archive name with its suffix removed. It is what the VQL lookup keys on.
@@ -53,6 +62,17 @@ function Get-VaultSubmissionDossier {
             })
         }
         $next = "$(Get-VaultField (Get-VaultField $r 'responseDetails' $null) 'next_page' '')"
+    }
+
+    if ($skipped.Count) {
+        Write-VaultLog "$($skipped.Count) loose file(s) beside the dossiers, not treated as submissions: $((@($skipped | Select-Object -First 5)) -join ', ')$(if ($skipped.Count -gt 5) { ', ...' })"
+        if (@($skipped | Where-Object { $_ -ieq 'export_results.csv' }).Count) {
+            # The legacy importer read this off staging and preferred it to the VQL
+            # lookup. This port resolves by folder name and application only, so a
+            # mapping sheet sitting here is NOT being consulted - say so rather than
+            # let it look like it was.
+            Write-VaultLog 'export_results.csv is present. This command does NOT read it - submissions resolve by folder name + application via VQL.' 'WARN'
+        }
     }
     return @($out)
 }
