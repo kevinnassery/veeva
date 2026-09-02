@@ -224,45 +224,103 @@ function Get-VaultApplicationId {
     catch { $script:VaultAppErr = "$_"; throw }
 }
 
-function Resolve-VaultSubmissionId {
-    # A submission__v record from its folder name, scoped to its application.
+function Get-VaultSubmissionSerial {
+    # The serial number out of a submission name, from either side of the join.
     #
-    # This is what makes the workflow need no manifest and nothing typed in: the staging
-    # layout supplies both keys, the folder name and the application above it.
+    #   20130724 Serial No. 0156 Safety Report   -> 0156
+    #   20040331 SBM SN 0000 Original IND Sub    -> 0000
+    #   20140219 PAM SN 0161 Updated Investigato -> 0161
     #
-    # The submission name is "0000 - Submission Meeting Minutes", so the folder name is a
-    # PREFIX of name__v rather than the whole value - hence prefix matching by default.
-    # Zero-padded numbers are prefix-unique (0000 never prefixes 0001), and neither % nor
-    # _ can appear in a staging folder name, so the LIKE is safe. Set submissionmatch to
-    # exact where the field holds just the number.
+    # This is the only part of the string both sides agree on. The leading date does not
+    # survive the round trip - staged folders were seen a day, three days and ten days
+    # off the record they belong to - and the descriptive tail carries typos and
+    # substituted punctuation. The serial is what a submission actually IS.
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Name)
+    # Leading \b only. Without it an 'sn' inside a word followed by a number reads as a
+    # serial, and a WRONG serial matches a real record - worse than no match, because no
+    # match stops the dossier and a wrong one imports it onto somebody else's submission.
+    #
+    # A trailing \b cannot be used: 'Serial No.' ends in a period and is followed by a
+    # space, and two non-word characters have no boundary between them - so it silently
+    # matched nothing at all, which the unit check above caught.
+    if ($Name -match '(?i)\b(?:serial\s*no\.?|sn)\s*[:#-]?\s*(\d{3,5})') { return $Matches[1] }
+    return ''
+}
+
+function Get-VaultSubmissionIndex {
+    # Every submission in the application, once, indexed for local matching.
+    #
+    # One query instead of one per dossier: 161 round trips became 1. That is not only
+    # faster, it is what makes serial matching possible at all - VQL forbids a leading
+    # wildcard, so "find the record whose name contains 0156" cannot be asked of the
+    # vault and has to be answered here.
     param(
         [Parameter(Mandatory)]$Context,
-        [Parameter(Mandatory)][string]$Key,
-        [string]$ApplicationId = '',
-        [string]$LookupField = 'name__v',
-        [ValidateSet('prefix', 'exact')][string]$Match = 'prefix',
+        [Parameter(Mandatory)][string]$ApplicationId,
         [string]$ApplicationRefField = 'application__v'
     )
-    $sub    = $Key.Replace("'", "\'")
-    $clause = if ($Match -eq 'exact') { "$LookupField = '$sub'" } else { "$LookupField LIKE '$sub%'" }
-    $where  = $clause
-    # Direct equality on the reference field's stored id rather than traversing the
-    # relationship, which is what "Unknown relationship [application__v]" was about.
-    if ($ApplicationId) { $where += " AND $ApplicationRefField = '$ApplicationId'" }
+    $vql  = "SELECT id, name__v FROM submission__v WHERE $ApplicationRefField = '$ApplicationId'"
+    $rows = @(Invoke-VaultQuery -VaultHost $Context.VaultHost -ApiVersion $Context.Api -Vql $vql)
 
-    $vql = "SELECT id, name__v FROM submission__v WHERE $where"
-    $r   = Invoke-VaultApi -VaultHost $Context.VaultHost -ApiVersion $Context.Api -Method POST `
-              -Path '/query' -ContentType 'application/x-www-form-urlencoded' `
-              -Body "q=$([Uri]::EscapeDataString($vql))"
-    $rows = @(Get-VaultField $r 'data' @())
-    if ($rows.Count -eq 0) { throw "No submission__v where $where" }
-    if ($rows.Count -gt 1) {
-        # Named rather than counted: "3 records match" is not something anyone can act
-        # on, and the names usually say immediately which field is too loose.
-        $names = (@($rows | ForEach-Object { Get-VaultField $_ 'name__v' '' }) -join '; ')
-        throw "$($rows.Count) submission__v records match $where ($names). Narrow [submissions] lookupfield, or set submissionmatch = exact."
+    $byName   = @{}
+    $bySerial = @{}
+    foreach ($r in $rows) {
+        $id   = "$(Get-VaultField $r 'id' '')"
+        $name = "$(Get-VaultField $r 'name__v' '')"
+        if (-not $id -or -not $name) { continue }
+        $k = $name.Trim().ToLowerInvariant()
+        if (-not $byName.ContainsKey($k)) { $byName[$k] = New-Object System.Collections.ArrayList }
+        [void]$byName[$k].Add([pscustomobject]@{ Id = $id; Name = $name })
+
+        $ser = Get-VaultSubmissionSerial -Name $name
+        if ($ser) {
+            if (-not $bySerial.ContainsKey($ser)) { $bySerial[$ser] = New-Object System.Collections.ArrayList }
+            [void]$bySerial[$ser].Add([pscustomobject]@{ Id = $id; Name = $name })
+        }
     }
-    return "$(Get-VaultField $rows[0] 'id' '')"
+    Write-VaultLog "$($rows.Count) submission(s) in the application, $($bySerial.Count) with a serial number" 'OK'
+    return [pscustomobject]@{ Rows = $rows.Count; ByName = $byName; BySerial = $bySerial }
+}
+
+function Resolve-VaultSubmissionIdLocal {
+    # Match one staged folder to one submission record, against the index.
+    #
+    # Three passes, most specific first, and every one of them reports HOW it matched -
+    # because "resolved" by exact name and "resolved" by serial after the name failed are
+    # different levels of confidence and the results file should not flatten them.
+    param(
+        [Parameter(Mandatory)]$Index,
+        [Parameter(Mandatory)][string]$Key
+    )
+    $k = $Key.Trim().ToLowerInvariant()
+
+    if ($Index.ByName.ContainsKey($k)) {
+        $hits = @($Index.ByName[$k])
+        if ($hits.Count -eq 1) { return [pscustomobject]@{ Id = $hits[0].Id; How = 'exact name'; Name = $hits[0].Name } }
+        throw "$($hits.Count) submissions are named '$Key' - the name does not identify one."
+    }
+
+    # Prefix, the way the vault-side LIKE used to do it, kept because a folder named
+    # plainly 0000 against a record named "0000 - Meeting Minutes" is the layout this
+    # workflow was originally written for and still has to work.
+    $pre = @()
+    foreach ($nk in $Index.ByName.Keys) { if ($nk.StartsWith($k)) { $pre += @($Index.ByName[$nk]) } }
+    if ($pre.Count -eq 1) { return [pscustomobject]@{ Id = $pre[0].Id; How = 'name prefix'; Name = $pre[0].Name } }
+    if ($pre.Count -gt 1) { throw "$($pre.Count) submissions start with '$Key' - the prefix does not identify one." }
+
+    $ser = Get-VaultSubmissionSerial -Name $Key
+    if (-not $ser) {
+        throw "No submission matches '$Key' by name or prefix, and no serial number could be read out of the folder name to match on instead."
+    }
+    if (-not $Index.BySerial.ContainsKey($ser)) {
+        throw "No submission matches '$Key' by name or prefix, and none carries serial $ser."
+    }
+    $hits = @($Index.BySerial[$ser])
+    if ($hits.Count -gt 1) {
+        $names = (@($hits | ForEach-Object { $_.Name }) -join '; ')
+        throw "$($hits.Count) submissions carry serial ${ser} ($names) - the serial does not identify one."
+    }
+    return [pscustomobject]@{ Id = $hits[0].Id; How = "serial $ser"; Name = $hits[0].Name }
 }
 
 function Start-VaultSubmissionImport {
@@ -565,6 +623,20 @@ function Invoke-VaultSubmissionsImport {
     $res = New-VaultResults -Path (Join-Path $c.Out 'submission-import-results.csv') -KeyColumn 'FileName' `
               -DoneStatuses @('SUCCESS') -Existing $c.Existing
 
+    # Resolved ONCE, before the loop: the application, then every submission in it.
+    # Per dossier this was a VQL call each - 161 round trips - and it could not match on
+    # a serial number at all, because VQL forbids a leading wildcard. Both problems go
+    # away by fetching the set and matching here.
+    try {
+        $appId = Get-VaultApplicationId -Context $c -Key $appKey -Object $c.ApplicationObject -KeyField $c.ApplicationKeyField
+        $index = Get-VaultSubmissionIndex -Context $c -ApplicationId $appId -ApplicationRefField $c.ApplicationRefField
+    }
+    catch {
+        # One clear stop, not 161 copies of the same error against every dossier.
+        Write-VaultLog "Cannot resolve the application: $_" 'ERROR'
+        return 1
+    }
+
     $stat = @{ Ok = 0; Failed = 0; Planned = 0; Skipped = 0 }
     $i = 0
     $stopped = $false
@@ -580,6 +652,7 @@ function Invoke-VaultSubmissionsImport {
             SizeMB        = [math]::Round(([double]$d.Size) / 1MB, 2)
             SubmissionKey = $d.Base
             SubmissionId  = ''
+            MatchedBy     = ''
             JobId         = ''
             Status        = ''
             BinderId      = ''
@@ -594,18 +667,23 @@ function Invoke-VaultSubmissionsImport {
             # Read-only, so it runs in every mode. Resolving the id is the whole point of
             # the dry run: a key that matches nothing, or matches two records, is found
             # here rather than part way through a real wave.
-            Write-VaultLog "$prefix - resolving submission '$($d.Base)' in application '$appKey'"
-            $appId = Get-VaultApplicationId -Context $c -Key $appKey -Object $c.ApplicationObject -KeyField $c.ApplicationKeyField
-            $subId = Resolve-VaultSubmissionId -Context $c -Key $d.Base -ApplicationId $appId `
-                        -LookupField $c.LookupField -Match $c.SubmissionMatch -ApplicationRefField $c.ApplicationRefField
+            $m     = Resolve-VaultSubmissionIdLocal -Index $index -Key $d.Base
+            $subId = $m.Id
             $row.SubmissionId = $subId
+            $row.MatchedBy    = $m.How
+            # The matched NAME is logged, not just the id. Where the two strings differ -
+            # and they do, by whole days in the leading date - the operator needs to see
+            # what it matched to, not be told that something matched.
+            if ($m.How -ne 'exact name') {
+                Write-VaultLog "$prefix - matched by $($m.How) to '$($m.Name)'" 'WARN'
+            }
 
             if ($Plan -or $c.WhatIf) {
                 # StrictMode: assigning a property this row does not have is a
                 # terminating error, and the column here is Messages, not Message.
                 $row.Status = if ($c.WhatIf) { 'WHATIF' } else { 'PLANNED' }
                 $stat.Planned++
-                Write-VaultLog "$prefix - resolved to submission $subId; would import $($d.Path)" 'OK'
+                Write-VaultLog "$prefix - resolved to submission $subId ($($m.How)); would import $($d.Path)" 'OK'
             }
             else {
                 $job = Start-VaultSubmissionImport -Context $c -SubmissionId $subId -StagingPath $d.Path `
