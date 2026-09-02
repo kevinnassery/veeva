@@ -147,7 +147,7 @@ param(
     [int]$Workers = 0
 )
 
-$ScriptVersion = '2026.09.02-3'
+$ScriptVersion = '2026.09.02-4'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -708,7 +708,11 @@ function Invoke-Submissions {
         'list' {
             Initialize-VaultRun -LogName 'submissions-list'
             Write-VaultLog "vault $ScriptVersion - submissions list"
-            [void](Confirm-VaultsForRun)
+            # ONE vault. The dossiers are already on the target's File Staging and are
+            # imported into the target; the source is never read. Confirming both would
+            # make an operator log in to a production vault this command never touches.
+            [void](Confirm-VaultSessions -Vaults @(@{ Role = 'target'; Name = $script:TargetHost }) `
+                       -ApiVersion $script:Api -Yes:$Yes)
             $ctx = New-VaultContext -Section 'submissions'
             $ctx.StagingPath = Confirm-VaultStagingPath -ConfigPath $script:CfgPath -Path $ctx.StagingPath -Yes:$Yes
             [void](Invoke-VaultSubmissionsList -Context $ctx -Limit $Limit)
@@ -719,7 +723,8 @@ function Invoke-Submissions {
             Start-VaultLock -Name 'submissions'
             try {
                 Write-VaultLog "vault $ScriptVersion - submissions import$(if ($Plan) { ' (plan)' })"
-                [void](Confirm-VaultsForRun)
+                [void](Confirm-VaultSessions -Vaults @(@{ Role = 'target'; Name = $script:TargetHost }) `
+                           -ApiVersion $script:Api -Yes:$Yes)
                 $ctx = New-VaultContext -Section 'submissions'
                 $ctx.StagingPath = Confirm-VaultStagingPath -ConfigPath $script:CfgPath -Path $ctx.StagingPath -Yes:$Yes
                 $bad = Invoke-VaultSubmissionsImport -Context $ctx -Plan:$Plan -TestCount $Test -Limit $Limit
