@@ -152,7 +152,7 @@ param(
     [int]$Workers = 0
 )
 
-$ScriptVersion = '2026.09.02-6'
+$ScriptVersion = '2026.09.02-7'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -1062,6 +1062,48 @@ roles survey and roles probe write nothing and need no scope.
     finally { Stop-VaultLock }
 }
 
+function Invoke-Query {
+    # Run one VQL query and show what comes back. Read-only, and the only command that
+    # takes a query rather than composing one.
+    #
+    # It exists because every diagnosis of "why did this not resolve" ended with wanting
+    # to ask the vault a question the kit had no way to ask, and the alternative was
+    # hand-rolling a session and a curl. VQL cannot write, so there is nothing here to
+    # guard against beyond a query that pages for ever, which the page cap handles.
+    param([string]$Action)
+    $vql = "$Action".Trim()
+    if (-not $vql) {
+        Write-Host 'vault.ps1 query "<VQL>" [-VaultHost host] [-OutFile results.csv]' -ForegroundColor Red
+        Write-Host '  e.g. vault.ps1 query "SELECT id, name__v FROM submission__v"' -ForegroundColor Red
+        exit 2
+    }
+    Initialize-VaultRun -LogName 'query'
+    Write-VaultLog "vault $ScriptVersion - query"
+
+    $h = $VaultHost
+    if (-not $h) { $h = $script:TargetHost }
+    $h = Get-VaultHostName $h
+    if (-not $h) { throw 'No vault. Set [vault] target, or pass -VaultHost.' }
+    [void](Confirm-VaultSessions -Vaults @(@{ Role = 'query'; Name = $h }) -ApiVersion $script:Api -Yes:$Yes)
+
+    Write-VaultLog $vql
+    $rows = @(Invoke-VaultQuery -VaultHost $h -ApiVersion $script:Api -Vql $vql)
+    Write-VaultLog "$($rows.Count) row(s)" 'OK'
+
+    if ($OutFile) {
+        $out = Resolve-VaultOutputPath -Path $OutFile
+        $rows | Export-Csv -LiteralPath $out -NoTypeInformation -Encoding UTF8 -WhatIf:$false
+        Write-VaultLog "Written to $out" 'OK'
+    }
+    else {
+        # To the host, not the log: this is a result set being read by a person, and
+        # putting a hundred formatted rows through the timestamped logger makes both the
+        # table and the log worse.
+        $rows | Format-Table -AutoSize | Out-String -Width 4096 | Write-Host
+    }
+    Write-VaultLog "Log: $script:VaultLogFile"
+}
+
 function Invoke-Map {
     # The map, checked and normalised. Needs no vault: this is about a file, and being
     # able to answer "is my map usable" without credentials is most of the point - it is
@@ -1239,6 +1281,8 @@ vault $v
   submissions list         What dossiers are under [submissions] path. No vault writes
   submissions import       Import them into RIM Submissions Archive. -Plan resolves only
 
+  query "<VQL>"            Run one VQL query and show the rows. Read-only
+
   roles survey             What is in scope: subtypes, roles, defaults. Changes nothing
   roles probe              Whether a defaults table is needed, and what it should say
   roles explain            Prove where the reported defaults come from. Changes nothing
@@ -1355,6 +1399,7 @@ switch ($verb) {
     'roles'       { Invoke-Roles -Action $sub }
     'verify'      { Invoke-Verify -Action $sub }
     'map'         { Invoke-Map -Action $sub }
+    'query'       { Invoke-Query -Action $Subcommand }
     'version'     { Write-Host $ScriptVersion }
     'help'        { Invoke-Help }
     ''            { Invoke-Help }

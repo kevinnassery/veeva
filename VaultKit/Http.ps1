@@ -223,6 +223,41 @@ function Invoke-VaultApi {
     throw "$VaultHost $Method $Path failed after $MaxRetries attempts"
 }
 
+function Invoke-VaultQuery {
+    # One VQL query, all its pages, as rows.
+    #
+    # Page 1 is a POST carrying the query; every page after it is a GET on the URL Vault
+    # hands back, which already has the query baked in. That asymmetry has been written
+    # out by hand in four places in this kit; this is the one that new code should use.
+    param(
+        [Parameter(Mandatory)][string]$VaultHost,
+        [Parameter(Mandatory)][string]$ApiVersion,
+        [Parameter(Mandatory)][string]$Vql,
+        # A cap, not a limit: pages, not rows. Stops a mistyped query from paging a
+        # 500,000-record object to the end, and says that it stopped.
+        [int]$MaxPages = 50
+    )
+    $rows  = New-Object System.Collections.ArrayList
+    $path  = '/query'
+    $body  = "q=$([Uri]::EscapeDataString($Vql))"
+    $pages = 0
+    $truncated = $false
+    while ($path) {
+        $pages++
+        if ($pages -gt $MaxPages) { $truncated = $true; break }
+        $r = if ($pages -eq 1) {
+                Invoke-VaultApi -VaultHost $VaultHost -ApiVersion $ApiVersion -Method POST `
+                    -Path $path -ContentType 'application/x-www-form-urlencoded' -Body $body
+             } else {
+                Invoke-VaultApi -VaultHost $VaultHost -ApiVersion $ApiVersion -Method GET -Path $path
+             }
+        foreach ($row in @(Get-VaultField $r 'data' @())) { [void]$rows.Add($row) }
+        $path = "$(Get-VaultField (Get-VaultField $r 'responseDetails' $null) 'next_page' '')"
+    }
+    if ($truncated) { Write-VaultLog "Stopped at the $MaxPages-page cap - this is NOT the whole result." 'WARN' }
+    return @($rows)
+}
+
 function Get-VaultAttachmentName {
     # The filename out of a Content-Disposition header, decoded properly.
     #
