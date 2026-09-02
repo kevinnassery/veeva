@@ -58,6 +58,11 @@ param(
     # documents: the folder on the target vault's File Staging to upload into.
     # Overrides [documents] path.
     [string]$TargetPath = '',
+    # submissions: which vault holds the Submissions Archive. Overrides
+    # [submissions] vault, which in turn overrides [vault] target. The legacy importer
+    # had its own VaultDNS and was not tied to the migration's two vaults; folding it
+    # onto the target silently pointed it at the wrong one.
+    [string]$VaultHost = '',
     # verify: check what is on the target, rather than everything in the id list.
     [switch]$Staged,
 
@@ -147,7 +152,7 @@ param(
     [int]$Workers = 0
 )
 
-$ScriptVersion = '2026.09.02-4'
+$ScriptVersion = '2026.09.02-5'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -702,18 +707,45 @@ function Invoke-Attachments {
     }
 }
 
+function Resolve-VaultSubmissionsHost {
+    # Which vault holds the Submissions Archive.
+    #
+    # ONE vault: the dossiers are already on its File Staging and are imported into it.
+    # Nothing here reads the migration's source, so confirming both would make an
+    # operator log in to a production vault this command never touches.
+    #
+    # But which one is a question, not a given. The tool this replaces carried its own
+    # VaultDNS and was never tied to the migration's two vaults - the Submissions Archive
+    # can perfectly well live somewhere neither of them is. Defaulting to [vault] target
+    # and saying nothing sent a run at the wrong vault, so the default is now stated
+    # every time it is used.
+    $h = $VaultHost
+    if ($h) {
+        Write-VaultLog "submissions vault: $($h) (from -VaultHost)"
+    }
+    else {
+        $h = Get-VaultSetting -Config $script:Cfg -Section submissions -Key vault -Default ''
+        if ($h) { Write-VaultLog "submissions vault: $h (from [submissions] vault)" }
+        else {
+            $h = $script:TargetHost
+            Write-VaultLog "submissions vault: $h - defaulted from [vault] target. Set [submissions] vault, or pass -VaultHost, if the Submissions Archive is somewhere else." 'WARN'
+        }
+    }
+    $h = Get-VaultHostName $h
+    if (-not $h) { throw 'No vault for submissions. Set [submissions] vault, or pass -VaultHost.' }
+    return $h
+}
+
 function Invoke-Submissions {
     param([string]$Action)
     switch ($Action) {
         'list' {
             Initialize-VaultRun -LogName 'submissions-list'
             Write-VaultLog "vault $ScriptVersion - submissions list"
-            # ONE vault. The dossiers are already on the target's File Staging and are
-            # imported into the target; the source is never read. Confirming both would
-            # make an operator log in to a production vault this command never touches.
-            [void](Confirm-VaultSessions -Vaults @(@{ Role = 'target'; Name = $script:TargetHost }) `
-                       -ApiVersion $script:Api -Yes:$Yes)
             $ctx = New-VaultContext -Section 'submissions'
+            $ctx.VaultHost = Resolve-VaultSubmissionsHost
+            [void](Confirm-VaultSessions -Vaults @(@{ Role = 'submissions'; Name = $ctx.VaultHost }) `
+                       -ApiVersion $script:Api -Yes:$Yes)
             $ctx.StagingPath = Confirm-VaultStagingPath -ConfigPath $script:CfgPath -Path $ctx.StagingPath -Yes:$Yes
             [void](Invoke-VaultSubmissionsList -Context $ctx -Limit $Limit)
             Write-VaultLog "Log: $script:VaultLogFile"
@@ -723,9 +755,10 @@ function Invoke-Submissions {
             Start-VaultLock -Name 'submissions'
             try {
                 Write-VaultLog "vault $ScriptVersion - submissions import$(if ($Plan) { ' (plan)' })"
-                [void](Confirm-VaultSessions -Vaults @(@{ Role = 'target'; Name = $script:TargetHost }) `
-                           -ApiVersion $script:Api -Yes:$Yes)
                 $ctx = New-VaultContext -Section 'submissions'
+                $ctx.VaultHost = Resolve-VaultSubmissionsHost
+                [void](Confirm-VaultSessions -Vaults @(@{ Role = 'submissions'; Name = $ctx.VaultHost }) `
+                           -ApiVersion $script:Api -Yes:$Yes)
                 $ctx.StagingPath = Confirm-VaultStagingPath -ConfigPath $script:CfgPath -Path $ctx.StagingPath -Yes:$Yes
                 $bad = Invoke-VaultSubmissionsImport -Context $ctx -Plan:$Plan -TestCount $Test -Limit $Limit
                 Write-VaultLog "Log: $script:VaultLogFile"
