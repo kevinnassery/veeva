@@ -81,6 +81,77 @@ $script:VaultAppIdResolved = $false
 $script:VaultAppId         = ''
 $script:VaultAppErr        = $null
 
+function Find-VaultApplicationMatch {
+    # Which field of the application object actually holds the staging folder name.
+    #
+    # The configured field is a guess about somebody else's object model, and when it is
+    # wrong the run fails on every dossier with the same error. Rather than make an
+    # operator go and read the model, ask the vault: read the object's metadata, take its
+    # String fields - only a String can hold an alphanumeric like e157135 or 068582 - and
+    # look for one whose value equals the key.
+    #
+    # Partial matches are collected separately and reported but never used. A field that
+    # merely CONTAINS the key is a lead for a human, not a match to act on.
+    param(
+        [Parameter(Mandatory)]$Context,
+        [Parameter(Mandatory)][string]$Key,
+        [string]$Object = 'application__v',
+        [int]$MaxPages = 20
+    )
+    $meta   = Invoke-VaultApi -VaultHost $Context.VaultHost -ApiVersion $Context.Api -Method GET -Path "/metadata/vobjects/$Object"
+    $obj    = Get-VaultField $meta 'object' $meta
+    $fields = @(Get-VaultField $obj 'fields' @())
+    if ($fields.Count -eq 0) { throw "Could not read the fields of $Object via /metadata/vobjects/$Object" }
+
+    $names = @('id') + @($fields | Where-Object { "$(Get-VaultField $_ 'type' '')" -eq 'String' } |
+                         ForEach-Object { Get-VaultField $_ 'name' '' } | Where-Object { $_ })
+    $names = @($names | Select-Object -Unique)
+
+    $exactField = ''; $exactId = ''
+    $partials   = New-Object System.Collections.ArrayList
+    $scanned    = 0
+    $pages      = 0
+    $truncated  = $false
+
+    # Paged, unlike the tool this came from, which read the first page and stopped - so
+    # in a vault with more applications than fit one page the scan could miss the very
+    # record it was looking for and report that no field matched.
+    $vql  = "SELECT $($names -join ', ') FROM $Object"
+    $path = '/query'
+    $body = "q=$([Uri]::EscapeDataString($vql))"
+    while ($path) {
+        $pages++
+        if ($pages -gt $MaxPages) { $truncated = $true; break }
+        $r = if ($pages -eq 1) {
+                Invoke-VaultApi -VaultHost $Context.VaultHost -ApiVersion $Context.Api -Method POST `
+                    -Path $path -ContentType 'application/x-www-form-urlencoded' -Body $body
+             } else {
+                Invoke-VaultApi -VaultHost $Context.VaultHost -ApiVersion $Context.Api -Method GET -Path $path
+             }
+        foreach ($row in @(Get-VaultField $r 'data' @())) {
+            $scanned++
+            foreach ($f in $names) {
+                if ($f -eq 'id') { continue }
+                $v = "$(Get-VaultField $row $f '')"
+                if (-not $v) { continue }
+                if ($v -ieq $Key) {
+                    if (-not $exactField) { $exactField = $f; $exactId = "$(Get-VaultField $row 'id' '')" }
+                }
+                elseif ($v -match [regex]::Escape($Key)) {
+                    [void]$partials.Add([pscustomobject]@{ Field = $f; Value = $v })
+                }
+            }
+        }
+        if ($exactField) { break }
+        $path = "$(Get-VaultField (Get-VaultField $r 'responseDetails' $null) 'next_page' '')"
+    }
+
+    return [pscustomobject]@{
+        ExactField = $exactField; ExactId = $exactId; Partials = @($partials)
+        Scanned = $scanned; Fields = ($names.Count - 1); Truncated = $truncated
+    }
+}
+
 function Get-VaultApplicationId {
     # The application folder name (e157135) as a record id, resolved once per run.
     #
@@ -104,19 +175,51 @@ function Get-VaultApplicationId {
     try {
         $k   = $Key.Replace("'", "\'")
         $vql = "SELECT id FROM $Object WHERE $KeyField = '$k'"
-        $r   = Invoke-VaultApi -VaultHost $Context.VaultHost -ApiVersion $Context.Api -Method POST `
-                  -Path '/query' -ContentType 'application/x-www-form-urlencoded' `
-                  -Body "q=$([Uri]::EscapeDataString($vql))"
-        $rows = @(Get-VaultField $r 'data' @())
+        $rows = @()
+        try {
+            $r = Invoke-VaultApi -VaultHost $Context.VaultHost -ApiVersion $Context.Api -Method POST `
+                    -Path '/query' -ContentType 'application/x-www-form-urlencoded' `
+                    -Body "q=$([Uri]::EscapeDataString($vql))"
+            $rows = @(Get-VaultField $r 'data' @())
+        }
+        catch {
+            # A field that does not exist on this vault fails the QUERY, not just the
+            # match - so the fast path has to survive its own configuration being wrong,
+            # or the scan below never runs and the operator is told the application does
+            # not exist when what does not exist is the field.
+            Write-VaultLog "Query on '$KeyField' failed ($_) - falling back to a field scan" 'WARN'
+            $rows = @()
+        }
         if ($rows.Count -eq 1) {
             $script:VaultAppId = "$(Get-VaultField $rows[0] 'id' '')"
             Write-VaultLog "Application '$Key' is $Object $($script:VaultAppId)" 'OK'
             return $script:VaultAppId
         }
         if ($rows.Count -gt 1) {
+            # Genuine ambiguity. Scanning would not help - the vault has already given a
+            # clear answer and it is "more than one", which only a human can narrow.
             throw "$($rows.Count) $Object records match $KeyField = '$Key'. Set [submissions] applicationkeyfield to something that identifies one."
         }
-        throw "No $Object where $KeyField = '$Key'. Check [submissions] path names a real application folder, and that applicationkeyfield is the field holding it."
+
+        # Zero rows on the configured field is a guess that was wrong, not a dead end.
+        # Ask the vault which field actually holds it rather than making someone go and
+        # read the object model.
+        Write-VaultLog "No $Object where $KeyField = '$Key' - scanning $Object string fields for it" 'WARN'
+        $m = Find-VaultApplicationMatch -Context $Context -Key $Key -Object $Object
+        if ($m.ExactField) {
+            $script:VaultAppId = $m.ExactId
+            Write-VaultLog "Application '$Key' is $Object $($m.ExactId), found on field '$($m.ExactField)'" 'OK'
+            Write-VaultLog "Set [submissions] applicationkeyfield = $($m.ExactField) to skip this scan next time." 'WARN'
+            return $script:VaultAppId
+        }
+
+        $hint = ''
+        if ($m.Partials.Count) {
+            $flds = (@($m.Partials | ForEach-Object { $_.Field }) | Select-Object -Unique) -join ', '
+            $hint = " Fields that merely contain it: $flds - a partial match is a lead, not an answer."
+        }
+        if ($m.Truncated) { $hint += ' The scan stopped at the page cap, so it did not read every record.' }
+        throw "Could not find $Object '$Key' by field '$KeyField', nor by scanning $($m.Fields) string field(s) across $($m.Scanned) record(s).$hint Check [submissions] path names a real application folder."
     }
     catch { $script:VaultAppErr = "$_"; throw }
 }
