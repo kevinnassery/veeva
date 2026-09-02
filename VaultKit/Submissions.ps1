@@ -359,6 +359,13 @@ function Wait-VaultJob {
         [int]$TimeoutMinutes = 120,
         [int]$PollSeconds = 20
     )
+    # Vault allows the Job Status endpoint once every 10 seconds PER job_id, and answers
+    # API_LIMIT_EXCEEDED past that. A configured interval below the floor would not poll
+    # faster, it would just fail faster.
+    if ($PollSeconds -lt 11) {
+        Write-VaultLog "jobpollseconds is $PollSeconds; Vault allows one job status call per 10s per job - using 11" 'WARN'
+        $PollSeconds = 11
+    }
     $running  = @('SCHEDULED', 'QUEUING', 'QUEUED', 'RUNNING', 'IN_PROGRESS')
     $deadline = (Get-Date).AddMinutes($TimeoutMinutes)
     while ((Get-Date) -lt $deadline) {
@@ -378,6 +385,16 @@ function Get-VaultSubmissionImportResult {
         [Parameter(Mandatory)][string]$SubmissionId,
         [Parameter(Mandatory)][string]$JobId
     )
+    # Retried, because this call is made the instant the job status poll returned SUCCESS
+    # - and Vault meters BOTH by job_id, once per 10 seconds. So the very first attempt
+    # lands inside the window the status poll just opened and comes back
+    # API_LIMIT_EXCEEDED. Waiting unconditionally would cost 10 seconds on every dossier;
+    # trying and retrying costs it only when it is actually hit.
+    #
+    # The first version of this swallowed the failure into a blank binder id, so five
+    # imports reported SUCCESS with nothing to point at and the cause was invisible
+    # until someone read the Messages column.
+    for ($attempt = 1; $attempt -le 3; $attempt++) {
     try {
         # Vault 26R3 (Dec 2026) stops returning the data array from this endpoint;
         # importMessages remains. Binder id and version go blank rather than the call
@@ -397,8 +414,21 @@ function Get-VaultSubmissionImportResult {
         return [pscustomobject]@{ BinderId = $binderId; BinderVersion = $version; Messages = $messages }
     }
     catch {
-        return [pscustomobject]@{ BinderId = ''; BinderVersion = ''; Messages = "results unavailable: $_" }
+        $err = "$_"
+        if ($err -match 'API_LIMIT_EXCEEDED' -and $attempt -lt 3) {
+            $wait = 11
+            Write-VaultLog "import results for job $JobId are inside the 10s per-job polling window - waiting ${wait}s (attempt $attempt/3)" 'WARN'
+            Start-Sleep -Seconds $wait
+            continue
+        }
+        # Said out loud, not only written to a column. A SUCCESS row with no binder id
+        # is a run that cannot point at what it created, and that should be visible while
+        # it happens rather than found afterwards.
+        Write-VaultLog "could not read import results for job ${JobId}: $err" 'WARN'
+        return [pscustomobject]@{ BinderId = ''; BinderVersion = ''; Messages = "results unavailable: $err" }
     }
+    }
+    return [pscustomobject]@{ BinderId = ''; BinderVersion = ''; Messages = 'results unavailable after 3 attempts' }
 }
 
 function Test-VaultSubmissionsPreflight {
