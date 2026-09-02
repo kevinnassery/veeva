@@ -147,7 +147,7 @@ param(
     [int]$Workers = 0
 )
 
-$ScriptVersion = '2026.08.31-5'
+$ScriptVersion = '2026.09.02-1'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -162,7 +162,7 @@ $Repo = 'kevinnassery/veeva'
 # The module, in load order, and the manifest `update` fetches. Derived from one list so
 # that adding a part cannot leave it undelivered - a dispatcher calling a function from a
 # file nobody downloads is the failure this arrangement exists to make impossible.
-$VaultKitParts = @('Log', 'Config', 'Auth', 'Http', 'Ids', 'Run', 'Workers', 'Attachments', 'Documents', 'Roles', 'Verify')
+$VaultKitParts = @('Log', 'Config', 'Auth', 'Http', 'Ids', 'Run', 'Workers', 'Attachments', 'Documents', 'Submissions', 'Roles', 'Verify')
 
 # vault.ps1 goes LAST: it is the file being executed, and it is the one whose failure to
 # land leaves the least broken folder behind.
@@ -270,6 +270,18 @@ function New-VaultContext {
         Map        = $map
         Ids        = $ids
         TargetPath = $tpath
+        # ---- submissions ----
+        # One vault: the dossiers are already on the TARGET's File Staging and are
+        # imported into the TARGET. The source vault is never touched by this workflow.
+        StagingPath         = (Get-VaultSetting -Config $script:Cfg -Section submissions -Key path -Default '')
+        LookupField         = (Get-VaultSetting -Config $script:Cfg -Section submissions -Key lookupfield -Default 'name__v')
+        SubmissionMatch     = (Get-VaultSetting -Config $script:Cfg -Section submissions -Key submissionmatch -Default 'prefix')
+        ApplicationObject   = (Get-VaultSetting -Config $script:Cfg -Section submissions -Key applicationobject -Default 'application__v')
+        ApplicationKeyField = (Get-VaultSetting -Config $script:Cfg -Section submissions -Key applicationkeyfield -Default 'name__v')
+        ApplicationRefField = (Get-VaultSetting -Config $script:Cfg -Section submissions -Key applicationreffield -Default 'application__v')
+        DossierFormatId     = (Get-VaultSetting -Config $script:Cfg -Section submissions -Key dossierformatid -Default '')
+        JobTimeoutMinutes   = [int](Get-VaultSetting -Config $script:Cfg -Section submissions -Key jobtimeoutminutes -Default 120)
+        JobPollSeconds      = [int](Get-VaultSetting -Config $script:Cfg -Section submissions -Key jobpollseconds -Default 20)
         PartSizeMB = $part
         ReserveMB  = [int](Get-VaultSetting -Config $script:Cfg -Section limits -Key reserve -Default 2048)
         Existing   = $Existing
@@ -685,6 +697,42 @@ function Invoke-Attachments {
         }
         default {
             Write-Host "vault.ps1 attachments <sync|verify>" -ForegroundColor Red
+            exit 2
+        }
+    }
+}
+
+function Invoke-Submissions {
+    param([string]$Action)
+    switch ($Action) {
+        'list' {
+            Initialize-VaultRun -LogName 'submissions-list'
+            Write-VaultLog "vault $ScriptVersion - submissions list"
+            [void](Confirm-VaultsForRun)
+            $ctx = New-VaultContext -Section 'submissions'
+            if (-not $ctx.StagingPath) { throw "[submissions] path is not set in $($script:CfgPath)" }
+            [void](Invoke-VaultSubmissionsList -Context $ctx -Limit $Limit)
+            Write-VaultLog "Log: $script:VaultLogFile"
+        }
+        'import' {
+            Initialize-VaultRun -LogName 'submissions-import'
+            Start-VaultLock -Name 'submissions'
+            try {
+                Write-VaultLog "vault $ScriptVersion - submissions import$(if ($Plan) { ' (plan)' })"
+                [void](Confirm-VaultsForRun)
+                $ctx = New-VaultContext -Section 'submissions'
+                if (-not $ctx.StagingPath) { throw "[submissions] path is not set in $($script:CfgPath)" }
+                $bad = Invoke-VaultSubmissionsImport -Context $ctx -Plan:$Plan -TestCount $Test -Limit $Limit
+                Write-VaultLog "Log: $script:VaultLogFile"
+                if ($bad -gt 0) { exit 1 }
+            }
+            finally { Stop-VaultLock }
+        }
+        default {
+            Write-Host "vault.ps1 submissions <list|import>" -ForegroundColor Red
+            Write-Host "  list            what is under [submissions] path. No vault writes, no VQL" -ForegroundColor Red
+            Write-Host "  import -Plan    resolve every submission id, import nothing" -ForegroundColor Red
+            Write-Host "  import          do it for real" -ForegroundColor Red
             exit 2
         }
     }
@@ -1150,6 +1198,9 @@ vault $v
   attachments sync         Deliver document attachments the target is missing
   attachments verify       Prove both vaults hold the same bytes
 
+  submissions list         What dossiers are under [submissions] path. No vault writes
+  submissions import       Import them into RIM Submissions Archive. -Plan resolves only
+
   roles survey             What is in scope: subtypes, roles, defaults. Changes nothing
   roles probe              Whether a defaults table is needed, and what it should say
   roles explain            Prove where the reported defaults come from. Changes nothing
@@ -1244,8 +1295,8 @@ host. It holds live tokens: treat it like a password, and log out when finished.
 
 roles reads ONE vault - the target it repairs - so it confirms that one only.
 
-Not yet ported: submissions import, and the object record pull that
-get-attachments.bat does today.
+Not yet ported: the object record pull that get-attachments.bat does today -
+attachments hanging off submission__v records, staged for the loader.
 
 "@
 }
@@ -1262,6 +1313,7 @@ switch ($verb) {
     'probe'       { Invoke-Probe }
     'attachments' { Invoke-Attachments -Action $sub }
     'documents'   { Invoke-Documents -Action $sub }
+    'submissions' { Invoke-Submissions -Action $sub }
     'roles'       { Invoke-Roles -Action $sub }
     'verify'      { Invoke-Verify -Action $sub }
     'map'         { Invoke-Map -Action $sub }

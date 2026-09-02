@@ -176,6 +176,57 @@ many it skipped and says out loud that it skipped them. If the query cannot be a
 at all the run says so and lists everything, rather than treating "I could not ask" as
 "nothing has attachments".
 
+## Import submissions
+
+Dossiers that are **already on the target's File Staging**, imported into RIM Submissions
+Archive. Nothing is moved, downloaded or uploaded — each is imported from where it sits,
+so this touches one vault and never puts a dossier on the workstation.
+
+```
+.\vault.ps1 submissions list          what is there. No vault writes, no VQL
+.\vault.ps1 submissions import -Plan  resolve every submission id, import nothing
+.\vault.ps1 submissions import -Test 5   import 5, then stop
+.\vault.ps1 submissions import        do it for real
+```
+
+Set `[submissions] path` to the **application folder**, e.g. `/SubmissionsArchive/e157135`.
+Its children are the submissions — `0000`, `0001`, … — as folders, or as `.zip`/`.tar.gz`
+archives. The last segment of that path *is* the application; it is not configured a
+second time, because two settings that have to agree are two settings that can disagree.
+
+You type no ids. Each `submission__v` record is found by VQL from the staging layout
+itself: the folder name is the submission number, the folder above it is the application.
+The submission name is usually `0000 - Submission Meeting Minutes`, so the folder name is
+a **prefix** of `name__v` rather than the whole value — set `submissionmatch = exact`
+where your field holds just the number. A folder matching zero or two records errors
+rather than guessing, and names the records it found.
+
+**`-Plan` is the pass that matters.** Resolving an id is read-only, so a plan run does the
+entire lookup for real and imports nothing. A key that matches nothing, or matches two
+records, is found there rather than part way through a wave. Every `ERROR` row in a plan
+is a dossier that would fail the same way for real.
+
+**Preflight runs before the first import**, and stops the run rather than warning. It
+checks free space against `[limits] reserve`, that the output folder is writable — tested
+by writing, since permissions that look right and a file that cannot be created are
+different things — that `submission-import-results.csv` is not held open by Excel, and
+that the staging path lists something. That last one matters most: an application folder
+that lists nothing is the commonest way this run does nothing and reports success.
+
+To be clear about what the disk check is *not*: dossiers import in place, so no transfer
+budget is computed and none is claimed. What it protects is the log and the results file,
+both of which have failed a run before — a full volume, and a CSV locked by Excel that
+throws on the first save, after the imports have already happened.
+
+Results are `submission-import-results.csv`, one row per dossier, keyed on file name.
+Re-running skips anything already `SUCCESS`. An import is an async **job** in Vault: the
+run starts it and polls, so `jobtimeoutminutes` and `jobpollseconds` govern how long it
+waits. A job still running at the deadline is recorded `TIMEOUT_AFTER_<n>_MIN` rather than
+as a failure, because it has not failed — it is still going, in Vault.
+
+This one is deliberately **sequential and has no `-Workers`**. Eight parallel processes
+would queue eight jobs on the same vault rather than finishing eight times sooner.
+
 ## Is it migrated?
 
 The per-workflow checks each answer their own question. This one answers the question
@@ -406,6 +457,7 @@ up to sixteen files on disk rather than two.
 | `.\vault.ps1 login` | log in to both vaults, cache the sessions |
 | `.\vault.ps1 whoami` | who is cached, and how old |
 | `.\vault.ps1 probe` | read-only survey of each vault, including staging paths |
+| `.\vault.ps1 submissions import` | import staged dossiers into RIM Submissions Archive |
 | `-Plan` | report what would happen, change nothing |
 | `-Test 5` | stop once 5 are genuinely done |
 | `-Limit 50` | cap the input examined |
