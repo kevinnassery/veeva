@@ -152,6 +152,17 @@ workflows), authentication, file staging, jobs, VQL, vault objects, Vault Loader
 - [Session Keep Alive](vault-api/api-reference/26.2/authentication/session-keep-alive.md)
 - [User Name and Password](vault-api/api-reference/26.2/authentication/user-name-and-password.md)
 
+## Platform — document-binder-roles
+
+- [Document & Binder Roles](vault-api/api-reference/26.2/document-binder-roles.md)
+- [Document Roles](vault-api/api-reference/26.2/document-binder-roles/document-roles.md)
+- [Assign Users & Groups to Roles on a Single Document](vault-api/api-reference/26.2/document-binder-roles/document-roles/assign-users-groups-to-roles-on-a-single-document.md)
+- [Assign Users & Groups to Roles on Multiple Documents & Binders](vault-api/api-reference/26.2/document-binder-roles/document-roles/assign-users-groups-to-roles-on-multiple-documents-binders.md)
+- [Remove Users & Groups from Roles on a Single Document](vault-api/api-reference/26.2/document-binder-roles/document-roles/remove-users-groups-from-roles-on-a-single-document.md)
+- [Remove Users & Groups from Roles on Multiple Documents & Binders](vault-api/api-reference/26.2/document-binder-roles/document-roles/remove-users-groups-from-roles-on-multiple-documents-binders.md)
+- [Retrieve All Document Roles](vault-api/api-reference/26.2/document-binder-roles/document-roles/retrieve-all-document-roles.md)
+- [Retrieve Document Role](vault-api/api-reference/26.2/document-binder-roles/document-roles/retrieve-document-role.md)
+
 ## Platform — document-lifecycle-workflows
 
 - [Binder User Actions](vault-api/api-reference/26.2/document-lifecycle-workflows/binder-user-actions.md)
@@ -176,6 +187,17 @@ workflows), authentication, file staging, jobs, VQL, vault objects, Vault Loader
 - [Delete Lifecycle Role Assignment Override Rules](vault-api/api-reference/26.2/document-lifecycle-workflows/lifecycle-role-assignment-rules/delete-lifecycle-role-assignment-override-rules.md)
 - [Retrieve Lifecycle Role Assignment Rules (Default & Override)](vault-api/api-reference/26.2/document-lifecycle-workflows/lifecycle-role-assignment-rules/retrieve-lifecycle-role-assignment-rules-default-override.md)
 - [Update Lifecycle Role Assignment Rules (Default & Override)](vault-api/api-reference/26.2/document-lifecycle-workflows/lifecycle-role-assignment-rules/update-lifecycle-role-assignment-rules-default-override.md)
+
+## Platform — MDL
+
+- [Metadata Definition Language (MDL)](vault-api/api-reference/26.2/metadata-definition-language-mdl.md)
+- [Retrieve All Component Metadata](vault-api/api-reference/26.2/metadata-definition-language-mdl/retrieve-all-component-metadata.md)
+- [Retrieve Component Records](vault-api/api-reference/26.2/metadata-definition-language-mdl/retrieve-component-records.md)
+- [Retrieve Component Record Collection](vault-api/api-reference/26.2/metadata-definition-language-mdl/retrieve-component-records/retrieve-component-record-collection.md)
+- [Retrieve Component Record (MDL)](vault-api/api-reference/26.2/metadata-definition-language-mdl/retrieve-component-records/retrieve-component-record-mdl.md)
+- [Retrieve Component Record (XML/JSON)](vault-api/api-reference/26.2/metadata-definition-language-mdl/retrieve-component-records/retrieve-component-record-xmljson.md)
+- [Doctype component](mdl/component-types/doctype.md) - role_defaulting_editors / _viewers / _consumers
+- [Docparticipantrule component](mdl/component-types/docparticipantrule.md)
 
 ## Platform — documents
 
@@ -321,6 +343,17 @@ workflows), authentication, file staging, jobs, VQL, vault objects, Vault Loader
 - [List Upload Sessions](vault-api/api-reference/26.2/file-staging/resumable-upload-sessions/list-upload-sessions.md)
 - [Upload to a Session](vault-api/api-reference/26.2/file-staging/resumable-upload-sessions/upload-to-a-session.md)
 - [Update Folder or File](vault-api/api-reference/26.2/file-staging/update-folder-or-file.md)
+
+## Platform — groups
+
+- [Groups](vault-api/api-reference/26.2/groups.md)
+- [Create Group](vault-api/api-reference/26.2/groups/create-group.md)
+- [Delete Group](vault-api/api-reference/26.2/groups/delete-group.md)
+- [Retrieve All Groups](vault-api/api-reference/26.2/groups/retrieve-all-groups.md)
+- [Retrieve Auto Managed Groups](vault-api/api-reference/26.2/groups/retrieve-auto-managed-groups.md)
+- [Retrieve Group](vault-api/api-reference/26.2/groups/retrieve-group.md)
+- [Retrieve Group Metadata](vault-api/api-reference/26.2/groups/retrieve-group-metadata.md)
+- [Update Group](vault-api/api-reference/26.2/groups/update-group.md)
 
 ## Platform — jobs
 
