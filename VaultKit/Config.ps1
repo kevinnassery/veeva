@@ -95,7 +95,9 @@ function Set-VaultSetting {
     )
     $lines = @(Get-Content -LiteralPath $Path)
     $sec   = $Section.ToLowerInvariant()
-    $key   = $Key.ToLowerInvariant()
+    # $keyLc, not $key: PowerShell variable names are case-insensitive, so assigning to
+    # $key overwrites the $Key parameter - and the lines written below quote $Key.
+    $keyLc = $Key.ToLowerInvariant()
 
     # Where the section starts, and where it ends - the next header, or the end.
     $start = -1; $end = $lines.Count
@@ -123,7 +125,7 @@ function Set-VaultSetting {
             if (-not $t -or $t.StartsWith('#') -or $t.StartsWith(';')) { continue }
             $eq = $t.IndexOf('=')
             if ($eq -lt 1) { continue }
-            if ($t.Substring(0, $eq).Trim().ToLowerInvariant() -eq $key) { $hit = $i; break }
+            if ($t.Substring(0, $eq).Trim().ToLowerInvariant() -eq $keyLc) { $hit = $i; break }
         }
         for ($i = 0; $i -lt $lines.Count; $i++) {
             if ($hit -ge 0 -and $i -eq $hit) { [void]$out.Add("$Key = $Value"); continue }
