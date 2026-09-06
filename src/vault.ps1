@@ -1,0 +1,1395 @@
+<#
+.SYNOPSIS
+    One command for the Vault migration work.
+
+.DESCRIPTION
+    powershell -ExecutionPolicy Bypass -File .\vault.ps1 <command> [subcommand] [options]
+
+    Or, once per PowerShell window:
+
+        Set-ExecutionPolicy -Scope Process Bypass
+        .\vault.ps1 <command> [subcommand] [options]
+
+    Everything lives in one folder: this script, vault.ini, and whatever the runs write.
+    The script is self-contained - the VaultKit module is built into it - so `vault.ps1
+    update` fetches two files and never overwrites a vault.ini you have filled in.
+
+    Authentication is its own flow: `vault.ps1 login` prompts for each vault in turn and
+    caches the sessions to .vault-session.json. Every other command reads that file and
+    never prompts - unless it is missing, in which case the command logs in itself, so a
+    first run works without knowing login exists.
+
+.NOTES
+    Windows PowerShell 5.1 compatible. No modules to install.
+#>
+
+[CmdletBinding(SupportsShouldProcess = $true)]
+param(
+    [Parameter(Position = 0)][string]$Command = 'help',
+    [Parameter(Position = 1)][string]$Subcommand = '',
+    [string]$ConfigFile = '',
+
+    # Local folder for logs, results, and the scratch space a file passes through while
+    # it is in flight. The only place anything is written. Overrides [paths] output.
+    [Alias('Out', 'LogDir', 'WorkDir')]
+    [string]$OutputRoot = '',
+    [switch]$NoPrompt,
+
+    # login: one credential for every vault, instead of one prompt each.
+    [switch]$Shared,
+
+    # Work out what would happen and report it, changing nothing.
+    [switch]$Plan,
+    # Stop once this many items are genuinely done - not this many examined. Most
+    # documents carry no attachments, so capping by document can prove nothing.
+    [int]$Test = 0,
+    # Cap the input examined.
+    [int]$Limit = 0,
+    # FAST compares the MD5 each vault records; DEEP downloads both copies and hashes.
+    [ValidateSet('FAST', 'DEEP')][string]$Depth = 'DEEP',
+    # Send a same-name attachment whose bytes differ, as a new version.
+    [switch]$ReplaceDiffering,
+    # attachments sync: ask the vault which documents carry attachments and examine only
+    # those, instead of listing every mapped document to find out. Vault's 2,000-calls-
+    # per-five-minutes allowance is per user, so this is the only lever that makes a
+    # large map faster - workers cannot outrun a budget they share.
+    [switch]$Prefilter,
+    [ValidateSet('Prompt', 'Resume', 'Fresh')][string]$Existing = 'Resume',
+    # documents: the folder on the target vault's File Staging to upload into.
+    # Overrides [documents] path.
+    [string]$TargetPath = '',
+    # submissions: which vault holds the Submissions Archive. Overrides
+    # [submissions] vault, which in turn overrides [vault] target. The legacy importer
+    # had its own VaultDNS and was not tied to the migration's two vaults; folding it
+    # onto the target silently pointed it at the wrong one.
+    [string]$VaultHost = '',
+    # verify: check what is on the target, rather than everything in the id list.
+    [switch]$Staged,
+
+    # ---- roles ----
+    # Name the documents with a VQL condition instead of a map.
+    [string]$Where = '',
+    # Where the desired state comes from.
+    [ValidateSet('Lifecycle', 'Document', 'Table')][string]$DesiredFrom = 'Lifecycle',
+    # Assign groups, users, or both.
+    [ValidateSet('Both', 'Groups', 'Users')][string]$Assign = 'Both',
+    # Apply the document type's default security alongside the lifecycle rules.
+    [switch]$WithTypeDefaults,
+    # A defaults table. Overrides [roles] defaults.
+    [string]$Defaults = '',
+    # Only these roles, or all but these.
+    [string[]]$Role = @(),
+    [string[]]$ExcludeRole = @(),
+    [ValidateRange(1, 1000)][int]$BatchSize = 200,
+    # The permission sync touches only documents created by this user within this many
+    # hours before now. The user defaults to whoever the session belongs to, since the
+    # account doing the repair is the account that made them; the window has no sensible
+    # default and is required, because a run that grants people access must not be able
+    # to reach further back than it was told to.
+    [string]$CreatedBy = 'me',
+    [int]$WithinHours = 0,
+    # The fields the window and the creator are matched on. Defaults confirmed against
+    # the vault with `verify fields`; overridable because another vault may differ.
+    [string]$DateField = 'document_creation_date__v',
+    [string]$CreatorField = 'created_by__v',
+    # Optional: a file of document ids, one per line, that the scope query is expected to
+    # return. Reported both ways, because a count agreeing is not the sets agreeing.
+    [string]$ExpectIds = '',
+    # roles assign: skip documents an earlier run already finished, rather than reading
+    # every one of them again. roles verify is what confirms the skipped ones.
+    [switch]$Resume,
+
+    # ---- verify ----
+    # trial: a fixed handful, at random. sample: sized for a confidence level.
+    [int]$TrialSize = 25,
+    [ValidateSet(90, 95, 99)][int]$Confidence = 95,
+    [ValidateRange(0.1, 50)][double]$Margin = 5,
+    # Fixing this makes a sample reproducible, which is what makes it evidence.
+    [int]$Seed = 0,
+    # Also check each document's roles against the lifecycle rules, not just that they
+    # are populated. Two extra reads per document.
+    [switch]$WithRoleRules,
+    # roles verify: read each document's roles individually instead of in bulk.
+    [switch]$Slow,
+    # roles verify: check every document the run touched, not only the ones it changed.
+    [switch]$All,
+    # verify map: the target document field that holds the source document's id.
+    [string]$Anchor = '',
+    # verify fields: show only fields whose name matches this.
+    [string]$Match = '',
+    # roles mdl: which document type, and optionally which subtype.
+    [string]$Type = '',
+    [string]$Subtype = '',
+    [string]$Classification = '',
+    # update: go ahead even though a run is holding a lock.
+    [switch]$Force,
+    # update: fetch this exact commit instead of whatever main points at. Pins a known
+    # good version, rolls one back, and bypasses the raw CDN's branch cache outright.
+    [ValidatePattern('^$|^[0-9a-fA-F]{7,40}$')]
+    [string]$Commit = '',
+    # Skip the "are these the right two vaults" confirmation.
+    [switch]$Yes,
+
+    # ---- Set by the supervisor on the workers it launches ----
+    # Overrides the id list named in the config, so a worker reads only its own shard.
+    [string]$IdFile = '',
+    # The same, for workflows whose input is a map rather than a list.
+    [string]$MapFile = '',
+    # Name the id columns rather than letting the header wording decide.
+    [string]$SourceColumn = '',
+    [string]$TargetColumn = '',
+    # map write: where the canonical copy goes.
+    [string]$OutFile = '',
+    # Marks a worker. A worker must not write the session file it shares with the
+    # supervisor and its siblings: several processes rewriting one JSON file the moment
+    # their sessions expire is how a torn file gets written.
+    [switch]$Worker,
+    # Credentials exported by the supervisor, when it had any. A worker runs hidden and
+    # cannot be asked, so without this it cannot renew an expired session.
+    [string]$CredentialFile = '',
+    # How many processes move the work. 0 means "whatever [limits] workers says".
+    [ValidateRange(0, 16)]
+    [int]$Workers = 0
+)
+
+$ScriptVersion = '2026.09.06-4'
+
+Set-StrictMode -Version 2.0
+$ErrorActionPreference = 'Stop'
+$ProgressPreference    = 'SilentlyContinue'
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
+$here = $PSScriptRoot
+if (-not $here) { $here = (Get-Location).ProviderPath }
+
+$Repo = 'kevinnassery/veeva'
+
+# The module, in load order, and the manifest `update` fetches. Derived from one list so
+# that adding a part cannot leave it undelivered - a dispatcher calling a function from a
+# file nobody downloads is the failure this arrangement exists to make impossible.
+$VaultKitParts = @('Log', 'Config', 'Auth', 'Http', 'Ids', 'Run', 'Workers', 'Attachments', 'Documents', 'Submissions', 'Roles', 'Verify')
+
+# vault.ps1 goes LAST: it is the file being executed, and it is the one whose failure to
+# land leaves the least broken folder behind.
+# Two files. The module is inside vault.ps1 in the built script, so there is nothing else
+# to fetch and nothing that can arrive at a different version from the dispatcher that
+# calls it - which is the whole reason the parts were folded in.
+$Manifest = @('README.md', 'vault.ps1')
+
+# Fetched only when it is absent. It holds the vault hostnames someone typed in, and an
+# update that overwrote them would be data loss dressed up as a refresh.
+$ManifestIfAbsent = @('vault.ini')
+
+$verb = "$Command".ToLowerInvariant()
+$sub  = "$Subcommand".ToLowerInvariant()
+
+# `update` has to run with nothing but this file on disk. A first run is exactly the case
+# where VaultKit\ is not there yet, and a bootstrap that needs eight files fetched by
+# hand to reach the command that fetches files is not a bootstrap. version and help are
+# answerable without the module too, so they load nothing either.
+# >>> VAULTKIT INLINE >>>
+# In the SOURCE tree the module is loaded from VaultKit\ beside this file. In the file
+# that is built and shipped, everything between these markers is replaced by the parts
+# themselves, so what an operator downloads is one self-contained script. Never edit the
+# built vault.ps1 at the repo root - edit src/vault.ps1 or VaultKit\*.ps1 and rebuild.
+if ($verb -notin @('update', 'version', 'help', '')) {
+    foreach ($part in $VaultKitParts) {
+        $f = Join-Path (Join-Path $here 'VaultKit') "$part.ps1"
+        if (-not (Test-Path -LiteralPath $f)) {
+            throw "VaultKit\$part.ps1 is missing next to vault.ps1. Run: .\vault.ps1 update"
+        }
+        . $f
+    }
+}
+# <<< VAULTKIT INLINE <<<
+
+# --------------------------------------------------------------------------------------
+# Config and logging, needed by everything except help
+# --------------------------------------------------------------------------------------
+
+function Initialize-VaultRun {
+    param([string]$LogName)
+    Set-VaultNoPrompt -Value ([bool]$NoPrompt)
+    if (-not $ConfigFile) { $ConfigFile = Join-Path $here 'vault.ini' }
+    $script:Cfg        = Import-VaultConfig -Path $ConfigFile
+    $script:CfgPath    = $ConfigFile
+    $script:Api        = Get-VaultSetting -Config $script:Cfg -Section vault -Key api -Default 'v26.2'
+    $script:SourceHost = Get-VaultHostName (Get-VaultSetting -Config $script:Cfg -Section vault -Key source)
+    $script:TargetHost = Get-VaultHostName (Get-VaultSetting -Config $script:Cfg -Section vault -Key target)
+
+    $root = $OutputRoot
+    if (-not $root) { $root = Get-VaultSetting -Config $script:Cfg -Section paths -Key output -Default '.' }
+    $root = [IO.Path]::GetFullPath([IO.Path]::Combine((Get-Location).ProviderPath, $root))
+    if ($root.Length -gt 3) { $root = $root.TrimEnd('\') }   # not on a bare drive root: C:\ trimmed to C: means the CWD on C:
+    $script:Out = $root
+
+    if ($LogName) { [void](Start-VaultLog -Directory $root -Name $LogName) }
+
+    if ($Worker) {
+        Set-VaultSessionPersist -Value $false
+        Set-VaultLockEnabled -Value $false
+    }
+    if ($CredentialFile) {
+        $n = Import-VaultCredentials -Path $CredentialFile
+        Write-VaultLog "worker: $n credential(s) loaded"
+    }
+}
+
+function New-VaultContext {
+    # Everything a workflow needs, resolved once. Passed as one object so a command
+    # signature stays readable and nothing reaches for a script-scope global.
+    param([string]$Section = '', [string]$MapKey = '', [string]$IdsKey = '')
+    $map = $null
+    $ids = @()
+    if ($MapKey) {
+        $file = $MapFile
+        if (-not $file) { $file = Get-VaultSetting -Config $script:Cfg -Section $Section -Key $MapKey -Default '' }
+        if (-not $file) { throw "[$Section] $MapKey is not set in $($script:CfgPath)" }
+        $map = Import-VaultIdMap -Path $file -SourceColumn $SourceColumn -TargetColumn $TargetColumn -LegacyNames @('map.csv')
+    }
+    if ($IdsKey) {
+        $file = $IdFile
+        if (-not $file) { $file = Get-VaultSetting -Config $script:Cfg -Section $Section -Key $IdsKey -Default '' }
+        if (-not $file) { throw "[$Section] $IdsKey is not set in $($script:CfgPath)" }
+        $ids = Import-VaultIdList -Path $file -LegacyNames @('sourcedocids.txt')
+    }
+
+    $tpath = $TargetPath
+    if (-not $tpath) { $tpath = Get-VaultSetting -Config $script:Cfg -Section documents -Key path -Default '' }
+
+    # Vault requires parts of at least 5MB (except the last) and at most 52MB. Clamped
+    # rather than rejected: a number outside the range in an ini is a typo, and failing
+    # the whole run over it hours into a migration helps nobody.
+    $part = [int](Get-VaultSetting -Config $script:Cfg -Section limits -Key part -Default 25)
+    if ($part -lt 5)  { $part = 5 }
+    if ($part -gt 52) { $part = 52 }
+
+    $nWorkers = $Workers
+    if ($nWorkers -le 0) { $nWorkers = [int](Get-VaultSetting -Config $script:Cfg -Section limits -Key workers -Default 1) }
+    if ($nWorkers -lt 1)  { $nWorkers = 1 }
+    if ($nWorkers -gt 16) { $nWorkers = 16 }
+
+    return [pscustomobject]@{
+        Api        = $script:Api
+        ScriptPath = (Join-Path $here 'vault.ps1')
+        ConfigPath = $script:CfgPath
+        Workers    = $nWorkers
+        SourceHost = $script:SourceHost
+        TargetHost = $script:TargetHost
+        # Roles repairs ONE vault - the target of the migration - so it reads this
+        # rather than choosing between the two.
+        VaultHost  = $script:TargetHost
+        Out        = $script:Out
+        Scratch    = (New-VaultScratch -Root $script:Out -Name 'scratch')
+        Map        = $map
+        Ids        = $ids
+        TargetPath = $tpath
+        # ---- submissions ----
+        # One vault: the dossiers are already on the TARGET's File Staging and are
+        # imported into the TARGET. The source vault is never touched by this workflow.
+        StagingPath         = (Get-VaultSetting -Config $script:Cfg -Section submissions -Key path -Default '')
+        LookupField         = (Get-VaultSetting -Config $script:Cfg -Section submissions -Key lookupfield -Default 'name__v')
+        SubmissionMatch     = (Get-VaultSetting -Config $script:Cfg -Section submissions -Key submissionmatch -Default 'prefix')
+        ApplicationObject   = (Get-VaultSetting -Config $script:Cfg -Section submissions -Key applicationobject -Default 'application__v')
+        ApplicationKeyField = (Get-VaultSetting -Config $script:Cfg -Section submissions -Key applicationkeyfield -Default 'name__v')
+        ApplicationRefField = (Get-VaultSetting -Config $script:Cfg -Section submissions -Key applicationreffield -Default 'application__v')
+        DossierFormatId     = (Get-VaultSetting -Config $script:Cfg -Section submissions -Key dossierformatid -Default '')
+        JobTimeoutMinutes   = [int](Get-VaultSetting -Config $script:Cfg -Section submissions -Key jobtimeoutminutes -Default 120)
+        JobPollSeconds      = [int](Get-VaultSetting -Config $script:Cfg -Section submissions -Key jobpollseconds -Default 20)
+        PartSizeMB = $part
+        ReserveMB  = [int](Get-VaultSetting -Config $script:Cfg -Section limits -Key reserve -Default 2048)
+        Existing   = $Existing
+        WhatIf     = [bool]$WhatIfPreference
+    }
+}
+
+function Confirm-VaultsForRun {
+    # Both vaults established, proven and shown before any work starts. Prompted for
+    # separately, because the source is a production vault and the target belongs to a
+    # different organisation - finding out which of the two credentials was wrong hours
+    # into a transfer is exactly what this prevents.
+    $vaults = @()
+    if ($script:SourceHost) { $vaults += @{ Role = 'source'; Name = $script:SourceHost } }
+    if ($script:TargetHost -and $script:TargetHost -ne $script:SourceHost) {
+        $vaults += @{ Role = 'target'; Name = $script:TargetHost }
+    }
+    if (-not $vaults.Count) { throw "No vaults configured. Set [vault] source = ... in $($script:CfgPath)" }
+    return Confirm-VaultSessions -Vaults $vaults -ApiVersion $script:Api -Yes:$Yes
+}
+
+function Get-ConfiguredHosts {
+    $hosts = @()
+    if ($script:SourceHost) { $hosts += $script:SourceHost }
+    if ($script:TargetHost -and $script:TargetHost -ne $script:SourceHost) { $hosts += $script:TargetHost }
+    if (-not $hosts.Count) { throw "No vaults configured. Set [vault] source = ... in $($script:CfgPath)" }
+    return $hosts
+}
+
+# --------------------------------------------------------------------------------------
+# Update
+#
+# Self-contained on purpose: nothing here may call into VaultKit, because the folder this
+# runs in may not have VaultKit yet.
+#
+# Overwriting vault.ps1 while it is the script being executed is safe. PowerShell reads
+# and parses the whole file before running any of it, and holds no handle on it after
+# that. cmd.exe reads a .bat line by line as it goes, which is why the fetcher this
+# replaces could never update itself without risking a half-read script.
+# --------------------------------------------------------------------------------------
+
+function Get-VaultHeadSha {
+    # One call for the head commit. raw.githubusercontent.com caches the branch URL for
+    # five minutes and ignores no-cache, so pulling from /main can hand back the PREVIOUS
+    # version of a file - which looks exactly like a fix that did not work. A SHA-pinned
+    # URL is immutable and always current. This endpoint returns the bare SHA and is not
+    # behind that cache.
+    try {
+        $r = Invoke-WebRequest -Uri "https://api.github.com/repos/$Repo/commits/main" `
+                 -Headers @{ Accept = 'application/vnd.github.sha' } -UseBasicParsing -TimeoutSec 30
+        $body = $r.Content
+        if ($body -is [byte[]]) { $body = [Text.Encoding]::ASCII.GetString($body) }
+        $sha = "$body".Trim()
+        if ($sha -match '^[0-9a-f]{40}$') { return $sha }
+    }
+    catch { }
+    return ''
+}
+
+function Get-VaultFileVersion {
+    param([Parameter(Mandatory)][string]$Path)
+    try {
+        foreach ($line in (Get-Content -LiteralPath $Path -TotalCount 80)) {
+            if ($line -like '$ScriptVersion = *') {
+                $parts = $line.Split("'")
+                if ($parts.Count -ge 2) { return $parts[1] }
+            }
+        }
+    }
+    catch { }
+    return ''
+}
+
+function Test-VaultRunInProgress {
+    # A lock only means something if its process is still alive. A crash leaves the file
+    # behind, and making someone delete it by hand to get on with their day is a bad
+    # trade for a guard that is meant to protect them.
+    param([Parameter(Mandatory)][string]$Folder)
+    $busy = $false
+    foreach ($lock in @(Get-ChildItem -LiteralPath $Folder -Filter '.run-*.lock' -File -ErrorAction SilentlyContinue)) {
+        $owner = ''
+        foreach ($line in @(Get-Content -LiteralPath $lock.FullName -ErrorAction SilentlyContinue)) {
+            if ($line -match '^pid=(\d+)') { $owner = $Matches[1] }
+        }
+        $alive = $false
+        if ($owner) { $alive = [bool](Get-Process -Id ([int]$owner) -ErrorAction SilentlyContinue) }
+        if ($alive) {
+            Write-Host "    $($lock.Name) - pid $owner is still running" -ForegroundColor Yellow
+            $busy = $true
+        }
+        else {
+            Write-Host "  cleared stale lock $($lock.Name) (pid $owner is not running)"
+            try { Remove-Item -LiteralPath $lock.FullName -Force -WhatIf:$false } catch { }
+        }
+    }
+    return $busy
+}
+
+function Invoke-Update {
+    Write-Host ''
+    Write-Host "vault $ScriptVersion - update"
+    Write-Host "Folder : $here"
+
+    if (Test-VaultRunInProgress -Folder $here) {
+        if (-not $Force) {
+            Write-Host ''
+            Write-Host '  REFUSING TO UPDATE - a run is still going. Let it finish, or pass -Force.' -ForegroundColor Red
+            exit 1
+        }
+        Write-Host '  -Force given: updating over a running job.' -ForegroundColor Yellow
+    }
+
+    if ($Commit) {
+        # Asked for by hash: no API call, no branch, nothing to resolve. Immutable, so
+        # the CDN cache cannot serve anything else under it.
+        $sha  = $Commit.ToLowerInvariant()
+        $base = "https://raw.githubusercontent.com/$Repo/$sha"
+        Write-Host "Commit : $sha (pinned)"
+    }
+    else {
+        $sha = Get-VaultHeadSha
+        if ($sha) {
+            $base = "https://raw.githubusercontent.com/$Repo/$sha"
+            Write-Host "Commit : $sha"
+        }
+        else {
+            $base = "https://raw.githubusercontent.com/$Repo/main"
+            Write-Host '  WARNING: could not read the head commit - falling back to the main branch,' -ForegroundColor Yellow
+            Write-Host '  which the CDN caches for five minutes. Files may be out of date, and an old' -ForegroundColor Yellow
+            Write-Host '  one looks exactly like a fix that did not work. Pass -Commit <sha> to pin.' -ForegroundColor Yellow
+        }
+    }
+    Write-Host ''
+
+    # Everything is fetched to a staging folder first and only moved into place once all
+    # of it has arrived. A half-applied update leaves a dispatcher from one version
+    # calling a module from another; the fetcher this replaces could only warn about that
+    # after the fact, having already made the mess.
+    $stage = Join-Path $here ('.update-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    New-Item -ItemType Directory -Path $stage -Force -WhatIf:$false | Out-Null
+    try {
+        $staged = [ordered]@{}
+        foreach ($rel in $Manifest) {
+            $tmp = Join-Path $stage ($rel -replace '[\\/]', '_')
+            try {
+                Invoke-WebRequest -Uri "$base/$rel" -OutFile $tmp -UseBasicParsing -TimeoutSec 120
+            }
+            catch {
+                Write-Host "  FAILED    $rel" -ForegroundColor Red
+                Write-Host "            $_" -ForegroundColor Red
+                Write-Host ''
+                Write-Host '  Nothing here was changed. Run update again.' -ForegroundColor Red
+                exit 1
+            }
+            $staged[$rel] = $tmp
+        }
+
+        # Nothing else to fetch. When the module was twelve separate downloads this is
+        # where a version added since had to be discovered and pulled, or the new
+        # dispatcher would land and fail on its first run saying a file was missing -
+        # observed exactly that when Roles and Verify were added. The parts now travel
+        # inside vault.ps1, so that whole class of half-applied update is gone.
+
+        # One version across the whole set. They all come from one commit, so a mismatch
+        # means the repo itself shipped inconsistent files rather than that a download
+        # was missed - either way it is worth saying out loud before anything runs.
+        $versions = @()
+        foreach ($rel in $staged.Keys) {
+            $v = Get-VaultFileVersion -Path $staged[$rel]
+            if ($v) { $versions += $v }
+        }
+        $versions = @($versions | Sort-Object -Unique)
+
+        foreach ($rel in $staged.Keys) {
+            $dest = [IO.Path]::GetFullPath((Join-Path $here $rel))
+            $dir  = Split-Path -Parent $dest
+            if (-not (Test-Path -LiteralPath $dir)) {
+                New-Item -ItemType Directory -Path $dir -Force -WhatIf:$false | Out-Null
+            }
+            $same = $false
+            if (Test-Path -LiteralPath $dest) {
+                try {
+                    $same = (Get-FileHash -LiteralPath $dest -Algorithm SHA256).Hash -eq
+                            (Get-FileHash -LiteralPath $staged[$rel] -Algorithm SHA256).Hash
+                }
+                catch { $same = $false }
+            }
+            if ($same) {
+                Write-Host "  unchanged $rel"
+                continue
+            }
+            try {
+                Move-Item -LiteralPath $staged[$rel] -Destination $dest -Force -WhatIf:$false
+                Write-Host "  updated   $rel" -ForegroundColor Green
+            }
+            catch {
+                Write-Host "  FAILED    $rel - could not replace it: $_" -ForegroundColor Red
+                Write-Host '  Some files were already updated. Run update again.' -ForegroundColor Red
+                exit 1
+            }
+        }
+
+        Write-Host ''
+        if ($sha) { Write-Host "Repeat this exact set with:  .\vault.ps1 update -Commit $sha" }
+        if ($versions.Count -eq 1) { Write-Host "All files at version $($versions[0])." }
+        elseif ($versions.Count -gt 1) {
+            Write-Host "  WARNING: $($versions.Count) different versions in this folder: $($versions -join ', ')" -ForegroundColor Yellow
+        }
+    }
+    finally { Remove-Item -LiteralPath $stage -Recurse -Force -WhatIf:$false -ErrorAction SilentlyContinue }
+
+    foreach ($rel in $ManifestIfAbsent) {
+        $dest = [IO.Path]::GetFullPath((Join-Path $here $rel))
+        if (Test-Path -LiteralPath $dest) {
+            Write-Host "  yours     $rel (left alone)"
+            continue
+        }
+        try {
+            Invoke-WebRequest -Uri "$base/$rel" -OutFile $dest -UseBasicParsing -TimeoutSec 120
+            Write-Host "  written   $rel - fill in [vault] source and target before running anything" -ForegroundColor Yellow
+        }
+        catch { Write-Host "  FAILED    $rel - $_" -ForegroundColor Red }
+    }
+
+    # Files from the flat layout this replaces. Reported, never deleted: they are in
+    # someone's working folder, and a tidy-up that removed the wrong file in the middle
+    # of a migration would be a bad trade.
+    $retired = @('attachments.bat', 'validator.bat', 'refresh.bat', 'starting-cleanup.bat', 'vault.bat',
+                 'Sync-VaultAttachments.ps1', 'Validate-VaultAttachments.ps1', 'Transfer-VaultAttachments.ps1',
+                 'Transfer-VaultDocuments.ps1', 'Get-VaultSession.ps1', 'Probe-Vault.ps1')
+    $found = @($retired | Where-Object { Test-Path -LiteralPath (Join-Path $here $_) })
+    if ($found.Count) {
+        Write-Host ''
+        Write-Host "  $($found.Count) file(s) here are from the old layout and nothing loads them:" -ForegroundColor Yellow
+        Write-Host "    $($found -join ', ')" -ForegroundColor Yellow
+        Write-Host '  Delete them once you are sure nothing of yours depends on them.' -ForegroundColor Yellow
+    }
+
+    Write-Host ''
+    Write-Host 'Next: .\vault.ps1 login' -ForegroundColor Green
+    Write-Host ''
+}
+
+# --------------------------------------------------------------------------------------
+# Commands
+# --------------------------------------------------------------------------------------
+
+function Invoke-Login {
+    Initialize-VaultRun -LogName 'login'
+    $hosts = Get-ConfiguredHosts
+    Write-VaultLog "vault $ScriptVersion - logging in to $($hosts.Count) vault(s)"
+
+    # One prompt per vault. A production vault and the vault being migrated into are
+    # commonly two separate accounts with two separate passwords, and reusing the first
+    # answer against the second vault fails in a way that reads like a wrong password
+    # rather than the wrong account. -Shared is the opt-in for one account that genuinely
+    # does exist on both sides.
+    if ($Shared) {
+        Write-VaultLog "-Shared: one credential for all $($hosts.Count) vault(s)"
+        $cred = Get-VaultCredential -VaultHost $hosts[0] -Message "Vault credentials (used for all $($hosts.Count) vault(s))"
+        foreach ($h in $hosts) { Set-VaultCredential -VaultHost $h -Credential $cred }
+    }
+
+    # Every vault is tried, not just up to the first failure. Stopping at the source
+    # means never finding out whether the target credentials were right either, so a
+    # wrong password costs two rounds of prompting instead of one.
+    $failed = @()
+    foreach ($h in $hosts) {
+        $role = if ($h -eq $script:SourceHost) { 'source' } else { 'target' }
+        Write-VaultLog "$role vault: $h"
+        try { [void](Connect-VaultHost -VaultHost $h -ApiVersion $script:Api) }
+        catch {
+            $failed += $h
+            Write-VaultLog "$_" 'ERROR'
+        }
+    }
+    if ($failed.Count) {
+        Write-VaultLog '----------------------------------------------------------------'
+        Write-VaultLog "$($failed.Count) of $($hosts.Count) vault(s) did not authenticate: $($failed -join ', ')" 'ERROR'
+        if ($failed.Count -lt $hosts.Count) {
+            Write-VaultLog 'The others are cached, so only the failures above need another try.' 'WARN'
+        }
+        exit 1
+    }
+
+    [void](Confirm-VaultSessions -Vaults @($hosts | ForEach-Object {
+        @{ Role = $(if ($_ -eq $script:SourceHost) { 'source' } else { 'target' }); Name = $_ }
+    }) -ApiVersion $script:Api -Yes)
+
+    Write-VaultLog "Sessions cached in $(Get-VaultSessionPath)" 'OK'
+    Write-VaultLog 'That file is a live token for your account. Treat it like a password; vault logout removes it.' 'WARN'
+}
+
+function Invoke-Whoami {
+    Initialize-VaultRun
+    $sessions = Read-VaultSessions
+    if (-not $sessions.Count) {
+        Write-VaultLog "No cached sessions. Run: .\vault.ps1 login" 'WARN'
+        return
+    }
+    foreach ($h in ($sessions.Keys | Sort-Object)) {
+        $e   = $sessions[$h]
+        $age = ''
+        try {
+            $t = [datetime]::Parse("$(Get-VaultField $e 'obtained' '')").ToUniversalTime()
+            $age = ' ({0:N0} min ago)' -f ((Get-Date).ToUniversalTime() - $t).TotalMinutes
+        } catch { }
+        Write-VaultLog ("{0}  userId {1}  vaultId {2}{3}" -f $h, (Get-VaultField $e 'userId' '?'), (Get-VaultField $e 'vaultId' '?'), $age)
+    }
+    Write-VaultLog "Session file: $(Get-VaultSessionPath)"
+}
+
+function Invoke-Logout {
+    Initialize-VaultRun
+    if (Clear-VaultSessions) { Write-VaultLog 'Session file deleted.' 'OK' }
+    else { Write-VaultLog 'No session file to delete.' }
+}
+
+function Invoke-Probe {
+    Initialize-VaultRun -LogName 'probe'
+    Write-VaultLog "vault $ScriptVersion - probe (read only, nothing is changed)"
+
+    foreach ($h in (Get-ConfiguredHosts)) {
+        $role = if ($h -eq $script:SourceHost) { 'source' } else { 'target' }
+        Write-VaultLog '----------------------------------------------------------------'
+        Write-VaultLog "$role vault: $h"
+
+        # One attempt, no backoff. Probe is a diagnostic: four retries with exponential
+        # waits means an unreachable vault takes five minutes to report itself, which is
+        # the opposite of what someone running a probe wants.
+        $me = $null
+        try { $me = Invoke-VaultApi -VaultHost $h -ApiVersion $script:Api -Method GET -Path '/objects/users/me' -MaxRetries 1 }
+        catch { Write-VaultLog "Could not read the user: $_" 'ERROR'; continue }
+
+        $u       = Get-VaultField (@(Get-VaultField $me 'users' @()) | Select-Object -First 1) 'user' $null
+        $uid     = "$(Get-VaultField $u 'id' '')"
+        $profile = "$(Get-VaultField $u 'security_profile__v' '')"
+        $isAdmin = ($profile -match 'vault_owner|system_admin')
+
+        Write-VaultLog "  user      $(Get-VaultField $u 'user_name__v' '')"
+        Write-VaultLog "  id        $uid"
+        Write-VaultLog "  profile   $profile"
+        Write-VaultLog "  staging   /u$uid  $(if ($isAdmin) { '(admin: paths are absolute from the staging root)' } else { '(non-admin: paths are relative to this folder)' })"
+
+        try {
+            $items = Invoke-VaultApi -VaultHost $h -ApiVersion $script:Api -Method GET `
+                        -Path '/services/file_staging/items/?recursive=false&limit=20' -MaxRetries 1
+            $n = @(Get-VaultField $items 'data' @()).Count
+            Write-VaultLog "  staging root is listable ($n item(s) visible)" 'OK'
+        }
+        catch { Write-VaultLog "  staging root not listable: $_" 'WARN' }
+    }
+    Write-VaultLog '----------------------------------------------------------------'
+    Write-VaultLog "Log: $script:VaultLogFile"
+}
+
+function Invoke-Attachments {
+    param([string]$Action)
+    switch ($Action) {
+        'sync' {
+            Initialize-VaultRun -LogName 'attachments-sync'
+            Start-VaultLock -Name 'attachments'
+            try {
+                Write-VaultLog "vault $ScriptVersion - attachments sync"
+                [void](Confirm-VaultsForRun)
+                $ctx = New-VaultContext -Section 'attachments' -MapKey 'map'
+                $bad = Invoke-VaultAttachmentsSync -Context $ctx -Plan:$Plan `
+                          -ReplaceDiffering:$ReplaceDiffering -Prefilter:$Prefilter `
+                          -TestCount $Test -Limit $Limit
+                Write-VaultLog "Log: $script:VaultLogFile"
+                if ($bad -gt 0) { exit 1 }
+            }
+            finally { Stop-VaultLock }
+        }
+        'verify' {
+            Initialize-VaultRun -LogName 'attachments-verify'
+            Start-VaultLock -Name 'attachments'
+            try {
+                Write-VaultLog "vault $ScriptVersion - attachments verify ($Depth)"
+                [void](Confirm-VaultsForRun)
+                $ctx = New-VaultContext -Section 'attachments' -MapKey 'map'
+                $bad = Invoke-VaultAttachmentsVerify -Context $ctx -Depth $Depth -TestCount $Test -Limit $Limit
+                Write-VaultLog "Log: $script:VaultLogFile"
+                if ($bad -gt 0) { exit 1 }
+            }
+            finally { Stop-VaultLock }
+        }
+        default {
+            Write-Host "vault.ps1 attachments <sync|verify>" -ForegroundColor Red
+            exit 2
+        }
+    }
+}
+
+function Resolve-VaultSubmissionsHost {
+    # Which vault holds the Submissions Archive - resolved, then confirmed.
+    #
+    # ONE vault: the dossiers are already on its File Staging and are imported into it.
+    # Nothing here reads the migration's source, so confirming both would make an
+    # operator log in to a production vault this command never touches.
+    #
+    # Which one is a question, not a given, and File Staging being shared across the
+    # instances on a domain means it is a question the staging path cannot answer. This
+    # used to default to [vault] target and merely SAY so; a stated default is still a
+    # default, and it is read by the same person who is about to hit Enter. It is now
+    # offered as a suggestion inside the prompt instead - see Confirm-VaultSubmissionsVault.
+    param([switch]$Yes)
+    $candidate = ''
+    $source    = ''
+    if ($VaultHost) {
+        $candidate = $VaultHost
+        $source    = '-VaultHost'
+    }
+    else {
+        $candidate = Get-VaultSetting -Config $script:Cfg -Section submissions -Key vault -Default ''
+        if ($candidate) { $source = '[submissions] vault' }
+    }
+    return (Confirm-VaultSubmissionsVault -ConfigPath $script:CfgPath -Candidate $candidate `
+                -Suggested $script:TargetHost -ApiVersion $script:Api -Source $source -Yes:$Yes)
+}
+
+function Invoke-Submissions {
+    param([string]$Action)
+    switch ($Action) {
+        'list' {
+            Initialize-VaultRun -LogName 'submissions-list'
+            Write-VaultLog "vault $ScriptVersion - submissions list"
+            $ctx = New-VaultContext -Section 'submissions'
+            $ctx.VaultHost = Resolve-VaultSubmissionsHost -Yes:$Yes
+            $ctx.StagingPath = Confirm-VaultStagingPath -ConfigPath $script:CfgPath -Path $ctx.StagingPath -Yes:$Yes
+            [void](Invoke-VaultSubmissionsList -Context $ctx -Limit $Limit)
+            Write-VaultLog "Log: $script:VaultLogFile"
+        }
+        'import' {
+            Initialize-VaultRun -LogName 'submissions-import'
+            Start-VaultLock -Name 'submissions'
+            try {
+                Write-VaultLog "vault $ScriptVersion - submissions import$(if ($Plan) { ' (plan)' })"
+                $ctx = New-VaultContext -Section 'submissions'
+                $ctx.VaultHost = Resolve-VaultSubmissionsHost -Yes:$Yes
+                $ctx.StagingPath = Confirm-VaultStagingPath -ConfigPath $script:CfgPath -Path $ctx.StagingPath -Yes:$Yes
+                $bad = Invoke-VaultSubmissionsImport -Context $ctx -Plan:$Plan -TestCount $Test -Limit $Limit
+                Write-VaultLog "Log: $script:VaultLogFile"
+                if ($bad -gt 0) { exit 1 }
+            }
+            finally { Stop-VaultLock }
+        }
+        default {
+            Write-Host "vault.ps1 submissions <list|import>" -ForegroundColor Red
+            Write-Host "  list            what is under [submissions] path. No vault writes, no VQL" -ForegroundColor Red
+            Write-Host "  import -Plan    resolve every submission id, import nothing" -ForegroundColor Red
+            Write-Host "  import          do it for real" -ForegroundColor Red
+            exit 2
+        }
+    }
+}
+
+function Invoke-Documents {
+    param([string]$Action)
+    switch ($Action) {
+        { $_ -in @('stage', 'transfer') } {
+            Initialize-VaultRun -LogName 'documents-stage'
+            Start-VaultLock -Name 'documents'
+            try {
+                Write-VaultLog "vault $ScriptVersion - documents stage"
+                [void](Confirm-VaultsForRun)
+                $ctx = New-VaultContext -Section 'documents' -IdsKey 'ids'
+                $bad = Invoke-VaultDocumentsStage -Context $ctx -Plan:$Plan -TestCount $Test -Limit $Limit
+                Write-VaultLog "Log: $script:VaultLogFile"
+                if ($bad -gt 0) { exit 1 }
+            }
+            finally { Stop-VaultLock }
+        }
+        'verify' {
+            # A command of its own, never chained onto the end of a transfer: a check
+            # that only runs as the last step of the thing it checks cannot be re-run
+            # against a finished migration, and stops running exactly when the transfer
+            # fails - which is when it is worth the most.
+            Initialize-VaultRun -LogName 'documents-verify'
+            Start-VaultLock -Name 'documents'
+            try {
+                Write-VaultLog "vault $ScriptVersion - documents verify ($Depth)"
+                [void](Confirm-VaultsForRun)
+                $ctx = New-VaultContext -Section 'documents' -IdsKey 'ids'
+                $bad = Invoke-VaultDocumentsVerify -Context $ctx -Depth $Depth -TestCount $Test -Limit $Limit -Staged:$Staged
+                Write-VaultLog "Log: $script:VaultLogFile"
+                if ($bad -gt 0) { exit 1 }
+            }
+            finally { Stop-VaultLock }
+        }
+        'list' {
+            Initialize-VaultRun -LogName 'documents-list'
+            Write-VaultLog "vault $ScriptVersion - documents list (read only, nothing is changed)"
+            [void](Confirm-VaultsForRun)
+            $ctx = New-VaultContext -Section 'documents'
+            [void](Invoke-VaultDocumentsList -Context $ctx)
+            Write-VaultLog "Log: $script:VaultLogFile"
+        }
+        default {
+            Write-Host "vault.ps1 documents <stage|verify|list>" -ForegroundColor Red
+            exit 2
+        }
+    }
+}
+
+function Invoke-Roles {
+    # Document Sharing Settings a migration left empty.
+    #
+    # ONE vault. This repairs the target of a migration rather than comparing two, so the
+    # source is never consulted and never confirmed - being asked to confirm a vault a
+    # command will not touch teaches people to say yes without reading.
+    param([string]$Action)
+
+    if ($Action -notin @('survey', 'probe', 'explain', 'mdl', 'scope', 'plan', 'assign', 'verify', 'audit')) {
+        Write-Host 'vault.ps1 roles <survey|probe|explain|mdl|scope|plan|assign|verify|audit>' -ForegroundColor Red
+        exit 2
+    }
+
+    Initialize-VaultRun -LogName "roles-$Action"
+    Start-VaultLock -Name 'roles'
+    try {
+        Write-VaultLog "vault $ScriptVersion - roles $Action"
+        if (-not $script:TargetHost) { throw "No vault configured. Set [vault] target = ... in $($script:CfgPath)" }
+        [void](Confirm-VaultSessions -Vaults @(@{ Role = 'target'; Name = $script:TargetHost }) `
+                   -ApiVersion $script:Api -Yes:$Yes)
+
+        # A command of its own, and it needs no document list and no map: it reads the
+        # claims out of the results file a run wrote. Ahead of everything that resolves a
+        # scope, because it has none - it asked for [roles] map and refused to run
+        # without one, for a file it never opens.
+        #
+        # Never chained onto assign either. Vault ignores group ids it cannot grant and
+        # still answers SUCCESS, so the run that made the claim is the last thing that
+        # should be trusted to check it.
+        if ($Action -eq 'verify') {
+            $ctxV = New-VaultContext -Section 'roles'
+            $bad = Invoke-VaultRolesVerify -Context $ctxV -Slow:$Slow -Limit $Limit -ExpectIds $ExpectIds -All:$All
+            Write-VaultLog "Log: $script:VaultLogFile"
+            if ($bad -gt 0) { exit 1 }
+            return
+        }
+
+        # Reads one document type's whole MDL component. No scope, no documents.
+        if ($Action -eq 'mdl') {
+            if (-not $Type) { throw "roles mdl needs -Type '<document type label>'. roles survey lists them." }
+            $ctxM = New-VaultContext -Section 'roles'
+            $bad = Invoke-VaultDocTypeMdlDump -Context $ctxM -TypeLabel $Type -SubtypeLabel $Subtype `
+                       -ClassificationLabel $Classification
+            Write-VaultLog "Log: $script:VaultLogFile"
+            if ($bad -gt 0) { exit 1 }
+            return
+        }
+
+        $mapSetting = Get-VaultSetting -Config $script:Cfg -Section roles -Key map -Default ''
+        if ($Where -and $mapSetting -and -not $MapFile) {
+            # Both name the documents to repair. The map says what the migration produced;
+            # a query says what matches a condition today, and those stop being the same
+            # set the moment anyone adds a document by hand.
+            Write-VaultLog "-Where given, so [roles] map is ignored for this run" 'WARN'
+        }
+
+        # The window is the required half. The user defaults to this session's own
+        # account - which is the one that created the documents, so asking for it again
+        # only creates the chance to type a different id by mistake. There is no
+        # equivalent default for "how far back": every answer is a different blast
+        # radius, and none of them is the obvious one.
+        $scoped = ($WithinHours -gt 0)
+        if ($scoped -and $Where) { throw '-Where and -WithinHours both name the scope. Pass one.' }
+        if ($Action -in @('scope', 'plan', 'assign') -and -not $scoped) {
+            throw @'
+A permission sync has to say how far back to go:
+
+    roles scope  -WithinHours <n>     just the ids, nothing else
+    roles plan   -WithinHours <n>
+    roles assign -WithinHours <n>
+
+-WithinHours is required. This command grants people access to documents, and there
+is no safe default for how much of the past that should cover.
+
+-CreatedBy defaults to this session's own user, which is normally the account that
+created the documents. Pass a numeric user id to name a different one.
+
+roles survey and roles probe write nothing and need no scope.
+'@
+        }
+
+        $ctx = if ($Where -or ($scoped -and -not $mapSetting)) { New-VaultContext -Section 'roles' }
+               else { New-VaultContext -Section 'roles' -MapKey 'map' }
+
+        # -Survey does its own single query and needs no document list, so it answers
+        # before the enumeration every other mode depends on.
+        if ($Action -eq 'survey') {
+            $bad = Invoke-VaultRolesSurvey -Context $ctx -Where $Where
+            Write-VaultLog "Log: $script:VaultLogFile"
+            if ($bad -gt 0) { exit 1 }
+            return
+        }
+
+        # Scope is capped only where this command GUESSED it, never where it was given. A
+        # probe over a named scope surveys all of it: sampling 25 of 577 documents can
+        # miss a subtype entirely and then report that everything is consistent, which is
+        # worse than not having run it.
+        $documents =
+            if ($scoped) {
+                # The directory is read ONLY to turn a name into an id. A numeric id
+                # needs no lookup, and reading every user and group to print a nicer
+                # log line is pages of calls out of the allowance the run itself needs.
+                $dirForScope = if ($CreatedBy -match '^(?i)(me|\d+)$') { $null } else { Get-VaultDirectory -Context $ctx }
+                $found = Get-VaultCreatedByScope -Context $ctx -CreatedBy $CreatedBy -WithinHours $WithinHours `
+                             -Directory $dirForScope -DateField $DateField -CreatorField $CreatorField
+                # Narrowed again by the map where there is one: only documents the
+                # migration produced AND this person made in the window.
+                if ($ctx.Map -and $ctx.Map.Count) { Select-VaultScopeIntersection -Documents $found -Map $ctx.Map }
+                else { $found }
+            }
+            elseif ($Where) { Get-VaultDocumentsByQuery -Context $ctx -Where $Where }
+            elseif ($ctx.Map -and $ctx.Map.Count) {
+                # {TargetId, SourceId} objects, which is what the roles flow reads. Bare
+                # ids are strings, and $doc.TargetId on a string is a terminating error
+                # under StrictMode - so this path threw the moment it was taken.
+                $byTarget = [ordered]@{}
+                foreach ($k in $ctx.Map.Keys) {
+                    $t = "$($ctx.Map[$k])"
+                    if ($t -and -not $byTarget.Contains($t)) { $byTarget[$t] = "$k" }
+                }
+                @($byTarget.Keys | ForEach-Object { [pscustomobject]@{ TargetId = "$_"; SourceId = "$($byTarget[$_])" } })
+            }
+            elseif ($Action -eq 'probe') {
+                Write-VaultLog 'No map or -Where given, so sampling the vault in whatever order it returns.'
+                Write-VaultLog 'This can miss a subtype entirely. Set [roles] map or pass -Where.' 'WARN'
+                Get-VaultDocumentsByQuery -Context $ctx -Where '' -Stop $(if ($Limit -gt 0) { $Limit } else { 200 })
+            }
+            else {
+                # Assign and plan never default to "the whole vault". A probe writes
+                # nothing, so guessing its scope costs an operator some time; guessing the
+                # scope of a run that grants people access costs a great deal more.
+                throw 'No documents named. Set [roles] map, or pass -Where "<VQL condition>".'
+            }
+
+        # The ids the scope resolved to, recorded before anything is read or written. A
+        # count cannot tell a right filter from a wrong one; the ids can.
+        if ($scoped) {
+            $stamp = if ($script:VaultLogFile -and ($script:VaultLogFile -match '(\d{8}-\d{6})')) { $Matches[1] } else { Get-Date -Format 'yyyyMMdd-HHmmss' }
+            [void](Write-VaultScopeManifest -Documents $documents -Path (Join-Path $ctx.Out "roles-scope-$stamp.csv"))
+        }
+
+        $drift = 0
+        if ($scoped -and $ExpectIds) {
+            $stamp2 = if ($script:VaultLogFile -and ($script:VaultLogFile -match '(\d{8}-\d{6})')) { $Matches[1] } else { Get-Date -Format 'yyyyMMdd-HHmmss' }
+            $drift = Compare-VaultScopeToList -Documents $documents -Path $ExpectIds `
+                         -OutPath (Join-Path $ctx.Out "roles-scope-reconcile-$stamp2.csv")
+        }
+
+        # scope stops here on purpose: one query, no document reads, nothing written. It
+        # is the cheapest way to check the filter before spending anything on it.
+        if ($Action -eq 'scope') {
+            Write-VaultLog 'Nothing was read or changed. Run roles plan next to see the assignments.' 'OK'
+            Write-VaultLog "Log: $script:VaultLogFile"
+            if ($drift -gt 0) { exit 1 }
+            return
+        }
+
+        # Reads all three sources and checks they reconcile. Answers the question probe
+        # can only infer: whether the reported defaults ARE the lifecycle rules plus the
+        # type defaults, or whether something else is contributing.
+        if ($Action -eq 'explain') {
+            $dirX   = Get-VaultDirectory -Context $ctx
+            $rulesX = Get-VaultRoleAssignmentRule -Context $ctx -Directory $dirX
+            $bad = Invoke-VaultRolesExplain -Context $ctx -Documents $documents -Rules $rulesX `
+                       -Directory $dirX -Limit $(if ($Limit -gt 0) { $Limit } else { 25 })
+            Write-VaultLog "Log: $script:VaultLogFile"
+            if ($bad -gt 0) { exit 1 }
+            return
+        }
+
+        # Are the documents right, per the lifecycle rules and the type defaults? Not
+        # "did the run do what it recorded" - that is verify - but the question underneath
+        # it, asked of the vault as it stands.
+        if ($Action -eq 'audit') {
+            $dirA   = Get-VaultDirectory -Context $ctx
+            $rulesA = Get-VaultRoleAssignmentRule -Context $ctx -Directory $dirA
+            if (-not $rulesA.Count) { throw 'No lifecycle role assignment rules were returned, so there is nothing to audit against.' }
+            $bad = Invoke-VaultRolesAudit -Context $ctx -Documents $documents -Rules $rulesA `
+                       -Directory $dirA -WithTypeDefaults:$WithTypeDefaults -Limit $Limit
+            Write-VaultLog "Log: $script:VaultLogFile"
+            if ($bad -gt 0) { exit 1 }
+            return
+        }
+
+        if ($Action -eq 'probe') {
+            $bad = Invoke-VaultRolesProbe -Context $ctx -Documents $documents -Limit $Limit
+            Write-VaultLog "Log: $script:VaultLogFile"
+            if ($bad -gt 0) { exit 1 }
+            return
+        }
+
+        # -Defaults names a table, so it settles the question on its own. Saying both
+        # -Defaults and -DesiredFrom something else is a contradiction, not a preference.
+        $table = $null
+        $rules = $null
+        $from  = $DesiredFrom
+        $defaultsPath = $Defaults
+        if (-not $defaultsPath) { $defaultsPath = Get-VaultSetting -Config $script:Cfg -Section roles -Key defaults -Default '' }
+
+        if ($defaultsPath) {
+            if ($PSBoundParameters.ContainsKey('DesiredFrom') -and $DesiredFrom -ne 'Table') {
+                throw "-Defaults and -DesiredFrom $DesiredFrom contradict each other. Drop one."
+            }
+            $from = 'Table'
+        }
+        elseif ($from -eq 'Table') {
+            throw '-DesiredFrom Table needs a table. Pass -Defaults, or set [roles] defaults.'
+        }
+
+        switch ($from) {
+            'Table' {
+                $table = Import-VaultDefaultsTable -Path $defaultsPath -Directory (Get-VaultDirectory -Context $ctx)
+                Write-VaultLog 'Desired state: the defaults table.'
+            }
+            'Lifecycle' {
+                $rules = Get-VaultRoleAssignmentRule -Context $ctx -Directory (Get-VaultDirectory -Context $ctx)
+                Write-VaultLog "Desired state: each document's lifecycle role assignment rules."
+                if (-not $rules.Count) {
+                    throw 'No lifecycle role assignment rules were returned, so there is nothing to apply. Check the account can read Admin configuration, or use -DesiredFrom Document.'
+                }
+            }
+            default {
+                Write-VaultLog 'Desired state: the defaultUsers and defaultGroups Vault reports per document.'
+                Write-VaultLog 'Run roles probe if you have not - it says whether those carry the type defaults too.' 'WARN'
+            }
+        }
+
+        $planning = $Plan -or ($Action -eq 'plan')
+        $bad = Invoke-VaultRolesAssign -Context $ctx -Documents $documents -From $from -Table $table -Rules $rules `
+                   -Assign $Assign -WithTypeDefaults:$WithTypeDefaults -Plan:$planning `
+                   -Role $Role -ExcludeRole $ExcludeRole -BatchSize $BatchSize -Test $Test -Limit $Limit `
+                   -Resume:$Resume
+        Write-VaultLog "Log: $script:VaultLogFile"
+        if ($bad -gt 0) { exit 1 }
+    }
+    finally { Stop-VaultLock }
+}
+
+function Invoke-Query {
+    # Run one VQL query and show what comes back. Read-only, and the only command that
+    # takes a query rather than composing one.
+    #
+    # It exists because every diagnosis of "why did this not resolve" ended with wanting
+    # to ask the vault a question the kit had no way to ask, and the alternative was
+    # hand-rolling a session and a curl. VQL cannot write, so there is nothing here to
+    # guard against beyond a query that pages for ever, which the page cap handles.
+    param([string]$Action)
+    $vql = "$Action".Trim()
+    if (-not $vql) {
+        Write-Host 'vault.ps1 query "<VQL>" -VaultHost <host> [-OutFile results.csv]' -ForegroundColor Red
+        Write-Host '  -VaultHost is required - a query aimed at the wrong vault still answers' -ForegroundColor Red
+        Write-Host '  e.g. vault.ps1 query "SELECT id, name__v FROM submission__v"' -ForegroundColor Red
+        exit 2
+    }
+    Initialize-VaultRun -LogName 'query'
+    Write-VaultLog "vault $ScriptVersion - query"
+
+    # No silent default. Every other command composes its own query against a vault it
+    # was designed for; this one runs whatever it is handed, wherever it is pointed, and
+    # is the command most likely to be typed ad hoc with a flag forgotten. Falling back
+    # to [vault] target would mean a forgotten -VaultHost reads a live migration vault
+    # and returns rows that look like they describe the one you meant.
+    $h = Get-VaultHostName $VaultHost
+    if (-not $h) {
+        throw 'query needs -VaultHost. It is not defaulted, because a query aimed at the wrong vault still answers.'
+    }
+    [void](Confirm-VaultSessions -Vaults @(@{ Role = 'query'; Name = $h }) -ApiVersion $script:Api -Yes:$Yes)
+
+    Write-VaultLog $vql
+    $rows = @(Invoke-VaultQuery -VaultHost $h -ApiVersion $script:Api -Vql $vql)
+    Write-VaultLog "$($rows.Count) row(s)" 'OK'
+
+    if ($OutFile) {
+        $out = Resolve-VaultOutputPath -Path $OutFile
+        $rows | Export-Csv -LiteralPath $out -NoTypeInformation -Encoding UTF8 -WhatIf:$false
+        Write-VaultLog "Written to $out" 'OK'
+    }
+    else {
+        # To the host, not the log: this is a result set being read by a person, and
+        # putting a hundred formatted rows through the timestamped logger makes both the
+        # table and the log worse.
+        $rows | Format-Table -AutoSize | Out-String -Width 4096 | Write-Host
+    }
+    Write-VaultLog "Log: $script:VaultLogFile"
+}
+
+function Invoke-Map {
+    # The map, checked and normalised. Needs no vault: this is about a file, and being
+    # able to answer "is my map usable" without credentials is most of the point - it is
+    # the question you have before a run, not during one.
+    param([string]$Action)
+
+    if ($Action -notin @('check', 'write')) {
+        Write-Host 'vault.ps1 map <check|write>' -ForegroundColor Red
+        Write-Host '  check   read the map and report what it holds. Changes nothing' -ForegroundColor Red
+        Write-Host '  write   rewrite it in the canonical two-column form' -ForegroundColor Red
+        exit 2
+    }
+
+    Initialize-VaultRun -LogName "map-$Action"
+    Write-VaultLog "vault $ScriptVersion - map $Action"
+
+    $file = $MapFile
+    if (-not $file) { $file = Get-VaultSetting -Config $script:Cfg -Section verify -Key map -Default '' }
+    if (-not $file) { $file = Get-VaultSetting -Config $script:Cfg -Section attachments -Key map -Default '' }
+    if (-not $file) { throw 'No map named. Pass -MapFile <csv>, or set [verify] map.' }
+
+    # A map has two columns; a list has one. Both are inputs someone needs checked before
+    # a run, and refusing a list because it is not a map answers a question nobody asked -
+    # the operator wants to know whether their file is usable, not what shape it is.
+    $resolved = Resolve-VaultInput -Path $file
+    if (-not $resolved) { throw "Not found: $file" }
+    $head = @(Get-Content -LiteralPath $resolved -TotalCount 1)
+    $isList = $true
+    if ($head.Count) {
+        foreach ($d in @(',', "`t", ';', '|')) { if ($head[0].Contains($d)) { $isList = $false; break } }
+    }
+
+    if ($isList) {
+        Write-VaultLog 'One column, so this is read as a list of ids rather than a map.'
+        $ids = @(Import-VaultIdList -Path $resolved)
+        Write-VaultLog '----------------------------------------------------------------'
+        Write-VaultLog "  file        $resolved"
+        Write-VaultLog "  ids         $($ids.Count)" 'OK'
+        Write-VaultLog "  first few   $((@($ids | Select-Object -First 5)) -join ' ')"
+        Write-VaultLog "  last few    $((@($ids | Select-Object -Last 5)) -join ' ')"
+        Write-VaultLog 'A list names documents. It cannot say what any of them came from - that needs a map.'
+
+        if ($Action -eq 'write') {
+            $out = $OutFile
+            if (-not $out) { $out = Join-Path $script:Out 'ids.txt' }
+            # Resolved before the guard, not only before the write: the comparison has
+            # the same process-working-directory problem, so an unresolved -OutFile could
+            # read as a different file from the one it was about to overwrite.
+            $out = Resolve-VaultOutputPath -Path $out
+            if ($out -eq (Resolve-VaultOutputPath -Path $resolved)) {
+                throw "That would overwrite the file it just read ($out). Name a different -OutFile."
+            }
+            [IO.File]::WriteAllLines($out, $ids, (New-Object Text.UTF8Encoding $false))
+            Write-VaultLog "$($ids.Count) id(s) written to $out, one per line, deduplicated" 'OK'
+        }
+        Write-VaultLog "Log: $script:VaultLogFile"
+        exit 0
+    }
+
+    $map = Import-VaultIdMap -Path $file -SourceColumn $SourceColumn -TargetColumn $TargetColumn
+    $st  = $script:VaultIdMapStats
+
+    Write-VaultLog '----------------------------------------------------------------'
+    Write-VaultLog "  file        $($st.Path)"
+    Write-VaultLog "  encoding    $(if ($st.Bom) { 'UTF-8 with BOM' } else { 'no BOM' })"
+    Write-VaultLog "  delimiter   $($st.Delimiter)"
+    Write-VaultLog "  columns     $($st.Headers -join ', ')"
+    Write-VaultLog "  ids from    '$($st.SourceColumn)' -> '$($st.TargetColumn)'  ($($st.How))"
+    Write-VaultLog "  data rows   $($st.Rows)"
+    Write-VaultLog "  pairs       $($st.Pairs)" 'OK'
+    if ($st.RepeatedPairs) { Write-VaultLog "  repeats     $($st.RepeatedPairs)  - the same pair more than once, which a row-per-file export produces" }
+    if ($st.Skipped)       { Write-VaultLog "  skipped     $($st.Skipped)  - no usable id pair. Those documents are NOT processed" 'WARN' }
+    Write-VaultLog "  canonical   $(if ($st.Canonical) { 'yes' } else { 'no - source_id,target_id comma separated is the canonical shape' })" `
+        $(if ($st.Canonical) { 'OK' } else { 'WARN' })
+
+    if ($Action -eq 'write') {
+        $out = $OutFile
+        if (-not $out) { $out = Join-Path $script:Out 'map.csv' }
+        $out = Resolve-VaultOutputPath -Path $out
+        if ($out -eq (Resolve-VaultOutputPath -Path $st.Path)) {
+            throw "That would overwrite the map it just read ($out). Name a different -OutFile."
+        }
+        $n = Export-VaultIdMap -Map $map -Path $out
+        Write-VaultLog "$n pair(s) written to $out in canonical form" 'OK'
+        Write-VaultLog 'Point [verify] map at it and nothing downstream has to guess again.'
+    }
+
+    Write-VaultLog "Log: $script:VaultLogFile"
+
+    # Set explicitly, both ways. A script that simply runs off its end leaves whatever
+    # $LASTEXITCODE the previous command happened to set, so a clean check looked like a
+    # failure purely because something before it had failed.
+    if ($st.Skipped) {
+        Write-VaultLog "Exit 1: $($st.Skipped) row(s) name no document that will be migrated." 'WARN'
+        exit 1
+    }
+    exit 0
+}
+
+function Invoke-Verify {
+    # Is this document migrated? One verdict per source/target pair, across the document's
+    # own file, its attachments and its Sharing Settings.
+    param([string]$Action)
+
+    if ($Action -eq 'fields') {
+        Initialize-VaultRun -LogName 'verify-fields'
+        Write-VaultLog "vault $ScriptVersion - verify fields (read only, nothing is changed)"
+        [void](Confirm-VaultSessions -Vaults @(@{ Role = 'target'; Name = $script:TargetHost }) `
+                   -ApiVersion $script:Api -Yes:$Yes)
+        $ctxF = New-VaultContext -Section 'verify'
+        [void](Invoke-VaultFieldList -Context $ctxF -Match $Match)
+        Write-VaultLog "Log: $script:VaultLogFile"
+        return
+    }
+
+    if ($Action -in @('anchors', 'map')) {
+        Initialize-VaultRun -LogName "verify-$Action"
+        Write-VaultLog "vault $ScriptVersion - verify $Action (read only, nothing is changed)"
+        [void](Confirm-VaultsForRun)
+        $ctx = New-VaultContext -Section 'verify' -MapKey 'map'
+        $bad = if ($Action -eq 'anchors') { Invoke-VaultAnchorProbe -Context $ctx -Limit $(if ($Limit -gt 0) { $Limit } else { 500 }) }
+               else {
+                   if (-not $Anchor) { throw 'verify map needs -Anchor <field>. Run verify anchors to find one.' }
+                   Invoke-VaultBuildPairMap -Context $ctx -Anchor $Anchor
+               }
+        Write-VaultLog "Log: $script:VaultLogFile"
+        if ($bad -gt 0) { exit 1 }
+        return
+    }
+
+    if ($Action -notin @('trial', 'sample', 'census')) {
+        Write-Host 'vault.ps1 verify <trial|sample|census>   (also: fields, anchors, map)' -ForegroundColor Red
+        Write-Host '  trial   a fixed handful at random - proves the check runs' -ForegroundColor Red
+        Write-Host '  sample  sized for a confidence level - evidence about the population' -ForegroundColor Red
+        Write-Host '  census  every mapped document' -ForegroundColor Red
+        exit 2
+    }
+
+    Initialize-VaultRun -LogName "verify-$Action"
+    Start-VaultLock -Name 'verify'
+    try {
+        Write-VaultLog "vault $ScriptVersion - verify $Action ($Depth)"
+        [void](Confirm-VaultsForRun)
+        $ctx = New-VaultContext -Section 'verify' -MapKey 'map'
+        $bad = Invoke-VaultMigrationVerify -Context $ctx -Mode $Action -Depth $Depth `
+                   -TrialSize $TrialSize -Confidence $Confidence -MarginPct $Margin -Seed $Seed `
+                   -WithRoleRules:$WithRoleRules -Limit $Limit
+        Write-VaultLog "Log: $script:VaultLogFile"
+        if ($bad -gt 0) { exit 1 }
+    }
+    finally { Stop-VaultLock }
+}
+
+function Invoke-Help {
+    $v = $ScriptVersion
+    Write-Host @"
+
+vault $v
+
+  powershell -ExecutionPolicy Bypass -File .\vault.ps1 <command> [options]
+
+  update                   Fetch the latest scripts from GitHub into this folder
+  login                    Log in to every configured vault, cache the sessions
+  whoami                   Who each cached session belongs to, and its age
+  logout                   Delete the cached sessions
+  probe                    Read-only survey of each vault. Changes nothing
+
+  documents stage          Copy document source files into the target's File Staging
+  documents list           How much is on the target already, and whether it looks right
+  documents verify         Prove what landed in File Staging matches the source
+
+  attachments sync         Deliver document attachments the target is missing
+  attachments verify       Prove both vaults hold the same bytes
+
+  submissions list         What dossiers are under [submissions] path. No vault writes
+  submissions import       Import them into RIM Submissions Archive. -Plan resolves only
+
+  query "<VQL>"            Run one VQL query and show the rows. Read-only
+
+  roles survey             What is in scope: subtypes, roles, defaults. Changes nothing
+  roles probe              Whether a defaults table is needed, and what it should say
+  roles explain            Prove where the reported defaults come from. Changes nothing
+  roles mdl                Every attribute of a document type's MDL component
+  roles scope              Which documents the filter selects. One query, changes nothing
+  roles plan               Exactly who would be added to which role. Changes nothing
+  roles assign             Fill in the Sharing Settings the migration left empty
+                           Needs -WithinHours. Every time
+  roles verify             Prove what a run recorded is actually on the documents
+  roles audit              Do the documents have what the configuration says? Reads only
+
+  verify trial             Is it migrated? A fixed handful at random, to prove the check
+  verify sample            The same, sized for a confidence level (95% by default)
+  verify census            The same, over every mapped document
+  verify fields            Which fields the target's documents have, and of what type
+  verify anchors           Which field, if any, relates the two vaults
+  verify map               Build the source/target pairs from the vault itself
+
+  map check                Read a map or an id list and report it. No vault needed
+  map write                Rewrite it as canonical source_id,target_id
+  version                  Print the version
+  help                     This
+
+Options
+  -ConfigFile <path>       Default: vault.ini beside this script
+  -Out <dir>               Logs, results and scratch go here. Overrides [paths] output
+                           (also spelled -OutputRoot, -LogDir, -WorkDir)
+  -NoPrompt                Fail instead of asking for credentials
+  -Shared                  login: one credential for every vault, not one prompt each
+  -Plan                    Report what would happen, change nothing
+  -Test <n>                Stop once n items are genuinely done (not n examined)
+  -Limit <n>               Cap the input examined
+  -TargetPath <path>       documents: overrides [documents] path
+  -Staged                  verify: check what is ON the target, not the whole id list
+  -Where <vql>             roles: name the documents by condition instead of a map
+  -DesiredFrom <src>       roles: Lifecycle (default), Document, or Table
+  -Assign Both|Groups|Users  roles: what kind of principal to assign
+  -WithTypeDefaults        roles: apply the document type's defaults as well
+  -Defaults <csv>          roles: a defaults table. Overrides [roles] defaults
+  -Role / -ExcludeRole     roles: only these roles, or all but these
+  -BatchSize <n>           roles: assignments per request (default 200)
+  -CreatedBy <user>        roles: only documents this user created. 'me' is this
+                           session's own user, which is usually the one that made them
+  -WithinHours <n>         roles scope/plan/assign: how far back. REQUIRED
+  -DateField <name>        roles: default document_creation_date__v (a DateTime)
+  -CreatorField <name>     roles: default created_by__v
+  -ExpectIds <txt>         roles scope: check the query returns exactly these ids
+                           roles verify: account for every one of them, one per line
+  -Resume                  roles assign: skip what an earlier run finished
+  -Slow                    roles verify: read roles per document, not in bulk
+  -All                     roles verify: check documents that were already correct too
+  -TrialSize <n>           verify trial: how many (default 25)
+  -Confidence 90|95|99     verify sample: confidence level (default 95)
+  -Margin <pct>            verify sample: margin of error (default 5)
+  -Seed <n>                verify: fix the random selection so it can be repeated
+  -WithRoleRules           verify: check roles against the lifecycle rules as well
+  -Anchor <field>          verify map: the target field holding the source id
+  -Match <regex>           verify fields: show only fields matching this
+  -Type / -Subtype / -Classification
+                           roles mdl: which document type to dump, to three levels
+  -MapFile <csv>           map: which file to read
+  -OutFile <csv>           map write: where to put the canonical copy
+  -SourceColumn <name>     map: name the id columns instead of detecting them
+  -TargetColumn <name>
+  -Workers <n>             Move the work with n processes. Overrides [limits] workers
+  -Depth FAST|DEEP         verify: sizes and recorded MD5, or download both and hash
+  -ReplaceDiffering        sync: send same-name attachments whose bytes differ
+  -Existing Resume|Fresh   Keep earlier results, or rotate them aside
+  -Yes                     Skip the "are these the right two vaults" confirmation
+  -Commit <sha>            update: fetch this exact commit, not whatever main points at
+  -Force                   update: go ahead even though a run holds a lock
+  -WhatIf                  Withhold every write to Vault
+
+Config is vault.ini, sectioned:
+
+  [vault]
+  source = your-source-vault.veevavault.com
+  target = your-target-vault.veevavault.com
+  api    = v26.2
+
+  [paths]
+  output = C:\vault-work
+
+  [documents]
+  ids  = documents-ids.txt
+  path = /u<target user id>/wave1
+
+Each vault is logged into separately, so a production vault and the vault being
+migrated into can be two different accounts. Pass -Shared when one account covers
+both. Sessions are cached in .vault-session.json beside this script, keyed by vault
+host. It holds live tokens: treat it like a password, and log out when finished.
+
+roles reads ONE vault - the target it repairs - so it confirms that one only.
+
+Not yet ported: the object record pull that get-attachments.bat does today -
+attachments hanging off submission__v records, staged for the loader.
+
+"@
+}
+
+# --------------------------------------------------------------------------------------
+# Dispatch
+# --------------------------------------------------------------------------------------
+
+switch ($verb) {
+    'update'      { Invoke-Update }
+    'login'       { Invoke-Login }
+    'whoami'      { Invoke-Whoami }
+    'logout'      { Invoke-Logout }
+    'probe'       { Invoke-Probe }
+    'attachments' { Invoke-Attachments -Action $sub }
+    'documents'   { Invoke-Documents -Action $sub }
+    'submissions' { Invoke-Submissions -Action $sub }
+    'roles'       { Invoke-Roles -Action $sub }
+    'verify'      { Invoke-Verify -Action $sub }
+    'map'         { Invoke-Map -Action $sub }
+    'query'       { Invoke-Query -Action $Subcommand }
+    'version'     { Write-Host $ScriptVersion }
+    'help'        { Invoke-Help }
+    ''            { Invoke-Help }
+    default   {
+        Write-Host "Unknown command '$Command'." -ForegroundColor Red
+        if ($sub) { Write-Host "(subcommand '$Subcommand' was also given)" -ForegroundColor Red }
+        Invoke-Help
+        exit 2
+    }
+}

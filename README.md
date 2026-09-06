@@ -17,10 +17,16 @@ curl.exe -sfLO https://raw.githubusercontent.com/kevinnassery/veeva/main/vault.p
 powershell -ExecutionPolicy Bypass -File .\vault.ps1 update
 ```
 
-`update` fetches the rest — the `VaultKit\` module, this README, and a starter
-`vault.ini`. It never overwrites a `vault.ini` you have already filled in, and it
-downloads everything to one side before replacing anything, so a failed update leaves the
-folder exactly as it was.
+That one file is the whole tool. `update` refreshes it and this README, and writes a
+starter `vault.ini` if you do not have one — it never overwrites a `vault.ini` you have
+already filled in, and it downloads to one side before replacing anything, so a failed
+update leaves the folder exactly as it was.
+
+The script is **built**: `vault.ps1` is `src/vault.ps1` with the twelve `VaultKit/` parts
+folded in by `build.sh`. The split is for whoever edits it. Delivering it as twelve files
+meant an interrupted `update` could leave a dispatcher from one version calling a module
+from another; one file cannot be half-applied. Never edit the `vault.ps1` at the repo
+root — edit the sources and run `./build.sh`, which `./bump-version.sh` does for you.
 
 Then open `vault.ini` and set `[vault] source`, `[vault] target`, and `[documents] path`.
 

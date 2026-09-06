@@ -7,16 +7,30 @@ pass=0; fail=0
 ok()   { echo "  PASS  $1"; pass=$((pass+1)); }
 bad()  { echo "  FAIL  $1"; fail=$((fail+1)); }
 
+echo "== the shipped vault.ps1 is what a build would produce =="
+# It is generated, and it is the ONLY thing an operator downloads. A stale artifact means
+# the fix that was committed is not the code that ships - which looks exactly like a fix
+# that did not work.
+if ./build.sh --check >/dev/null 2>&1; then ok "vault.ps1 is current with src/ and VaultKit/"
+else bad "vault.ps1 is STALE - run ./build.sh"; fi
+
 echo "== everything vault.ps1 update fetches exists in the repo =="
-# The manifest is built from $VaultKitParts, so the parts list is what has to be checked:
-# a module file that is loaded but never fetched is the failure this catches.
-parts=$(sed -n 's/^\$VaultKitParts = @(\(.*\))$/\1/p' vault.ps1 | tr -d "' " | tr ',' '\n')
-[ -z "$parts" ] && bad "could not read \$VaultKitParts out of vault.ps1"
-for part in $parts; do
-  if [ -f "VaultKit/$part.ps1" ]; then ok "VaultKit/$part.ps1"; else bad "VaultKit/$part.ps1  <- update would 404"; fi
-done
+parts=$(sed -n 's/^\$VaultKitParts = @(\(.*\))$/\1/p' src/vault.ps1 | tr -d "' " | tr ',' '\n')
+[ -z "$parts" ] && bad "could not read \$VaultKitParts out of src/vault.ps1"
 for extra in README.md vault.ps1 vault.ini; do
   if [ -f "$extra" ]; then ok "$extra"; else bad "$extra  <- update would 404"; fi
+done
+
+echo "== the built file really is self-contained =="
+# The point of building is that update fetches two files and neither can be half-applied.
+# If the artifact still reaches for VaultKit\ at run time, that has silently stopped
+# being true and the operator finds out on a bare folder.
+if grep -q 'Join-Path (Join-Path \$here .VaultKit.)' vault.ps1; then
+  bad "the built vault.ps1 still loads VaultKit/ at run time"
+else ok "no run-time module load in the shipped file"; fi
+for part in $parts; do
+  if grep -q "^# ===== VaultKit/$part.ps1 =====$" vault.ps1; then ok "$part is inlined"
+  else bad "$part is NOT in the built vault.ps1"; fi
 done
 
 echo "== every module file is in the parts list =="
@@ -44,14 +58,20 @@ else
 fi
 rm -f /tmp/vk-tests.$$
 
-echo "== vault.ps1 runs with no VaultKit beside it =="
-# update has to work on a bare folder - that is the whole bootstrap.
+echo "== the shipped vault.ps1 works entirely alone =="
+# One file in an empty folder is now the whole install, so this is no longer a bootstrap
+# corner - it is the normal case, and every command has to reach its dispatch on it.
 t=$(mktemp -d)
 cp vault.ps1 "$t/"
 got=$($PS -NoProfile -File "$t/vault.ps1" version 2>&1 | tr -d '\r')
-want=$(grep -m1 "^\$ScriptVersion" vault.ps1 | sed "s/.*= *'//;s/'.*//")
-if [ "$got" = "$want" ]; then ok "version reported without the module ($got)"; else bad "bare vault.ps1 version -> '$got', wanted '$want'"; fi
-if $PS -NoProfile -File "$t/vault.ps1" help >/dev/null 2>&1; then ok "help works without the module"; else bad "bare vault.ps1 help failed"; fi
+want=$(grep -m1 "^\$ScriptVersion" src/vault.ps1 | sed "s/.*= *'//;s/'.*//")
+if [ "$got" = "$want" ]; then ok "version reported alone ($got)"; else bad "lone vault.ps1 version -> '$got', wanted '$want'"; fi
+if $PS -NoProfile -File "$t/vault.ps1" help >/dev/null 2>&1; then ok "help works alone"; else bad "lone vault.ps1 help failed"; fi
+# The real gain: a command that needs the module now reaches its own argument handling
+# instead of dying on a missing file. It still stops at the config, which is not shipped.
+if $PS -NoProfile -File "$t/vault.ps1" submissions 2>&1 | grep -q 'list|import'; then
+  ok "a module command dispatches with nothing else on disk"
+else bad "lone vault.ps1 could not dispatch 'submissions'"; fi
 rm -rf "$t"
 
 echo "== every version stamp matches =="

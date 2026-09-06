@@ -10,7 +10,7 @@ if [ $# -ge 1 ]; then
   V="$1"
 else
   today=$(date '+%Y.%m.%d')
-  cur=$(find . \( -path ./.claude -o -path ./docs \) -prune -o -name '*.ps1' -print0 \
+  cur=$(find . \( -path ./.claude -o -path ./docs -o -path ./vault.ps1 \) -prune -o -name '*.ps1' -print0 \
           | xargs -0 grep -ho "ScriptVersion = '$today-[0-9]*'" 2>/dev/null \
           | tr -d "'" | sed 's/.*-//' | sort -n | tail -1 || true)
   # || true, and a default below: on the first bump of a day nothing carries today's
@@ -24,7 +24,9 @@ fi
 # `find .` walked straight into it - so every bump also stamped the files of whatever
 # branch was checked out there. Thirty-seven bumps in one day left another branch's
 # working tree modified, which is not this script's business to touch.
-for f in $(find . \( -path ./.claude -o -path ./docs \) -prune -o -name '*.ps1' -print); do
+# ./vault.ps1 is pruned: it is BUILT from src/ and VaultKit/, so stamping it here would
+# stamp an artifact the build is about to overwrite. It gets the version from its sources.
+for f in $(find . \( -path ./.claude -o -path ./docs -o -path ./vault.ps1 \) -prune -o -name '*.ps1' -print); do
   if grep -q "^\$ScriptVersion" "$f"; then
     sed -i '' "s|^\$ScriptVersion = '.*'|\$ScriptVersion = '$V'|" "$f"
   else
@@ -38,4 +40,8 @@ for f in $(find . \( -path ./.claude -o -path ./docs \) -prune -o -name '*.bat' 
     echo "  no version line in $f" >&2
   fi
 done
+
+# The shipped file is built, so a bump that did not rebuild would leave the artifact
+# reporting the previous version - which is the one question a version stamp exists to answer.
+./build.sh
 echo "version $V"

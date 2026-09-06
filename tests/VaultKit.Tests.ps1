@@ -19,11 +19,11 @@ Set-StrictMode -Version 2.0
 # Read out of vault.ps1 rather than listed again here. This hand-kept copy silently fell
 # behind when Documents and Workers were added, so every test touching them failed with
 # "the term is not recognized" - which reads like a typo rather than a module never loaded.
-$parts = (Get-Content (Join-Path $here 'vault.ps1') |
+$parts = (Get-Content (Join-Path $here 'src/vault.ps1') |
           Where-Object { $_ -like '$VaultKitParts = @(*' } |
           Select-Object -First 1) -replace '^.*@\(', '' -replace '\).*$', '' -split ',' |
          ForEach-Object { $_.Trim().Trim("'") }
-if (-not $parts) { throw 'could not read $VaultKitParts out of vault.ps1' }
+if (-not $parts) { throw 'could not read $VaultKitParts out of src/vault.ps1' }
 foreach($p in $parts){ . (Join-Path $here "VaultKit/$p.ps1") }
 
 Write-Host "== Config: sectioned ini =="
@@ -78,11 +78,11 @@ Set-StrictMode -Version 2.0
 # Read out of vault.ps1 rather than listed again here. This hand-kept copy silently fell
 # behind when Documents and Workers were added, so every test touching them failed with
 # "the term is not recognized" - which reads like a typo rather than a module never loaded.
-$parts = (Get-Content (Join-Path $here 'vault.ps1') |
+$parts = (Get-Content (Join-Path $here 'src/vault.ps1') |
           Where-Object { $_ -like '$VaultKitParts = @(*' } |
           Select-Object -First 1) -replace '^.*@\(', '' -replace '\).*$', '' -split ',' |
          ForEach-Object { $_.Trim().Trim("'") }
-if (-not $parts) { throw 'could not read $VaultKitParts out of vault.ps1' }
+if (-not $parts) { throw 'could not read $VaultKitParts out of src/vault.ps1' }
 foreach($p in $parts){ . (Join-Path $here "VaultKit/$p.ps1") }
 $td = Join-Path $tmp ('vk2-'+[guid]::NewGuid().ToString('N')); New-Item -ItemType Directory -Force $td|Out-Null
 Push-Location $td
