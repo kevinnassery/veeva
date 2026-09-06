@@ -74,6 +74,20 @@ if $PS -NoProfile -File "$t/vault.ps1" submissions 2>&1 | grep -q 'list|import';
 else bad "lone vault.ps1 could not dispatch 'submissions'"; fi
 rm -rf "$t"
 
+echo "== update can actually read the version it installs =="
+# Get-VaultFileVersion reads only the first N lines. The stamp sits after the help block
+# and the param block, and when N was 80 it never reached it - so update reported no
+# version and the skew warning could not fire. A dead check reads like a passing one.
+scan=$(sed -n 's/^\$script:VaultVersionScanLines = \([0-9]*\)$/\1/p' src/vault.ps1)
+line=$(grep -n "^\$ScriptVersion = " vault.ps1 | head -1 | cut -d: -f1)
+if [ -z "$scan" ] || [ -z "$line" ]; then
+  bad "could not read the scan window ($scan) or the stamp line ($line)"
+elif [ "$line" -le "$scan" ]; then
+  ok "version stamp at line $line is inside the $scan-line scan window"
+else
+  bad "version stamp at line $line is PAST the $scan-line window - update cannot see it"
+fi
+
 echo "== every version stamp matches =="
 # -prune the stray worktree under .claude/: it is a checkout of another commit, so its
 # stamps are legitimately different and counting them reports skew that is not there.

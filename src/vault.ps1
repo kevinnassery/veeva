@@ -152,7 +152,7 @@ param(
     [int]$Workers = 0
 )
 
-$ScriptVersion = '2026.09.06-6'
+$ScriptVersion = '2026.09.06-7'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -355,10 +355,21 @@ function Get-VaultHeadSha {
     return ''
 }
 
+# How far into a file to look for its version stamp. Generous on purpose: the cost of
+# scanning too far is nothing, and the cost of stopping short is a check that silently
+# always passes. selftest asserts the built vault.ps1's stamp lands inside this.
+$script:VaultVersionScanLines = 400
+
 function Get-VaultFileVersion {
+    # $VaultVersionScanLines, not 80. The stamp sits at about line 155, after the
+    # comment-based help and the param block, so an 80-line window never reached it and
+    # this returned '' for the one file it is actually asked about. Everything downstream
+    # then behaved as though the version were unknowable: "All files at version X" never
+    # printed, and the mismatch warning could not fire however skewed the folder was.
+    # A dead check reads exactly like a passing one.
     param([Parameter(Mandatory)][string]$Path)
     try {
-        foreach ($line in (Get-Content -LiteralPath $Path -TotalCount 80)) {
+        foreach ($line in (Get-Content -LiteralPath $Path -TotalCount $script:VaultVersionScanLines)) {
             if ($line -like '$ScriptVersion = *') {
                 $parts = $line.Split("'")
                 if ($parts.Count -ge 2) { return $parts[1] }

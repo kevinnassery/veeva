@@ -11,7 +11,8 @@ the workstation.
 
 **These steps assume you already have `C:\vault-work` with `vault.ps1` in it** from a
 previous wave. If you are starting on a machine that has never run this, do
-[Appendix A](#appendix-a--starting-from-nothing) first, then come back to Step 2.
+[Appendix A](#appendix-a--starting-from-nothing) first — it installs the same version —
+then do Step 1 and skip to Step 3.
 
 Every application folder and vault name below is a **placeholder**. Substitute your own.
 
@@ -40,15 +41,50 @@ Expect `5` in the Major column.
 
 ---
 
-## Step 1 — Update the script
+## Step 1 — Allow scripts for this window
+
+Once per PowerShell window. It does not change any machine-wide setting.
 
 ```powershell
 cd C:\vault-work
-powershell -ExecutionPolicy Bypass -File .\vault.ps1 update -Commit f7ed7b16ef30560e85ba4a7bdd8ed27e38a0a1e4
+Set-ExecutionPolicy -Scope Process Bypass
 ```
 
-It prints the version. **It must say `2026.09.06-6`.** If it says anything else, stop and ask —
-you are not running what these steps describe.
+---
+
+## Step 2 — Check your version, then update
+
+**First, what have you got?**
+
+```powershell
+.\vault.ps1 version
+```
+
+It prints one line, e.g. `2026.09.05-3`. Note it — if anything goes wrong later, the first
+question anyone asks is which version was running, and this is the only place the answer is
+free.
+
+**Then update to the version these steps describe:**
+
+```powershell
+.\vault.ps1 update -Commit SHA_HERE
+```
+
+The update ends by naming what it installed:
+
+```
+All files at version VER_HERE.
+```
+
+**Confirm it yourself** — the update said what it wrote, this asks the script that will
+actually run:
+
+```powershell
+.\vault.ps1 version
+```
+
+**It must print `VER_HERE`.** If it does not, stop and ask — you are not running what these
+steps describe, and everything below is about a different script.
 
 **Your `vault.ini` is not touched.** `update` replaces `vault.ps1` and `README.md` only,
 and it downloads everything to one side before replacing anything, so a failed update
@@ -67,18 +103,6 @@ leaves the folder exactly as it was. Nothing you answered on a previous wave is 
 
 To move to the current version some other day, run `.\vault.ps1 update` with no `-Commit`;
 it resolves the head commit itself and prints the hash it used.
-
----
-
-## Step 2 — Allow scripts for this window
-
-Once per PowerShell window. It does not change any machine-wide setting.
-
-```powershell
-Set-ExecutionPolicy -Scope Process Bypass
-```
-
-From here the commands are shorter: `.\vault.ps1 <command>`.
 
 ---
 
@@ -272,7 +296,7 @@ after the imports have happened. Close Excel and re-run.
 **You are not sure which version you ran.** Every run logs it on the first line, and
 `.\vault.ps1 version` prints it on its own. This playbook is written against
 **`2026.09.06-6`**, commit `f7ed7b16ef30`. To get back to exactly that, re-run the
-`update -Commit` line in Step 1.
+`update -Commit` line in Step 2.
 
 ---
 
@@ -286,16 +310,17 @@ Step 1 instead.
 ```powershell
 mkdir C:\vault-work
 cd C:\vault-work
-curl.exe -sfLO https://raw.githubusercontent.com/kevinnassery/veeva/f7ed7b16ef30560e85ba4a7bdd8ed27e38a0a1e4/vault.ps1
+curl.exe -sfLO https://raw.githubusercontent.com/kevinnassery/veeva/SHA_HERE/vault.ps1
 ```
 
-Then let it fetch the README and a starter `vault.ini`, pinned to the same commit:
+Then let it fetch the README and a starter `vault.ini`, pinned to the same commit. This one
+spells out `-ExecutionPolicy Bypass`, because you have not done Step 1 yet:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\vault.ps1 update -Commit f7ed7b16ef30560e85ba4a7bdd8ed27e38a0a1e4
+powershell -ExecutionPolicy Bypass -File .\vault.ps1 update -Commit SHA_HERE
 ```
 
-It must print `2026.09.06-6`. When it is done the folder holds two files, `vault.ps1` and
+It must print `VER_HERE`. When it is done the folder holds two files, `vault.ps1` and
 `vault.ini`, plus whatever the runs write. There is nothing to fill in — go to Step 2, and
 Step 3 will ask you for the vault and the application and remember them.
 
