@@ -1,6 +1,6 @@
 # Loading a submissions application — step by step
 
-*Updated 2026-09-06 12:40 EDT*
+*Updated 2026-09-06 12:41 EDT*
 
 Copy and paste, one step at a time. Every command is safe to re-run.
 
@@ -58,16 +58,16 @@ and results the runs write.
 **This playbook installs one exact version.** Copy the line as it is, commit hash and all:
 
 ```powershell
-curl.exe -sfLO https://raw.githubusercontent.com/kevinnassery/veeva/344e6951c92ab666193b9500920a8e932dc030a0/vault.ps1
+curl.exe -sfLO https://raw.githubusercontent.com/kevinnassery/veeva/f7ed7b16ef30560e85ba4a7bdd8ed27e38a0a1e4/vault.ps1
 ```
 
 Then let it fetch the README and a starter `vault.ini`, pinned to the same commit:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\vault.ps1 update -Commit 344e6951c92ab666193b9500920a8e932dc030a0
+powershell -ExecutionPolicy Bypass -File .\vault.ps1 update -Commit f7ed7b16ef30560e85ba4a7bdd8ed27e38a0a1e4
 ```
 
-It will print the version. **It must say `2026.09.06-5`.** If it says anything else, stop
+It will print the version. **It must say `2026.09.06-6`.** If it says anything else, stop
 and ask — you are not running what these steps describe.
 
 `update` never overwrites a `vault.ini` you have already filled in, and it downloads
@@ -90,7 +90,7 @@ resolves the head commit itself and prints the hash it used.
 
 ```powershell
 cd C:\vault-work
-powershell -ExecutionPolicy Bypass -File .\vault.ps1 update -Commit 344e6951c92ab666193b9500920a8e932dc030a0
+powershell -ExecutionPolicy Bypass -File .\vault.ps1 update -Commit f7ed7b16ef30560e85ba4a7bdd8ed27e38a0a1e4
 ```
 
 It replaces `vault.ps1` and `README.md`, and **leaves your `vault.ini` alone**. Then skip
@@ -297,7 +297,7 @@ after the imports have happened. Close Excel and re-run.
 
 **You are not sure which version you ran.** Every run logs it on the first line, and
 `.\vault.ps1 version` prints it on its own. This playbook is written against
-**`2026.09.06-5`**, commit `344e6951c92a`. To get back to exactly that, re-run the
+**`2026.09.06-6`**, commit `f7ed7b16ef30`. To get back to exactly that, re-run the
 `update -Commit` line in Step 2.
 
 ---
