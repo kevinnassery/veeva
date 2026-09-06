@@ -152,7 +152,7 @@ param(
     [int]$Workers = 0
 )
 
-$ScriptVersion = '2026.09.06-13'
+$ScriptVersion = '2026.09.06-14'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -4709,11 +4709,27 @@ function Invoke-VaultSubmissionsImport {
     Save-VaultResults -Results $res
     Write-VaultLog '----------------------------------------------------------------'
     if ($Plan -or $c.WhatIf) {
-        Write-VaultLog "$($stat.Planned) dossier(s) resolved, $($stat.Failed) could not be. NOTHING was imported." $(if ($stat.Failed) { 'WARN' } else { 'OK' })
+        # The skipped count belongs here as much as in a real run. Without it a plan over
+        # 30 dossiers that reports 29 leaves the thirtieth unexplained, and "29 of 30" is
+        # exactly what a bug that silently drops a dossier looks like - the numbers alone
+        # cannot tell the operator which she is looking at.
+        $planLine = "$($stat.Planned) dossier(s) resolved, $($stat.Failed) could not be"
+        if ($stat.Skipped) { $planLine += ", $($stat.Skipped) already imported and skipped" }
+        Write-VaultLog "$planLine. NOTHING was imported." $(if ($stat.Failed) { 'WARN' } else { 'OK' })
+        if ($stat.Skipped) {
+            Write-VaultLog "$($stat.Planned) + $($stat.Skipped) = $($dossiers.Count), which is the dossier count. Nothing is missing." 'OK'
+        }
         if ($stat.Failed) { Write-VaultLog 'Fix the ERROR rows before a real run - each is a dossier that would fail there too.' 'WARN' }
     }
     else {
         Write-VaultLog "Imported $($stat.Ok), $($stat.Failed) failed, $($stat.Skipped) already SUCCESS" $(if ($stat.Failed) { 'WARN' } else { 'OK' })
+        $accounted = $stat.Ok + $stat.Failed + $stat.Skipped
+        if ($accounted -ne $dossiers.Count) {
+            Write-VaultLog "$accounted accounted for, but $($dossiers.Count) dossier(s) were listed - $($dossiers.Count - $accounted) unexplained." 'WARN'
+        }
+        else {
+            Write-VaultLog "$accounted of $($dossiers.Count) dossier(s) accounted for." 'OK'
+        }
     }
     if ($stopped) { Write-VaultLog "TEST run - stopped after $i of $($dossiers.Count) dossier(s). NOT the whole application." 'WARN' }
     Write-VaultLog "Results: $($res.Path)"
