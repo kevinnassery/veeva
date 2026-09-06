@@ -88,6 +88,20 @@ else
   bad "version stamp at line $line is PAST the $scan-line window - update cannot see it"
 fi
 
+echo "== the shipped script writes beside itself, not up a level =="
+# The regression that broke a live run: three places derived their folder by walking UP
+# from $PSScriptRoot, which was right while the module sat in VaultKit\ one level down and
+# became the DRIVE ROOT once the parts were built into vault.ps1. It tried to write
+# C:\.vault-session.json and Windows refused, mid-login.
+t=$(mktemp -d)
+cp vault.ps1 vault.ini "$t/"
+got=$($PS -NoProfile -File "$t/vault.ps1" whoami 2>&1 | tr -d '\r' | sed -n 's/.*Session file: //p' | head -1)
+case "$got" in
+  "$t"/*) ok "session file lands in the script's own folder" ;;
+  *)      bad "session file would be '$got', not under $t" ;;
+esac
+rm -rf "$t"
+
 echo "== every version stamp matches =="
 # -prune the stray worktree under .claude/: it is a checkout of another commit, so its
 # stamps are legitimately different and counting them reports skew that is not there.

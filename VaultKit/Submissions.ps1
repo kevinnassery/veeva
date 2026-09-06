@@ -597,7 +597,23 @@ function Confirm-VaultSubmissionsVault {
                        'again once you know the login works.')
             }
 
-            Write-VaultLog "Could not reach $h at all. This is not a password problem." 'WARN'
+            # Offer another host ONLY when the host is what failed. Everything else -
+            # a folder that cannot be written to, a disk, a permission - is unaffected by
+            # retyping a name, and asking invites an operator to change the one thing that
+            # was right. Defaulting to "stop and say why" is the safe direction.
+            $network = @('could not be resolved', 'no such host', 'unable to connect', 'timed out',
+                         'actively refused', 'remote name', 'unable to reach', 'ssl', 'trust relationship',
+                         'name or service not known')
+            $looksNetwork = $false
+            foreach ($n in $network) { if ($reason -like "*$n*") { $looksNetwork = $true; break } }
+
+            if (-not $looksNetwork) {
+                Write-VaultLog "$h is not what failed here." 'ERROR'
+                Write-VaultLogBlock $reason 'ERROR'
+                throw 'Stopped. Retyping the vault host will not change this - fix what the message above names.'
+            }
+
+            Write-VaultLog "Could not reach $h. This is not a password problem." 'WARN'
             Write-VaultLogBlock $reason 'WARN'
             if (-not $canAsk) { throw }
             if (-not (Read-VaultYesNo 'Try a different vault host?')) { throw "Stopped: could not reach $h." }

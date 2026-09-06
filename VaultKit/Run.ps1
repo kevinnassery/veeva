@@ -327,9 +327,7 @@ function Set-VaultLockEnabled {
 function Start-VaultLock {
     param([Parameter(Mandatory)][string]$Name)
     if (-not $script:VaultLockEnabled) { return }
-    $here = $PSScriptRoot
-    if ($here) { $here = Split-Path -Parent $here } else { $here = (Get-Location).ProviderPath }
-    $script:VaultLock = Join-Path $here ".run-$Name.lock"
+    $script:VaultLock = Join-Path (Get-VaultHomeFolder) ".run-$Name.lock"
     try {
         Set-Content -LiteralPath $script:VaultLock -Encoding ASCII -WhatIf:$false -Value @(
             "pid=$PID", "command=$Name", "started=$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')")

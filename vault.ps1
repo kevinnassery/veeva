@@ -152,7 +152,7 @@ param(
     [int]$Workers = 0
 )
 
-$ScriptVersion = '2026.09.06-9'
+$ScriptVersion = '2026.09.06-10'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -437,6 +437,33 @@ function Test-VaultPlaceholderValue {
     return ($v -match '^your-[a-z0-9-]*\.veevavault\.com$')
 }
 
+$script:VaultHome = ''
+
+function Get-VaultHomeFolder {
+    # The folder the operator is working in: where vault.ini, the logs, the run lock and
+    # the session file all live.
+    #
+    # This replaces three copies of "$PSScriptRoot, then Split-Path -Parent". That was
+    # correct while the module lived in VaultKit\ one level below vault.ps1, and became
+    # the DRIVE ROOT the moment the parts were built into vault.ps1 itself - so a login
+    # that had otherwise worked died writing C:\.vault-session.json, which Windows
+    # refuses. Deriving a location by walking UP from wherever the code happens to sit is
+    # the mistake; the answer is where the script IS, which the dispatcher already knows.
+    if ($script:VaultHome) { return $script:VaultHome }
+    $dir = ''
+    $v = Get-Variable -Name here -Scope Script -ErrorAction SilentlyContinue
+    if ($v -and "$($v.Value)".Trim()) { $dir = "$($v.Value)" }
+    if (-not $dir) { $dir = (Get-Location).ProviderPath }
+    $script:VaultHome = $dir
+    return $dir
+}
+
+function Set-VaultHomeFolder {
+    # Tests only: pin the folder without a dispatcher above them.
+    param([Parameter(Mandatory)][string]$Path)
+    $script:VaultHome = $Path
+}
+
 # ===== VaultKit/Auth.ps1 =====
 
 # Authentication, as a flow of its own.
@@ -472,9 +499,7 @@ $script:VaultSessionPersist = $true
 
 function Get-VaultSessionPath {
     if ($script:VaultSessionPath) { return $script:VaultSessionPath }
-    $here = $PSScriptRoot
-    if ($here) { $here = Split-Path -Parent $here } else { $here = (Get-Location).ProviderPath }
-    $script:VaultSessionPath = Join-Path $here '.vault-session.json'
+    $script:VaultSessionPath = Join-Path (Get-VaultHomeFolder) '.vault-session.json'
     return $script:VaultSessionPath
 }
 
@@ -504,7 +529,18 @@ function Write-VaultSessions {
     $path = Get-VaultSessionPath
     $obj  = [ordered]@{}
     foreach ($k in ($script:VaultSessions.Keys | Sort-Object)) { $obj[$k] = $script:VaultSessions[$k] }
-    ($obj | ConvertTo-Json -Depth 5) | Set-Content -LiteralPath $path -Encoding UTF8 -WhatIf:$false
+    # Best effort. This file is a CACHE - it saves typing a password on the next command
+    # and nothing more - so a folder that cannot be written to should cost the operator a
+    # second login, not the one she just completed. It threw instead, and a successful
+    # authentication died on the write with a message about a path.
+    try {
+        ($obj | ConvertTo-Json -Depth 5) | Set-Content -LiteralPath $path -Encoding UTF8 -WhatIf:$false
+    }
+    catch {
+        Write-VaultLog "Signed in, but could not save the session to ${path}: $_" 'WARN'
+        Write-VaultLog 'Every command will ask for credentials again. The run itself is unaffected.' 'WARN'
+        return
+    }
 
     # Restrict to the current user. Windows only; on anything else this is a no-op and
     # the file simply inherits the directory's permissions.
@@ -1257,7 +1293,7 @@ function Resolve-VaultInput {
     param([Parameter(Mandatory)][string]$Path, [string[]]$LegacyNames = @())
 
     $tries = @($Path, [IO.Path]::GetFullPath([IO.Path]::Combine((Get-Location).ProviderPath, $Path)))
-    if ($PSScriptRoot) { $tries += (Join-Path (Split-Path -Parent $PSScriptRoot) $Path) }
+    $tries += (Join-Path (Get-VaultHomeFolder) $Path)
     foreach ($legacy in $LegacyNames) {
         $tries += [IO.Path]::GetFullPath([IO.Path]::Combine((Get-Location).ProviderPath, $legacy))
     }
@@ -1870,9 +1906,7 @@ function Set-VaultLockEnabled {
 function Start-VaultLock {
     param([Parameter(Mandatory)][string]$Name)
     if (-not $script:VaultLockEnabled) { return }
-    $here = $PSScriptRoot
-    if ($here) { $here = Split-Path -Parent $here } else { $here = (Get-Location).ProviderPath }
-    $script:VaultLock = Join-Path $here ".run-$Name.lock"
+    $script:VaultLock = Join-Path (Get-VaultHomeFolder) ".run-$Name.lock"
     try {
         Set-Content -LiteralPath $script:VaultLock -Encoding ASCII -WhatIf:$false -Value @(
             "pid=$PID", "command=$Name", "started=$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')")
@@ -4298,7 +4332,23 @@ function Confirm-VaultSubmissionsVault {
                        'again once you know the login works.')
             }
 
-            Write-VaultLog "Could not reach $h at all. This is not a password problem." 'WARN'
+            # Offer another host ONLY when the host is what failed. Everything else -
+            # a folder that cannot be written to, a disk, a permission - is unaffected by
+            # retyping a name, and asking invites an operator to change the one thing that
+            # was right. Defaulting to "stop and say why" is the safe direction.
+            $network = @('could not be resolved', 'no such host', 'unable to connect', 'timed out',
+                         'actively refused', 'remote name', 'unable to reach', 'ssl', 'trust relationship',
+                         'name or service not known')
+            $looksNetwork = $false
+            foreach ($n in $network) { if ($reason -like "*$n*") { $looksNetwork = $true; break } }
+
+            if (-not $looksNetwork) {
+                Write-VaultLog "$h is not what failed here." 'ERROR'
+                Write-VaultLogBlock $reason 'ERROR'
+                throw 'Stopped. Retyping the vault host will not change this - fix what the message above names.'
+            }
+
+            Write-VaultLog "Could not reach $h. This is not a password problem." 'WARN'
             Write-VaultLogBlock $reason 'WARN'
             if (-not $canAsk) { throw }
             if (-not (Read-VaultYesNo 'Try a different vault host?')) { throw "Stopped: could not reach $h." }
@@ -8331,6 +8381,10 @@ function Invoke-Login {
 
 function Invoke-Whoami {
     Initialize-VaultRun
+    # Said before the early return, not after it. "Where would the session be kept" is
+    # exactly the question when there is no session, and it is the answer that catches a
+    # folder the file cannot be written into.
+    Write-VaultLog "Session file: $(Get-VaultSessionPath)"
     $sessions = Read-VaultSessions
     if (-not $sessions.Count) {
         Write-VaultLog "No cached sessions. Run: .\vault.ps1 login" 'WARN'
@@ -8345,7 +8399,6 @@ function Invoke-Whoami {
         } catch { }
         Write-VaultLog ("{0}  userId {1}  vaultId {2}{3}" -f $h, (Get-VaultField $e 'userId' '?'), (Get-VaultField $e 'vaultId' '?'), $age)
     }
-    Write-VaultLog "Session file: $(Get-VaultSessionPath)"
 }
 
 function Invoke-Logout {

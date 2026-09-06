@@ -152,7 +152,7 @@ param(
     [int]$Workers = 0
 )
 
-$ScriptVersion = '2026.09.06-9'
+$ScriptVersion = '2026.09.06-10'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -637,6 +637,10 @@ function Invoke-Login {
 
 function Invoke-Whoami {
     Initialize-VaultRun
+    # Said before the early return, not after it. "Where would the session be kept" is
+    # exactly the question when there is no session, and it is the answer that catches a
+    # folder the file cannot be written into.
+    Write-VaultLog "Session file: $(Get-VaultSessionPath)"
     $sessions = Read-VaultSessions
     if (-not $sessions.Count) {
         Write-VaultLog "No cached sessions. Run: .\vault.ps1 login" 'WARN'
@@ -651,7 +655,6 @@ function Invoke-Whoami {
         } catch { }
         Write-VaultLog ("{0}  userId {1}  vaultId {2}{3}" -f $h, (Get-VaultField $e 'userId' '?'), (Get-VaultField $e 'vaultId' '?'), $age)
     }
-    Write-VaultLog "Session file: $(Get-VaultSessionPath)"
 }
 
 function Invoke-Logout {

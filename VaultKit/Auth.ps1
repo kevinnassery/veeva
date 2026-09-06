@@ -31,9 +31,7 @@ $script:VaultSessionPersist = $true
 
 function Get-VaultSessionPath {
     if ($script:VaultSessionPath) { return $script:VaultSessionPath }
-    $here = $PSScriptRoot
-    if ($here) { $here = Split-Path -Parent $here } else { $here = (Get-Location).ProviderPath }
-    $script:VaultSessionPath = Join-Path $here '.vault-session.json'
+    $script:VaultSessionPath = Join-Path (Get-VaultHomeFolder) '.vault-session.json'
     return $script:VaultSessionPath
 }
 
@@ -63,7 +61,18 @@ function Write-VaultSessions {
     $path = Get-VaultSessionPath
     $obj  = [ordered]@{}
     foreach ($k in ($script:VaultSessions.Keys | Sort-Object)) { $obj[$k] = $script:VaultSessions[$k] }
-    ($obj | ConvertTo-Json -Depth 5) | Set-Content -LiteralPath $path -Encoding UTF8 -WhatIf:$false
+    # Best effort. This file is a CACHE - it saves typing a password on the next command
+    # and nothing more - so a folder that cannot be written to should cost the operator a
+    # second login, not the one she just completed. It threw instead, and a successful
+    # authentication died on the write with a message about a path.
+    try {
+        ($obj | ConvertTo-Json -Depth 5) | Set-Content -LiteralPath $path -Encoding UTF8 -WhatIf:$false
+    }
+    catch {
+        Write-VaultLog "Signed in, but could not save the session to ${path}: $_" 'WARN'
+        Write-VaultLog 'Every command will ask for credentials again. The run itself is unaffected.' 'WARN'
+        return
+    }
 
     # Restrict to the current user. Windows only; on anything else this is a no-op and
     # the file simply inherits the directory's permissions.

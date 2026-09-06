@@ -460,6 +460,7 @@ function Invoke-VaultVaultPromptCase {
         [string[]]$Answers,
         [string[]]$FailHosts = @(),
         [string[]]$AuthFailHosts = @(),
+        [string[]]$LocalFailHosts = @(),
         [string]$Candidate = '',
         [string]$Suggested = '',
         [string]$Source    = ''
@@ -470,6 +471,7 @@ function Invoke-VaultVaultPromptCase {
     $script:VkSaved   = ''
     $script:VkFail    = @($FailHosts)
     $script:VkAuthFail = @($AuthFailHosts)
+    $script:VkLocalFail = @($LocalFailHosts)
 
     # Defined inside this function, so they shadow the real ones only for what it calls -
     # stubbing Write-Host at script scope would silence the suite's own output.
@@ -490,6 +492,8 @@ function Invoke-VaultVaultPromptCase {
         # host that never answered - a test that invents its own phrasing would pass while
         # the classification was broken.
         if ($script:VkAuthFail -contains $n) { throw "Authentication failed for $n as someone: USERNAME_OR_PASSWORD_INCORRECT" }
+        # Windows' own wording for the failure that took down a live run.
+        if ($script:VkLocalFail -contains $n) { throw "Access to the path 'C:\.vault-session.json' is denied." }
         if ($script:VkFail -contains $n) { throw "The remote name could not be resolved: '$n'" }
         return @()
     }
@@ -572,6 +576,23 @@ T 'an unrecognised answer is asked again, not taken as no' {
     Eq $r.Result 'sbx.example.com' 'host'
     Eq $r.Asked.Count 3 'asked until answered'
 }
+T 'a local failure stops instead of blaming the host' {
+    # It tried to write the session file to the drive root, and the operator was asked
+    # whether she wanted to retype the vault name - the one thing that was correct.
+    $t = ''
+    try { Invoke-VaultVaultPromptCase -Candidate 'good.example.com' -LocalFailHosts @('good.example.com') -Answers @() | Out-Null }
+    catch { $t = "$_" }
+    if (-not $t) { throw 'did not stop' }
+    if ($t -notmatch 'Retyping the vault host will not change this') { throw "wrong message: $t" }
+    Eq $script:VkNext 0 'asked nothing'
+}
+
+Write-Host "== Where the tool writes =="
+T 'the home folder is where the script is, not its parent' {
+    Set-VaultHomeFolder -Path 'C:\vault-work'
+    Eq (Get-VaultHomeFolder) 'C:\vault-work' 'home'
+}
+
 T 'a pasted URL is reduced to a host name' {
     $r = Invoke-VaultVaultPromptCase -Candidate 'https://sbx.example.com/ui/#/x' -Answers @('y')
     Eq $r.Result 'sbx.example.com' 'host'

@@ -162,3 +162,30 @@ function Test-VaultPlaceholderValue {
     if (-not $v) { return $true }
     return ($v -match '^your-[a-z0-9-]*\.veevavault\.com$')
 }
+
+$script:VaultHome = ''
+
+function Get-VaultHomeFolder {
+    # The folder the operator is working in: where vault.ini, the logs, the run lock and
+    # the session file all live.
+    #
+    # This replaces three copies of "$PSScriptRoot, then Split-Path -Parent". That was
+    # correct while the module lived in VaultKit\ one level below vault.ps1, and became
+    # the DRIVE ROOT the moment the parts were built into vault.ps1 itself - so a login
+    # that had otherwise worked died writing C:\.vault-session.json, which Windows
+    # refuses. Deriving a location by walking UP from wherever the code happens to sit is
+    # the mistake; the answer is where the script IS, which the dispatcher already knows.
+    if ($script:VaultHome) { return $script:VaultHome }
+    $dir = ''
+    $v = Get-Variable -Name here -Scope Script -ErrorAction SilentlyContinue
+    if ($v -and "$($v.Value)".Trim()) { $dir = "$($v.Value)" }
+    if (-not $dir) { $dir = (Get-Location).ProviderPath }
+    $script:VaultHome = $dir
+    return $dir
+}
+
+function Set-VaultHomeFolder {
+    # Tests only: pin the folder without a dispatcher above them.
+    param([Parameter(Mandatory)][string]$Path)
+    $script:VaultHome = $Path
+}

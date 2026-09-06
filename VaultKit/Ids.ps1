@@ -89,7 +89,7 @@ function Resolve-VaultInput {
     param([Parameter(Mandatory)][string]$Path, [string[]]$LegacyNames = @())
 
     $tries = @($Path, [IO.Path]::GetFullPath([IO.Path]::Combine((Get-Location).ProviderPath, $Path)))
-    if ($PSScriptRoot) { $tries += (Join-Path (Split-Path -Parent $PSScriptRoot) $Path) }
+    $tries += (Join-Path (Get-VaultHomeFolder) $Path)
     foreach ($legacy in $LegacyNames) {
         $tries += [IO.Path]::GetFullPath([IO.Path]::Combine((Get-Location).ProviderPath, $legacy))
     }
