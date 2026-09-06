@@ -52,17 +52,20 @@ Ignore any line telling you to fill in `[vault] source` and `target`, or to run
 .\vault.ps1 submissions list
 ```
 
-This writes nothing to Vault. It asks you four things:
+This writes nothing to Vault. It asks you these, in this order:
 
-| it asks | you give |
+| it asks | you type |
 | --- | --- |
 | `Vault host` | the sandbox host name, no `https://` |
-| credentials | your account on that vault |
+| a credential box | your account on that vault |
 | `Is this the vault to import into? [y/n]` | `y` **only if `vaultId` is the sandbox's** — otherwise `n`, and it asks again |
+| `Save this to [submissions] vault in vault.ini? [Y/n]` | `Y` |
 | `Submissions Archive path` | `/SubmissionsArchive/<application>` |
+| `Save this to [submissions] path in vault.ini? [Y/n]` | `Y` |
 | `Is this the right application? [y/n]` | `y` if the application number is the one you are loading — otherwise `n` |
 
-It saves your answers. Next time it shows them back instead of asking.
+Saying `Y` to the two save questions is what makes the next run show your answers back for
+a `y` instead of asking for them again.
 
 It ends with a count of dossiers. **If the count is 0, stop.**
 
