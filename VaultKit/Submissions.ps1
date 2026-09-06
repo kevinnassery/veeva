@@ -659,71 +659,89 @@ function Save-VaultSubmissionsVault {
 }
 
 function Confirm-VaultStagingPath {
-    # The Submissions Archive root this run works from, established and agreed before
-    # anything reads or imports.
+    # Which application this run works on, established and agreed before anything reads
+    # or imports.
     #
-    # Prompted when [submissions] path is empty, and offered back to vault.ini so it is
-    # asked for once rather than every run. Shown and confirmed when it is already set,
-    # the same way the vaults are - because this path decides which application gets
-    # imported, and pointing it at last wave's folder is a mistake nothing downstream
-    # can catch. The application is echoed beside it: that is the value actually used to
-    # resolve every record, and confirming the string without it confirms the wrong half.
+    # Asked when [submissions] path is empty, offered back to vault.ini, and shown for
+    # confirmation every run after that - because this path decides which application
+    # gets imported, and pointing it at last wave's folder is a mistake nothing
+    # downstream can catch. The application is echoed beside it: that is the value used
+    # to resolve every record, and confirming the string without it confirms the wrong
+    # half.
+    #
+    # "No" means ASK FOR A DIFFERENT ONE, not stop. It used to throw, which made loading
+    # a second application impossible the obvious way: an operator saw last wave's folder
+    # offered back, answered n to change it, and the run died with a stack trace. Saying
+    # no to a confirmation should cost the next question, not the session - the same
+    # bargain Confirm-VaultSubmissionsVault strikes for the vault.
     param(
         [Parameter(Mandatory)][string]$ConfigPath,
         [Parameter(Mandatory)][AllowEmptyString()][string]$Path,
         [switch]$Yes
     )
-    # A console can answer; a scheduled run cannot, and blocking for ever on an answer
-    # nobody is there to give is worse than either proceeding or stopping outright.
     $canAsk = Test-VaultCanPrompt
+    $p      = "$Path".Trim()
+    $typed  = $false
 
-    $p = "$Path".Trim()
-
-    if (-not $p) {
-        if (-not $canAsk) {
-            throw "[submissions] path is not set in $ConfigPath, and this is not a console so it cannot be asked for."
-        }
-        Write-VaultLog '[submissions] path is not set.' 'WARN'
-        Write-Host ''
-        Write-Host '  The application folder on the TARGET vault''s File Staging, under the'
-        Write-Host '  Submissions Archive root. Its children are the submissions:'
-        Write-Host ''
-        Write-Host '      /SubmissionsArchive/e157135        <- this'
-        Write-Host '      /SubmissionsArchive/e157135/0000'
-        Write-Host '      /SubmissionsArchive/e157135/0001'
-        Write-Host ''
-        $p = (Read-Host 'Submissions Archive path').Trim()
-        if (-not $p) { throw 'Stopped: no path given.' }
-        if (-not $p.StartsWith('/')) { $p = "/$p" }
-
-        # Offered, not assumed. Writing to somebody's config without asking is the kind
-        # of helpfulness that is indistinguishable from a bug when they next read it.
-        $save = Read-Host "Save this to [submissions] path in $(Split-Path -Leaf $ConfigPath)? [Y/n]"
-        if ($save -notmatch '^[Nn]') {
-            try {
-                Set-VaultSetting -Path $ConfigPath -Section 'submissions' -Key 'path' -Value $p
-                Write-VaultLog "Saved to $ConfigPath - it will be confirmed rather than asked for next time." 'OK'
+    while ($true) {
+        if (-not $p) {
+            if (-not $canAsk) {
+                throw "[submissions] path is not set in $ConfigPath, and this is not a console so it cannot be asked for."
             }
-            catch { Write-VaultLog "Could not write $ConfigPath, so this path applies to this run only: $_" 'WARN' }
+            Write-Host ''
+            Write-Host '  The application folder on the TARGET vault''s File Staging, under the'
+            Write-Host '  Submissions Archive root. Its children are the submissions:'
+            Write-Host ''
+            Write-Host '      /SubmissionsArchive/000000        <- this'
+            Write-Host '      /SubmissionsArchive/000000/0000'
+            Write-Host '      /SubmissionsArchive/000000/0001'
+            Write-Host ''
+            $p = (Read-Host 'Submissions Archive path').Trim()
+            if (-not $p) { throw 'Stopped: no path given.' }
+            if (-not $p.StartsWith('/')) { $p = "/$p" }
+            $typed = $true
         }
-        else { Write-VaultLog 'Not saved - this path applies to this run only.' 'WARN' }
-    }
 
-    $app = @(($p -replace '\\', '/').Trim('/') -split '/')[-1]
-    Write-VaultLog '----------------------------------------------------------------'
-    Write-VaultLog ("  staging     {0}" -f $p) 'OK'
-    Write-VaultLog ("  application {0}" -f $app)
-    Write-VaultLog '----------------------------------------------------------------'
+        $app = @(($p -replace '\\', '/').Trim('/') -split '/')[-1]
+        Write-VaultLog '----------------------------------------------------------------'
+        Write-VaultLog ("  staging     {0}" -f $p) 'OK'
+        Write-VaultLog ("  application {0}" -f $app)
+        Write-VaultLog '----------------------------------------------------------------'
 
-    if ($Yes) { return $p }
-    if (-not $canAsk) {
-        Write-VaultLog 'Not a console - proceeding without confirmation.' 'WARN'
-        return $p
+        if ($Yes) { return $p }
+        if (-not $canAsk) {
+            Write-VaultLog 'Not a console - proceeding without confirmation.' 'WARN'
+            return $p
+        }
+
+        if (Read-VaultYesNo 'Is this the right application?') {
+            # Offered only now, and only for a path that was typed. Saving before the
+            # confirmation would write down an application about to be rejected.
+            if ($typed) { Save-VaultSubmissionsPath -ConfigPath $ConfigPath -StagingPath $p }
+            return $p
+        }
+
+        Write-VaultLog 'Not confirmed - asking for a different application.' 'WARN'
+        $p = ''; $typed = $false
     }
-    if (-not (Read-VaultYesNo 'Is this the right application?')) {
-        throw 'Stopped: the staging path was not confirmed.'
+}
+
+function Save-VaultSubmissionsPath {
+    # Offered, not assumed - the same bargain Save-VaultSubmissionsVault strikes.
+    param(
+        [Parameter(Mandatory)][string]$ConfigPath,
+        [Parameter(Mandatory)][string]$StagingPath
+    )
+    $save = Read-Host "Save this to [submissions] path in $(Split-Path -Leaf $ConfigPath)? [Y/n]"
+    if ($save -match '^[Nn]') {
+        Write-VaultLog 'Not saved - this path applies to this run only.' 'WARN'
+        return
     }
-    return $p
+    try {
+        Set-VaultSetting -Path $ConfigPath -Section 'submissions' -Key 'path' -Value $StagingPath
+        Write-VaultLog "Saved to $ConfigPath - it will be confirmed rather than asked for next time." 'OK'
+    }
+    catch { Write-VaultLog "Could not write $ConfigPath, so this path applies to this run only: $_" 'WARN' }
 }
 
 function Invoke-VaultSubmissionsList {

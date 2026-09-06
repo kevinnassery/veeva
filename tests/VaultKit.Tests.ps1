@@ -587,6 +587,55 @@ T 'a local failure stops instead of blaming the host' {
     Eq $script:VkNext 0 'asked nothing'
 }
 
+Write-Host "== Which application, run after run =="
+function Invoke-VaultPathCase {
+    param([string[]]$Answers, [string]$Path = '')
+    $script:VkAnswers = @($Answers); $script:VkNext = 0
+    $script:VkAsked = New-Object System.Collections.ArrayList
+    $script:VkSaved = ''
+    function Test-VaultCanPrompt { return $true }
+    function Write-Host { param([Parameter(ValueFromRemainingArguments = $true)]$Rest) }
+    function Write-VaultLog { param($Message, $Level = 'INFO') }
+    function Read-Host {
+        param($Prompt)
+        [void]$script:VkAsked.Add("$Prompt")
+        if ($script:VkNext -ge $script:VkAnswers.Count) { throw "asked more than scripted: $Prompt" }
+        $a = $script:VkAnswers[$script:VkNext]; $script:VkNext++
+        return $a
+    }
+    function Set-VaultSetting { param($Path, $Section, $Key, $Value) $script:VkSaved = "$Section/$Key=$Value" }
+    $r = Confirm-VaultStagingPath -ConfigPath 'C:\x\vault.ini' -Path $Path
+    return [pscustomobject]@{ Result = $r; Saved = $script:VkSaved; Asked = @($script:VkAsked) }
+}
+
+T 'a saved application is confirmed, not re-asked' {
+    $r = Invoke-VaultPathCase -Path '/SubmissionsArchive/000001' -Answers @('y')
+    Eq $r.Result '/SubmissionsArchive/000001' 'path'
+    Eq $r.Saved '' 'nothing written'
+}
+T 'NO asks for the next application instead of killing the run' {
+    # The operator finished one application, answered n to load the next, and the run
+    # died with a stack trace. Loading several in a row is the normal case.
+    $r = Invoke-VaultPathCase -Path '/SubmissionsArchive/000001' `
+             -Answers @('n', '/SubmissionsArchive/000002', 'y', 'Y')
+    Eq $r.Result '/SubmissionsArchive/000002' 'path'
+    Eq $r.Saved 'submissions/path=/SubmissionsArchive/000002' 'the new one is offered to the config'
+}
+T 'no twice keeps asking for applications' {
+    $r = Invoke-VaultPathCase -Path '/SubmissionsArchive/000001' `
+             -Answers @('n', '/SubmissionsArchive/000002', 'n', '/SubmissionsArchive/000003', 'y', 'n')
+    Eq $r.Result '/SubmissionsArchive/000003' 'path'
+    Eq $r.Saved '' 'declined the save'
+}
+T 'a path without a leading slash gets one' {
+    $r = Invoke-VaultPathCase -Answers @('SubmissionsArchive/000004', 'y', 'n')
+    Eq $r.Result '/SubmissionsArchive/000004' 'path'
+}
+T 'the application is the last segment, and it is confirmed' {
+    $r = Invoke-VaultPathCase -Path '/SubmissionsArchive/000005' -Answers @('y')
+    if ($r.Asked[0] -notmatch 'right application') { throw "asked '$($r.Asked[0])'" }
+}
+
 Write-Host "== Where the tool writes =="
 T 'the home folder is where the script is, not its parent' {
     Set-VaultHomeFolder -Path 'C:\vault-work'
