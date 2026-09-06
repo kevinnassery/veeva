@@ -73,6 +73,18 @@ It ends with a count of dossiers. **If the count is 0, stop.**
 
 ## 4. Plan the run
 
+> **Every command from here on confirms the vault and the application first.** Steps 4, 5
+> and 6 each start by showing your saved answers back:
+>
+> ```
+> Is this the vault to import into? [y/n]:
+> Is this the right application? [y/n]:
+> ```
+>
+> Read them, then type `y` to each. They are shown every time on purpose — this is the
+> point at which a wave can be sent at the wrong vault or the wrong application, and it is
+> cheaper to read two lines than to undo an import.
+
 ```powershell
 .\vault.ps1 submissions import -Plan
 ```
@@ -107,7 +119,7 @@ Import-Csv .\submission-import-results.csv | Group-Object MatchedBy | Select-Obj
 .\vault.ps1 submissions import -Test 1
 ```
 
-Imports one dossier and stops. Its row goes from `PLANNED` to `SUCCESS`.
+Confirm the vault and the application again (`y`, `y`). Imports one dossier and stops. Its row goes from `PLANNED` to `SUCCESS`.
 
 Before continuing, open that application in Vault and confirm the submission is listed
 under it. **If it is not there, stop** — whatever the CSV says.
@@ -120,7 +132,7 @@ under it. **If it is not there, stop** — whatever the CSV says.
 .\vault.ps1 submissions import
 ```
 
-Leave the window open. Safe to stop with Ctrl-C and re-run — it skips what is done.
+Confirm the vault and the application again (`y`, `y`). Leave the window open. Safe to stop with Ctrl-C and re-run — it skips what is done.
 
 Then:
 
