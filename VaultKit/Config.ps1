@@ -147,3 +147,18 @@ function Get-VaultHostName {
     $h = ($h -split '/')[0]
     return $h.Trim().TrimEnd('/')
 }
+
+function Test-VaultPlaceholderValue {
+    # Is this a value nobody has actually filled in?
+    #
+    # The shipped vault.ini carries example hosts so the file explains itself, and update
+    # writes it on a first run. That is helpful right up until something OFFERS one back
+    # as a suggestion: an operator pressing Enter on "your-target-vault.veevavault.com"
+    # has configured nothing, and is told they have configured something. Blank is honest
+    # about being blank; a placeholder is not, which makes it the more dangerous of the
+    # two and the reason this exists.
+    param([AllowEmptyString()][string]$Value)
+    $v = "$Value".Trim()
+    if (-not $v) { return $true }
+    return ($v -match '^your-[a-z0-9-]*\.veevavault\.com$')
+}

@@ -152,7 +152,7 @@ param(
     [int]$Workers = 0
 )
 
-$ScriptVersion = '2026.09.06-5'
+$ScriptVersion = '2026.09.06-6'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -406,6 +406,21 @@ function Get-VaultHostName {
     $h = $Value -replace '^https?://', ''
     $h = ($h -split '/')[0]
     return $h.Trim().TrimEnd('/')
+}
+
+function Test-VaultPlaceholderValue {
+    # Is this a value nobody has actually filled in?
+    #
+    # The shipped vault.ini carries example hosts so the file explains itself, and update
+    # writes it on a first run. That is helpful right up until something OFFERS one back
+    # as a suggestion: an operator pressing Enter on "your-target-vault.veevavault.com"
+    # has configured nothing, and is told they have configured something. Blank is honest
+    # about being blank; a placeholder is not, which makes it the more dangerous of the
+    # two and the reason this exists.
+    param([AllowEmptyString()][string]$Value)
+    $v = "$Value".Trim()
+    if (-not $v) { return $true }
+    return ($v -match '^your-[a-z0-9-]*\.veevavault\.com$')
 }
 
 # ===== VaultKit/Auth.ps1 =====
@@ -8350,8 +8365,13 @@ function Resolve-VaultSubmissionsHost {
         $candidate = Get-VaultSetting -Config $script:Cfg -Section submissions -Key vault -Default ''
         if ($candidate) { $source = '[submissions] vault' }
     }
+    # [vault] target is offered as the suggestion only when somebody has actually set it.
+    # The starter vault.ini ships an example host, and suggesting THAT would turn the one
+    # prompt standing between a wave and the wrong instance into a press of Enter.
+    $suggested = $script:TargetHost
+    if (Test-VaultPlaceholderValue $suggested) { $suggested = '' }
     return (Confirm-VaultSubmissionsVault -ConfigPath $script:CfgPath -Candidate $candidate `
-                -Suggested $script:TargetHost -ApiVersion $script:Api -Source $source -Yes:$Yes)
+                -Suggested $suggested -ApiVersion $script:Api -Source $source -Yes:$Yes)
 }
 
 function Invoke-Submissions {

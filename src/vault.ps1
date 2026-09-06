@@ -152,7 +152,7 @@ param(
     [int]$Workers = 0
 )
 
-$ScriptVersion = '2026.09.06-5'
+$ScriptVersion = '2026.09.06-6'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -726,8 +726,13 @@ function Resolve-VaultSubmissionsHost {
         $candidate = Get-VaultSetting -Config $script:Cfg -Section submissions -Key vault -Default ''
         if ($candidate) { $source = '[submissions] vault' }
     }
+    # [vault] target is offered as the suggestion only when somebody has actually set it.
+    # The starter vault.ini ships an example host, and suggesting THAT would turn the one
+    # prompt standing between a wave and the wrong instance into a press of Enter.
+    $suggested = $script:TargetHost
+    if (Test-VaultPlaceholderValue $suggested) { $suggested = '' }
     return (Confirm-VaultSubmissionsVault -ConfigPath $script:CfgPath -Candidate $candidate `
-                -Suggested $script:TargetHost -ApiVersion $script:Api -Source $source -Yes:$Yes)
+                -Suggested $suggested -ApiVersion $script:Api -Source $source -Yes:$Yes)
 }
 
 function Invoke-Submissions {

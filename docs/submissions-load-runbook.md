@@ -1,6 +1,6 @@
 # Loading a submissions application — step by step
 
-*Updated 2026-09-06 12:33 EDT*
+*Updated 2026-09-06 12:40 EDT*
 
 Copy and paste, one step at a time. Every command is safe to re-run.
 
@@ -114,56 +114,33 @@ From here the commands are shorter: `.\vault.ps1 <command>`.
 
 ---
 
-## Step 4 — Point it at the application
+## Step 4 — Look at what is there
 
-Open the config:
-
-```powershell
-notepad .\vault.ini
-```
-
-Set two things under `[submissions]` and save:
-
-```ini
-[submissions]
-vault = your-vault-sbx.veevavault.com
-path  = /SubmissionsArchive/000000
-```
-
-- **`vault`** is the instance you are importing into. Leave it blank and you will be asked
-  in Step 6 — that works too, and it offers to save your answer here.
-- **`path`** is the **application folder**. Its children are the submissions — `0000`,
-  `0001`, and so on. The last segment of the path *is* the application number; there is no
-  second setting for it, because two settings that have to agree are two settings that can
-  disagree.
-
-Leave everything else alone for now.
-
----
-
-## Step 5 — Log in
-
-```powershell
-.\vault.ps1 login
-```
-
-Enter the account for the target instance. The session is cached in
-`.vault-session.json` and reused by the commands that follow.
-
-> `.vault-session.json` holds a live token. Treat it like a password, and run
-> `.\vault.ps1 logout` when you are finished for the day.
-
----
-
-## Step 6 — Confirm the vault and the folder
+There is nothing to configure first. **The first command asks for what it needs and
+remembers your answers**, so this step is also the setup step.
 
 ```powershell
 .\vault.ps1 submissions list
 ```
 
-**Read this block before answering.** File Staging is shared between the instances on a
-domain, so the folder you picked looks the same from a sandbox as it does from production
-— the path cannot tell you which one you are pointed at.
+It makes **no vault writes and runs no VQL**. It answers "am I pointed at the right
+folder, on the right vault" before anything costs anything.
+
+On a first run it asks four things, in this order.
+
+**1. Which vault.** File Staging is shared between the instances on a domain, so the same
+Submissions Archive listing is visible from a sandbox and from production and looks
+identical in both — the folder cannot tell you which one you are on. Type the host name,
+no `https://`:
+
+```
+Vault host: your-vault-sbx.veevavault.com
+```
+
+**2. Your credentials.** A Windows credential dialog appears. This is the account on the
+vault you just named.
+
+**3. Confirm it is the right one.**
 
 ```
   submissions  your-vault-sbx.veevavault.com
@@ -173,13 +150,28 @@ Is this the vault to import into? [y/N]
 
 **`vaultId` is the field to read.** The host names on a domain are near-misses of each
 other; the vault id is not, and it comes from the session that will do the writing rather
-than from the config.
+than from anything you typed. Answer **`n`** and it asks for a different vault — it does
+not stop the run. Wrong vault is the one mistake nothing downstream can catch, so changing
+your mind here is meant to be easy.
 
-Answer **`n`** and it asks for a different vault and offers to save it. It does not stop
-the run. Wrong vault is the one mistake nothing downstream can catch, so changing your
-mind here is meant to be easy.
+Say `y` and it offers to remember it. Say yes.
 
-Then it shows the folder:
+**4. Which application.** The folder on File Staging whose children are the submissions:
+
+```
+  The application folder on the TARGET vault's File Staging, under the
+  Submissions Archive root. Its children are the submissions:
+
+      /SubmissionsArchive/000000        <- this
+      /SubmissionsArchive/000000/0000
+      /SubmissionsArchive/000000/0001
+
+Submissions Archive path: /SubmissionsArchive/000000
+```
+
+The last segment **is** the application number — it is not asked for twice, because two
+settings that have to agree are two settings that can disagree. It offers to remember this
+too, then shows it back for confirmation:
 
 ```
   staging     /SubmissionsArchive/000000
@@ -187,12 +179,13 @@ Then it shows the folder:
 Is this the right application? [y/N]
 ```
 
-Then it lists what is actually there and writes `submission-manifest.csv`. This step makes
-**no vault writes and runs no VQL** — it answers "did I point it at the right folder"
-before anything costs anything.
+Then it lists what is actually there and writes `submission-manifest.csv`. Check the count
+against what you expect. `SubmissionId` is blank in that file on purpose — filling it in
+needs the vault, which is Step 5.
 
-Check the count against what you expect. `SubmissionId` is blank in that file on purpose;
-filling it in needs the vault, which is Step 7.
+> **Every run after this one confirms rather than asks.** Your answers are written to
+> `vault.ini` beside the script, and each run shows them back and waits for a `y`. To load
+> a different application, answer `n` and give the new one; you never edit a file by hand.
 
 > If it reports loose files beside the dossiers, or `0 dossiers`, the path is pointed one
 > level too high or too low. An application folder that lists nothing is the commonest way
@@ -200,7 +193,7 @@ filling it in needs the vault, which is Step 7.
 
 ---
 
-## Step 7 — Plan the run
+## Step 5 — Plan the run
 
 ```powershell
 .\vault.ps1 submissions import -Plan
@@ -226,7 +219,7 @@ You want every row `WOULD_IMPORT`. Investigate anything else before continuing:
 
 ---
 
-## Step 8 — Import one, and look at it
+## Step 6 — Import one, and look at it
 
 ```powershell
 .\vault.ps1 submissions import -Test 1
@@ -238,13 +231,13 @@ Vault takes.
 
 ---
 
-## Step 9 — Run the wave
+## Step 7 — Run the wave
 
 ```powershell
 .\vault.ps1 submissions import
 ```
 
-Anything already `SUCCESS` is skipped, so this picks up where Step 8 left off, and the
+Anything already `SUCCESS` is skipped, so this picks up where Step 6 left off, and the
 command is safe to re-run after an interruption.
 
 This one is deliberately **sequential** and has no `-Workers`. Eight parallel processes
@@ -254,7 +247,7 @@ Leave the window open. If you must stop it, Ctrl-C is safe — re-run this same 
 
 ---
 
-## Step 10 — Account for every dossier
+## Step 8 — Account for every dossier
 
 ```powershell
 Import-Csv .\submission-import-results.csv | Group-Object Status | Select-Object Count, Name
@@ -277,15 +270,20 @@ Keep both — they are the record of what this wave did.
 .\vault.ps1 logout
 ```
 
+Your session is cached in `.vault-session.json` so the commands above do not ask for
+credentials again. **It holds a live token — treat it like a password**, and run `logout`
+when you are finished for the day. Your answers in `vault.ini` are not secret and stay put.
+
 ---
 
 ## If something goes wrong
 
-**"Is this the right application?" shows a folder from last wave.** You answered `y` to a
-saved value. Answer `n`, or edit `[submissions] path`.
+**"Is this the right application?" shows a folder from last wave.** That is your saved
+answer being shown back, which is what it is for. Answer **`n`** and give the new one.
+Same for the vault. Nothing needs editing by hand.
 
 **Everything errors with the same message.** Almost always the wrong vault or the wrong
-application, not the dossiers. Re-run Step 6 and read the `vaultId`.
+application, not the dossiers. Re-run Step 4 and read the `vaultId`.
 
 **A folder named `VFMTemp`.** That is Vault File Manager's own scratch folder. It is
 skipped by name and needs nothing from you.

@@ -543,6 +543,22 @@ T 'a pasted URL is reduced to a host name' {
     $r = Invoke-VaultVaultPromptCase -Candidate 'https://sbx.example.com/ui/#/x' -Answers @('y')
     Eq $r.Result 'sbx.example.com' 'host'
 }
+Write-Host "== Placeholders are not settings =="
+T 'the shipped source example is a placeholder'  { if (-not (Test-VaultPlaceholderValue 'your-source-vault.veevavault.com')) { throw 'not detected' } }
+T 'the shipped target example is a placeholder'  { if (-not (Test-VaultPlaceholderValue 'your-target-vault.veevavault.com')) { throw 'not detected' } }
+T 'the doc example is a placeholder'             { if (-not (Test-VaultPlaceholderValue 'your-vault-sbx.veevavault.com')) { throw 'not detected' } }
+T 'blank counts as unfilled'                     { if (-not (Test-VaultPlaceholderValue '')) { throw 'not detected' } }
+T 'a real host is not a placeholder'             { if (Test-VaultPlaceholderValue 'acme-rim-sbx.veevavault.com') { throw 'false positive' } }
+T 'a real host that merely starts with y'        { if (Test-VaultPlaceholderValue 'yourcompany.veevavault.com') { throw 'false positive' } }
+
+T 'a placeholder is never offered as the suggestion' {
+    # The failure this prevents: Enter on the prompt accepts an example host, and the one
+    # question standing between a wave and the wrong instance becomes a keystroke.
+    $t = $false
+    try { Invoke-VaultVaultPromptCase -Candidate '' -Suggested '' -Answers @('') | Out-Null } catch { $t = $true }
+    if (-not $t) { throw 'blank with no suggestion should stop' }
+}
+
 T 'the confirmation names the vault, not the vaults' {
     $r = Invoke-VaultVaultPromptCase -Candidate 'sbx.example.com' -Answers @('y')
     if ($r.Asked[0] -notmatch 'import into') { throw "asked '$($r.Asked[0])'" }
