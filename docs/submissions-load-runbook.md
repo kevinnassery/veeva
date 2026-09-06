@@ -1,6 +1,6 @@
 # Loading a submissions application — step by step
 
-*Updated 2026-09-06 12:27 EDT*
+*Updated 2026-09-06 12:33 EDT*
 
 Copy and paste, one step at a time. Every command is safe to re-run.
 
@@ -58,16 +58,16 @@ and results the runs write.
 **This playbook installs one exact version.** Copy the line as it is, commit hash and all:
 
 ```powershell
-curl.exe -sfLO https://raw.githubusercontent.com/kevinnassery/veeva/ce40dddec8fb29e152ca0349fda0c722448941fd/vault.ps1
+curl.exe -sfLO https://raw.githubusercontent.com/kevinnassery/veeva/344e6951c92ab666193b9500920a8e932dc030a0/vault.ps1
 ```
 
 Then let it fetch the README and a starter `vault.ini`, pinned to the same commit:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\vault.ps1 update -Commit ce40dddec8fb29e152ca0349fda0c722448941fd
+powershell -ExecutionPolicy Bypass -File .\vault.ps1 update -Commit 344e6951c92ab666193b9500920a8e932dc030a0
 ```
 
-It will print the version. **It must say `2026.09.06-4`.** If it says anything else, stop
+It will print the version. **It must say `2026.09.06-5`.** If it says anything else, stop
 and ask — you are not running what these steps describe.
 
 `update` never overwrites a `vault.ini` you have already filled in, and it downloads
@@ -83,6 +83,24 @@ exactly as it was.
 
 To move to the current version later, run `.\vault.ps1 update` with no `-Commit` — it
 resolves the head commit itself and prints the hash it used.
+
+### Already have a folder from a previous wave?
+
+**You do not need to download anything by hand.** Run the update from inside it:
+
+```powershell
+cd C:\vault-work
+powershell -ExecutionPolicy Bypass -File .\vault.ps1 update -Commit 344e6951c92ab666193b9500920a8e932dc030a0
+```
+
+It replaces `vault.ps1` and `README.md`, and **leaves your `vault.ini` alone**. Then skip
+to Step 3.
+
+If your folder has a `VaultKit\` directory in it, that is from an older layout where the
+tool shipped as thirteen files. The update will say so. Nothing loads it any more — the
+module is built into `vault.ps1` — so you can delete the folder once you are sure nothing
+of yours is in it. Editing anything inside it changes nothing, which is the only reason
+it is worth mentioning.
 
 ## Step 3 — Allow scripts for this window
 
@@ -281,7 +299,7 @@ after the imports have happened. Close Excel and re-run.
 
 **You are not sure which version you ran.** Every run logs it on the first line, and
 `.\vault.ps1 version` prints it on its own. This playbook is written against
-**`2026.09.06-4`**, commit `ce40dddec8fb`. To get back to exactly that, re-run the
+**`2026.09.06-5`**, commit `344e6951c92a`. To get back to exactly that, re-run the
 `update -Commit` line in Step 2.
 
 ---
