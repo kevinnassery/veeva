@@ -60,6 +60,11 @@ This is once per PowerShell window and changes no machine-wide setting.
 
 Must print `2026.09.06-15`. **Anything else: stop.**
 
+> That hash is long and easy to break when copying — if the update fails with
+> `FAILED ... Nothing here was changed`, nothing was installed and you can just run
+> `.\vault.ps1 update` with no `-Commit`. It fetches the current version and prints the
+> hash it used. The version check above is what matters either way.
+
 Ignore any line telling you to fill in `[vault] source` and `target`, or to run
 `vault.ps1 login`. Neither applies here.
 
@@ -261,6 +266,7 @@ for credentials again while the window is open.
 | `running scripts is disabled on this system` | step 1, the second half — answer `Y` |
 | `>>` instead of a normal prompt | press Ctrl-C, paste **one** command at a time |
 | version is not `2026.09.06-15` | step 2 again |
+| `FAILED ... Nothing here was changed` | the commit hash got broken copying it. Nothing was installed. Run `.\vault.ps1 update` with no `-Commit` |
 | `0 dossiers` | wrong path — step 3 again, answer `n` at the application question |
 | `is not set in ... vault.ini` | run the command from `C:\vault-work` |
 | `It is the login that was refused` | host is fine, the account is not. **Do not retry** — repeated attempts lock it. Stop, send the log |
