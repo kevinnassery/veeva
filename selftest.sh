@@ -102,6 +102,17 @@ case "$got" in
 esac
 rm -rf "$t"
 
+echo "== every question the tool asks is in the playbook =="
+# The operator hit a [Y/n] the steps did not mention. Both the code and the doc were
+# mine, so that was findable by listing the prompts and reading the doc rather than by
+# stopping her mid-run. This does the listing.
+if out=$(python3 check-prompts.py 2>&1); then
+  ok "$(echo "$out" | head -1) - all documented"
+else
+  echo "$out" | sed 's/^/  /'
+  bad "a prompt is not in docs/submissions-load-runbook.md"
+fi
+
 echo "== every version stamp matches =="
 # -prune the stray worktree under .claude/: it is a checkout of another commit, so its
 # stamps are legitimately different and counting them reports skew that is not there.

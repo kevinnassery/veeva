@@ -140,7 +140,7 @@ To load another application, go back to step 3 and answer `n` when it shows you 
 | `0 dossiers` | wrong path — step 3 again, answer `n` at the application question |
 | `is not set in ... vault.ini` | run the command from `C:\vault-work` |
 | `It is the login that was refused` | host is fine, the account is not. **Do not retry** — repeated attempts lock it. Stop, send the log |
-| `Could not reach <host>` | wrong or unreachable host name. Answer `y` and type it again |
+| `Could not reach <host>` then `Try a different vault host? [y/n]` | wrong or unreachable host name. Answer `y` and type it again |
 | anything else | stop, send the log |
 
 Log files are in `C:\vault-work`, named `submissions-list-<date>.log` and
