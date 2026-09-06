@@ -77,14 +77,27 @@ It ends with a count of dossiers. **If the count is 0, stop.**
 .\vault.ps1 submissions import -Plan
 ```
 
-Imports nothing. Then:
+Imports nothing — it only works out which submission record each folder belongs to.
 
 ```powershell
 Import-Csv .\submission-import-results.csv | Group-Object Status | Select-Object Count, Name
 ```
 
-**Every row must say `WOULD_IMPORT`. If any row says anything else, stop** and send
+**Every row must say `PLANNED`, and the count must equal the dossier count from step 3.**
+Anything else — `ERROR`, or a smaller count — **stop** and send
 `submission-import-results.csv` and the log.
+
+Then check *how* each one was matched:
+
+```powershell
+Import-Csv .\submission-import-results.csv | Group-Object MatchedBy | Select-Object Count, Name
+```
+
+| `MatchedBy` | do |
+| --- | --- |
+| `exact name` | nothing, this is normal |
+| `name prefix` | nothing, this is normal — folder `0000` matched `0000 - Something` |
+| anything starting `serial` | **stop and send the CSV.** The folder name did not match any submission name, so it was matched on a serial number instead. Do not import these without someone checking them |
 
 ---
 
@@ -94,7 +107,10 @@ Import-Csv .\submission-import-results.csv | Group-Object Status | Select-Object
 .\vault.ps1 submissions import -Test 1
 ```
 
-Imports one dossier and stops. Check it in Vault before continuing.
+Imports one dossier and stops. Its row goes from `PLANNED` to `SUCCESS`.
+
+Before continuing, open that application in Vault and confirm the submission is listed
+under it. **If it is not there, stop** — whatever the CSV says.
 
 ---
 
@@ -115,8 +131,12 @@ Import-Csv .\submission-import-results.csv | Group-Object Status | Select-Object
 | status | do |
 | --- | --- |
 | `SUCCESS` | nothing — it is imported |
-| `TIMEOUT_AFTER_<n>_MIN` | re-run step 6 |
+| `TIMEOUT_AFTER_<n>_MIN` | not a failure. The job is still running in Vault. Re-run step 6 |
 | anything else | **stop**, send the CSV and the log |
+
+**`SUCCESS` must equal the dossier count from step 3.** A clean-looking table with a short
+count means dossiers were never attempted, which is the failure that looks most like
+success.
 
 ---
 

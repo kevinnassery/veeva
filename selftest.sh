@@ -113,6 +113,17 @@ else
   bad "a prompt is not in docs/submissions-load-runbook.md"
 fi
 
+echo "== every status the playbook names is one the code can write =="
+# The playbook told her to expect WOULD_IMPORT. No such string exists in this repo - the
+# code writes PLANNED. She would have seen a value the steps did not list and stopped,
+# correctly, on a run that was fine.
+if out=$(python3 check-statuses.py 2>&1); then
+  ok "$(echo "$out" | head -1) - all real"
+else
+  echo "$out" | sed 's/^/  /'
+  bad "the playbook names a status the code never writes"
+fi
+
 echo "== every version stamp matches =="
 # -prune the stray worktree under .claude/: it is a checkout of another commit, so its
 # stamps are legitimately different and counting them reports skew that is not there.
