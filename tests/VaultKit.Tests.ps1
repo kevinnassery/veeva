@@ -587,6 +587,18 @@ T 'a local failure stops instead of blaming the host' {
     Eq $script:VkNext 0 'asked nothing'
 }
 
+Write-Host "== What counts as a submission folder =="
+T 'a submission number is a submission'      { if (Test-VaultNonSubmissionFolder -Name '0001') { throw 'skipped a real one' } }
+T 'a dated submission name is a submission'  { if (Test-VaultNonSubmissionFolder -Name '0330_20171026 SBN') { throw 'skipped a real one' } }
+T 'VFMTemp is not'                           { if (-not (Test-VaultNonSubmissionFolder -Name 'VFMTemp')) { throw 'not skipped' } }
+T 'Correspondence is not'                    { if (-not (Test-VaultNonSubmissionFolder -Name 'Correspondence')) { throw 'not skipped' } }
+T 'correspondence in any case is not'        { if (-not (Test-VaultNonSubmissionFolder -Name 'CORRESPONDENCE')) { throw 'not skipped' } }
+T 'a dotted name is not'                     { if (-not (Test-VaultNonSubmissionFolder -Name '.hidden')) { throw 'not skipped' } }
+T 'a name merely containing it IS a submission' {
+    # Skipping on "contains" would drop a real submission whose name mentions it.
+    if (Test-VaultNonSubmissionFolder -Name '0012 Correspondence with FDA') { throw 'dropped a real submission' }
+}
+
 Write-Host "== Which application, run after run =="
 function Invoke-VaultPathCase {
     param([string[]]$Answers, [string]$Path = '')

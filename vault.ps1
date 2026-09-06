@@ -152,7 +152,7 @@ param(
     [int]$Workers = 0
 )
 
-$ScriptVersion = '2026.09.06-11'
+$ScriptVersion = '2026.09.06-12'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -3747,6 +3747,25 @@ function Invoke-VaultDocumentsVerify {
 # equivalent here on purpose, because a session that can only be refreshed by editing a
 # file is a run that dies at the first expiry.
 
+# Folder names that live beside the submissions inside an application and are not
+# submissions. Case-insensitive: PowerShell's -contains is, for strings.
+$script:VaultNonSubmissionFolders = @('VFMTemp', 'Correspondence')
+
+function Test-VaultNonSubmissionFolder {
+    # Is this child of an application folder something other than a submission?
+    #
+    # Its own function so it can be tested without a vault: the cost of getting it wrong
+    # is not an error row, it is a folder that falls through to the serial-number pass and
+    # gets paired with a real submission record.
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Name)
+    $n = "$Name".Trim()
+    if (-not $n) { return $true }
+    if ($n.StartsWith('.')) { return $true }
+    # -contains, not -ccontains: case-insensitive, so correspondence and CORRESPONDENCE
+    # are the same folder as far as this is concerned.
+    return ($script:VaultNonSubmissionFolders -contains $n)
+}
+
 function Get-VaultSubmissionDossier {
     # The dossiers under one application folder: one child per submission.
     #
@@ -3761,18 +3780,29 @@ function Get-VaultSubmissionDossier {
     )
     $out     = New-Object System.Collections.ArrayList
     $skipped = New-Object System.Collections.ArrayList
+    $ignored = New-Object System.Collections.ArrayList
     $next = "/services/file_staging/items/$(ConvertTo-VaultStagingPath $Path)?recursive=false&limit=500"
     while ($next) {
         $r = Invoke-VaultApi -VaultHost $Context.VaultHost -ApiVersion $Context.Api -Method GET -Path $next
         foreach ($d in @(Get-VaultField $r 'data' @())) {
             $name = "$(Get-VaultField $d 'name' '')"
             if (-not $name) { continue }
-            # VFMTemp is Vault's OWN scratch folder and it sits right beside the
-            # dossiers. It is a folder, so every rule below would take it for a
-            # submission, fail to resolve a submission__v called VFMTemp, and write an
-            # ERROR row on every run in every vault that has one. Dotted names go the
-            # same way for the same reason.
-            if ($name -ieq 'VFMTemp' -or $name.StartsWith('.')) { continue }
+            # Folders that sit beside the dossiers and are not submissions. Each is a
+            # folder, so every rule below would take it for one, fail to resolve a
+            # submission__v by that name, and write an ERROR row on every run in every
+            # vault that has it. Worse than the error is the near miss: the name passes
+            # fall through to a serial-number match, and a folder that is not a
+            # submission can be paired with a real record that way.
+            #
+            #   VFMTemp        Vault File Manager's own scratch folder
+            #   Correspondence sits inside an application beside its submissions
+            #
+            # Named in the output, not skipped in silence - otherwise the dossier count
+            # is short and nobody can say why.
+            if (Test-VaultNonSubmissionFolder -Name $name) {
+                [void]$ignored.Add($name)
+                continue
+            }
             $kind = "$(Get-VaultField $d 'kind' 'file')"
             if ($kind -ne 'folder') {
                 $isArchive = $false
@@ -3797,6 +3827,10 @@ function Get-VaultSubmissionDossier {
             })
         }
         $next = "$(Get-VaultField (Get-VaultField $r 'responseDetails' $null) 'next_page' '')"
+    }
+
+    if ($ignored.Count) {
+        Write-VaultLog "$($ignored.Count) folder(s) beside the dossiers are not submissions and were skipped: $(($ignored | Select-Object -Unique) -join ', ')"
     }
 
     if ($skipped.Count) {
