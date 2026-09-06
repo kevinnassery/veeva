@@ -1,6 +1,6 @@
 # Veeva Vault — migration kit
 
-*Updated 2026-09-05 10:12 EDT*
+*Updated 2026-09-06 12:06 EDT*
 
 Moves documents and their attachments from one Vault to another. Every command compares
 both sides first and delivers only what the target is missing, so a run is safe to repeat.
@@ -193,6 +193,26 @@ Set `[submissions] path` to the **application folder**, e.g. `/SubmissionsArchiv
 Its children are the submissions — `0000`, `0001`, … — as folders, or as `.zip`/`.tar.gz`
 archives. The last segment of that path *is* the application; it is not configured a
 second time, because two settings that have to agree are two settings that can disagree.
+
+**Which vault, asked and confirmed every load.** File Staging is shared between the
+instances on a domain, so the same Submissions Archive listing is visible from production
+and from a sandbox and looks identical in both. The staging path cannot tell you where an
+import lands. `[submissions] vault` is therefore asked for rather than defaulted — the
+prompt suggests `[vault] target`, so Enter still takes it, but a person has seen it — and
+whatever is set is shown and confirmed at the start of every run:
+
+```
+  submissions  your-vault-sbx.veevavault.com
+               someone@example.com  userId 11280389  vaultId 8
+Is this the vault to import into? [y/N]
+```
+
+`vaultId` is the field to read. On a shared domain the host names are near-misses of each
+other; the vault id is not, and it comes from the session that will do the writing rather
+than from the config. Answering **no** asks for a different vault and offers to save it —
+it does not stop the run, because a confirmation whose only other answer is "abort" gets a
+reflex "yes", and the whole point of this prompt is that somebody reads it. `-VaultHost`
+overrides it for one run; `-Yes` skips the question, as everywhere else.
 
 You type no ids. Each `submission__v` record is found by VQL from the staging layout
 itself: the folder name is the submission number, the folder above it is the application.
@@ -457,6 +477,7 @@ up to sixteen files on disk rather than two.
 | `.\vault.ps1 login` | log in to both vaults, cache the sessions |
 | `.\vault.ps1 whoami` | who is cached, and how old |
 | `.\vault.ps1 probe` | read-only survey of each vault, including staging paths |
+| `.\vault.ps1 submissions list` | what is under the application folder. No writes, no VQL |
 | `.\vault.ps1 submissions import` | import staged dossiers into RIM Submissions Archive |
 | `-Plan` | report what would happen, change nothing |
 | `-Test 5` | stop once 5 are genuinely done |
@@ -496,6 +517,7 @@ same way, by putting the SHA where `main` is in the URL.
 
 | | |
 | --- | --- |
+| Loading one application, step by step | [`docs/submissions-load-runbook.md`](docs/submissions-load-runbook.md) |
 | Vault API v26.2, offline | [`docs/api/`](docs/api/INDEX.md) |
 | Library bulk action → API | [`docs/library-bulk-action-api-map.md`](docs/library-bulk-action-api-map.md) |
 | The id map, specified | [`docs/map-format.md`](docs/map-format.md) |
