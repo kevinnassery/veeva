@@ -1,6 +1,6 @@
 # Load a submissions application
 
-*Updated 2026-09-06 13:26 EDT — pinned to `48e9e00`, version `2026.09.06-10`*
+*Updated 2026-09-06 13:58 EDT — pinned to `a2810bc`, version `2026.09.06-11`*
 
 One application per run. The dossiers are already on File Staging; nothing is uploaded.
 
@@ -51,14 +51,14 @@ This is once per PowerShell window and changes no machine-wide setting.
 ## 2. Update, and check the version
 
 ```powershell
-.\vault.ps1 update -Commit 48e9e00f81e77c56b1de0254728b72c7ddd2197b
+.\vault.ps1 update -Commit a2810bc255d7d77360caa5dcb775f1bcaee5a23c
 ```
 
 ```powershell
 .\vault.ps1 version
 ```
 
-Must print `2026.09.06-10`. **Anything else: stop.**
+Must print `2026.09.06-11`. **Anything else: stop.**
 
 Ignore any line telling you to fill in `[vault] source` and `target`, or to run
 `vault.ps1 login`. Neither applies here.
@@ -215,7 +215,7 @@ for credentials again while the window is open.
 | --- | --- |
 | `running scripts is disabled on this system` | step 1, the second half — answer `Y` |
 | `>>` instead of a normal prompt | press Ctrl-C, paste **one** command at a time |
-| version is not `2026.09.06-10` | step 2 again |
+| version is not `2026.09.06-11` | step 2 again |
 | `0 dossiers` | wrong path — step 3 again, answer `n` at the application question |
 | `is not set in ... vault.ini` | run the command from `C:\vault-work` |
 | `It is the login that was refused` | host is fine, the account is not. **Do not retry** — repeated attempts lock it. Stop, send the log |
@@ -240,11 +240,11 @@ cd C:\vault-work
 ```
 
 ```powershell
-curl.exe -sfLO https://raw.githubusercontent.com/kevinnassery/veeva/48e9e00f81e77c56b1de0254728b72c7ddd2197b/vault.ps1
+curl.exe -sfLO https://raw.githubusercontent.com/kevinnassery/veeva/a2810bc255d7d77360caa5dcb775f1bcaee5a23c/vault.ps1
 ```
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\vault.ps1 update -Commit 48e9e00f81e77c56b1de0254728b72c7ddd2197b
+powershell -ExecutionPolicy Bypass -File .\vault.ps1 update -Commit a2810bc255d7d77360caa5dcb775f1bcaee5a23c
 ```
 
 Then start at step 1.
