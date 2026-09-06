@@ -587,6 +587,31 @@ T 'a local failure stops instead of blaming the host' {
     Eq $script:VkNext 0 'asked nothing'
 }
 
+Write-Host "== Results are scoped to the application =="
+$rd = Join-Path $tmp ('vk-res-' + [guid]::NewGuid().ToString('N')); New-Item -ItemType Directory -Force $rd | Out-Null
+$rf = Join-Path $rd 'submission-import-results.csv'
+@(
+  [pscustomobject]@{ FileName='0001'; Application='000111'; StagingPath='/SubmissionsArchive/000111/0001'; Status='SUCCESS' }
+  [pscustomobject]@{ FileName='0002'; Application='000111'; StagingPath='/SubmissionsArchive/000111/0002'; Status='SUCCESS' }
+) | Export-Csv -LiteralPath $rf -NoTypeInformation -Encoding UTF8
+
+T 'a folder name reused by another application is NOT treated as done' {
+    # The one that silently dropped dossiers: 0001 imported under 000111 made 0001 under
+    # 000222 look already-imported, so it was skipped and never loaded. No error, and the
+    # run read as clean.
+    $res = New-VaultResults -Path $rf -KeyColumn 'StagingPath' -DoneStatuses @('SUCCESS') -Existing 'Resume'
+    if ($res.Done.ContainsKey('/SubmissionsArchive/000222/0001')) { throw 'another application''s 0001 counted as done' }
+}
+T 'the same dossier in the same application IS done' {
+    $res = New-VaultResults -Path $rf -KeyColumn 'StagingPath' -DoneStatuses @('SUCCESS') -Existing 'Resume'
+    if (-not $res.Done.ContainsKey('/SubmissionsArchive/000111/0001')) { throw 'own row not seen as done' }
+}
+T 'keying on the bare name is what caused it' {
+    # Kept as the demonstration: the old key collides across applications by design.
+    $res = New-VaultResults -Path $rf -KeyColumn 'FileName' -DoneStatuses @('SUCCESS') -Existing 'Resume'
+    if (-not $res.Done.ContainsKey('0001')) { throw 'expected the old key to collide' }
+}
+
 Write-Host "== What counts as a submission folder =="
 T 'a submission number is a submission'      { if (Test-VaultNonSubmissionFolder -Name '0001') { throw 'skipped a real one' } }
 T 'a dated submission name is a submission'  { if (Test-VaultNonSubmissionFolder -Name '0330_20171026 SBN') { throw 'skipped a real one' } }

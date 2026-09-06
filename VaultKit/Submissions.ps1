@@ -849,7 +849,17 @@ function Invoke-VaultSubmissionsImport {
     # parallel would queue eight jobs on the same vault rather than doing the work eight
     # times faster, and the failure mode - a wave of imports nobody is watching - is
     # exactly what the phased design exists to prevent.
-    $res = New-VaultResults -Path (Join-Path $c.Out 'submission-import-results.csv') -KeyColumn 'FileName' `
+    # Keyed on the STAGING PATH, not the folder name.
+    #
+    # One results file serves every application an operator loads, and submission folders
+    # are named 0001, 0002, SN 003 - names that repeat in every application there is. Keyed
+    # on the name alone, a dossier already imported under application A was found "done"
+    # when application B reached its own folder of the same name: skipped, counted as
+    # already SUCCESS, and never imported. Silent, and it reads as a clean run.
+    #
+    # The path carries the application, so it is the dossier's actual identity. Results
+    # files written before this keep working - they already record StagingPath.
+    $res = New-VaultResults -Path (Join-Path $c.Out 'submission-import-results.csv') -KeyColumn 'StagingPath' `
               -DoneStatuses @('SUCCESS') -Existing $c.Existing
 
     # Resolved ONCE, before the loop: the application, then every submission in it.
@@ -873,10 +883,11 @@ function Invoke-VaultSubmissionsImport {
     foreach ($d in $dossiers) {
         $i++
         $prefix = "[$i/$($dossiers.Count)] $($d.Name)"
-        if ($res.Done.ContainsKey($d.Name)) { $stat.Skipped++; continue }
+        if ($res.Done.ContainsKey($d.Path)) { $stat.Skipped++; continue }
 
         $row = [pscustomobject][ordered]@{
             FileName      = $d.Name
+            Application   = $appKey
             StagingPath   = $d.Path
             SizeMB        = [math]::Round(([double]$d.Size) / 1MB, 2)
             SubmissionKey = $d.Base
