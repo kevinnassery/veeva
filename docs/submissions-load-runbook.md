@@ -1,6 +1,6 @@
 # Load a submissions application
 
-*Updated 2026-09-06 13:58 EDT — pinned to `a2810bc`, version `2026.09.06-11`*
+*Updated 2026-09-06 14:46 EDT — pinned to `71d16e8`, version `2026.09.06-12`*
 
 One application per run. The dossiers are already on File Staging; nothing is uploaded.
 
@@ -51,14 +51,14 @@ This is once per PowerShell window and changes no machine-wide setting.
 ## 2. Update, and check the version
 
 ```powershell
-.\vault.ps1 update -Commit a2810bc255d7d77360caa5dcb775f1bcaee5a23c
+.\vault.ps1 update -Commit 71d16e86e6060d3ea6759cc04078325034af4859
 ```
 
 ```powershell
 .\vault.ps1 version
 ```
 
-Must print `2026.09.06-11`. **Anything else: stop.**
+Must print `2026.09.06-12`. **Anything else: stop.**
 
 Ignore any line telling you to fill in `[vault] source` and `target`, or to run
 `vault.ps1 login`. Neither applies here.
@@ -91,6 +91,9 @@ Saying `Y` to the two save questions is what makes the next run show your answer
 a `y` instead of asking for them again.
 
 It ends with a count of dossiers. **If the count is 0, stop.**
+
+Folders that are not submissions — `Correspondence`, Vault's own `VFMTemp` — are
+skipped and named in the output, so the count is of real dossiers only.
 
 ---
 
@@ -215,7 +218,7 @@ for credentials again while the window is open.
 | --- | --- |
 | `running scripts is disabled on this system` | step 1, the second half — answer `Y` |
 | `>>` instead of a normal prompt | press Ctrl-C, paste **one** command at a time |
-| version is not `2026.09.06-11` | step 2 again |
+| version is not `2026.09.06-12` | step 2 again |
 | `0 dossiers` | wrong path — step 3 again, answer `n` at the application question |
 | `is not set in ... vault.ini` | run the command from `C:\vault-work` |
 | `It is the login that was refused` | host is fine, the account is not. **Do not retry** — repeated attempts lock it. Stop, send the log |
@@ -240,11 +243,11 @@ cd C:\vault-work
 ```
 
 ```powershell
-curl.exe -sfLO https://raw.githubusercontent.com/kevinnassery/veeva/a2810bc255d7d77360caa5dcb775f1bcaee5a23c/vault.ps1
+curl.exe -sfLO https://raw.githubusercontent.com/kevinnassery/veeva/71d16e86e6060d3ea6759cc04078325034af4859/vault.ps1
 ```
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\vault.ps1 update -Commit a2810bc255d7d77360caa5dcb775f1bcaee5a23c
+powershell -ExecutionPolicy Bypass -File .\vault.ps1 update -Commit 71d16e86e6060d3ea6759cc04078325034af4859
 ```
 
 Then start at step 1.
