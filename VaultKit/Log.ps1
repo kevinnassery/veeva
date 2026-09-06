@@ -59,3 +59,17 @@ function Format-VaultBytes {
     if ($Bytes -ge 1KB) { return ('{0:N0} KB' -f ($Bytes / 1KB)) }
     return ('{0:N0} B' -f $Bytes)
 }
+
+function Write-VaultLogBlock {
+    # A message that already has newlines in it, logged one line at a time.
+    #
+    # Write-VaultLog takes a single string and prefixes it, so a multi-line message became
+    # one enormous line that ran off the right of the console. That is where the reason a
+    # login failed was living: the operator saw "Could not establish a session on ..." and
+    # the half of the sentence that said WHY was off screen.
+    param(
+        [Parameter(Mandatory, Position = 0)][AllowEmptyString()][string]$Message,
+        [Parameter(Position = 1)][ValidateSet('INFO', 'OK', 'WARN', 'ERROR')][string]$Level = 'INFO'
+    )
+    foreach ($line in ($Message -split "`r?`n")) { Write-VaultLog $line $Level }
+}

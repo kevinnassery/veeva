@@ -152,7 +152,7 @@ param(
     [int]$Workers = 0
 )
 
-$ScriptVersion = '2026.09.06-8'
+$ScriptVersion = '2026.09.06-9'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -254,6 +254,20 @@ function Format-VaultBytes {
     if ($Bytes -ge 1MB) { return ('{0:N1} MB' -f ($Bytes / 1MB)) }
     if ($Bytes -ge 1KB) { return ('{0:N0} KB' -f ($Bytes / 1KB)) }
     return ('{0:N0} B' -f $Bytes)
+}
+
+function Write-VaultLogBlock {
+    # A message that already has newlines in it, logged one line at a time.
+    #
+    # Write-VaultLog takes a single string and prefixes it, so a multi-line message became
+    # one enormous line that ran off the right of the console. That is where the reason a
+    # login failed was living: the operator saw "Could not establish a session on ..." and
+    # the half of the sentence that said WHY was off screen.
+    param(
+        [Parameter(Mandatory, Position = 0)][AllowEmptyString()][string]$Message,
+        [Parameter(Position = 1)][ValidateSet('INFO', 'OK', 'WARN', 'ERROR')][string]$Level = 'INFO'
+    )
+    foreach ($line in ($Message -split "`r?`n")) { Write-VaultLog $line $Level }
 }
 
 # ===== VaultKit/Config.ps1 =====
@@ -530,6 +544,23 @@ function Test-VaultCanPrompt {
     return $true
 }
 
+function Read-VaultYesNo {
+    # An explicit y or n, with no default.
+    #
+    # [y/N] prompts read as harmless until "no" does something expensive. Here it discards
+    # a host name and a login and starts over, so an operator pressing Enter at what looks
+    # like a confirmation loses work she has to retype - and the same shape put Windows
+    # PowerShell's execution-policy prompt at "No" for somebody who just pressed Enter.
+    # Keep asking until a person actually says which one they mean.
+    param([Parameter(Mandatory)][string]$Question)
+    while ($true) {
+        $a = "$(Read-Host "$Question [y/n]")".Trim().ToLowerInvariant()
+        if ($a -in @('y', 'yes')) { return $true }
+        if ($a -in @('n', 'no'))  { return $false }
+        Write-Host '  Answer y or n.' -ForegroundColor Yellow
+    }
+}
+
 function Get-VaultCredential {
     # The credential for one vault. Cached per host, so a long run re-authenticates
     # silently against the right vault and a shared account is still only typed once.
@@ -562,6 +593,16 @@ function Set-VaultCredential {
 
 function Clear-VaultCredentials {
     $script:VaultCredentials = @{}
+}
+
+function Clear-VaultCredential {
+    # Forget one host's credential. Connect-VaultHost registers the credential BEFORE it
+    # knows whether it works, so that a mid-run re-auth uses the right password per vault.
+    # The cost is that a rejected password stays cached and every retry in the same
+    # process silently reuses it - the operator retypes nothing and sees the same failure,
+    # while Vault counts another attempt against an account it will eventually lock.
+    param([Parameter(Mandatory)][string]$VaultHost)
+    if ($script:VaultCredentials.ContainsKey($VaultHost)) { [void]$script:VaultCredentials.Remove($VaultHost) }
 }
 
 function Export-VaultCredentials {
@@ -4241,10 +4282,26 @@ function Confirm-VaultSubmissionsVault {
             [void](Confirm-VaultSessions -Vaults @(@{ Role = 'submissions'; Name = $h }) -ApiVersion $ApiVersion -Yes)
         }
         catch {
-            # A mistyped host fails here. Stopping the run over a typo would be its own
-            # small cruelty when the next thing we would do anyway is ask for one.
-            Write-VaultLog "Could not establish a session on ${h}: $_" 'WARN'
+            $reason = "$_"
+            # Registered before it was known to work, so it must be forgotten now or the
+            # next attempt silently reuses a password the vault has already rejected.
+            Clear-VaultCredential -VaultHost $h
+
+            # Two different failures wearing one face, and treating them alike is what
+            # sent an operator back to "Vault host:" after a rejected password - throwing
+            # away a host name that was never the problem, with the reason off screen.
+            if ($reason -like '*Authentication failed*' -or $reason -like '*returned no sessionId*') {
+                Write-VaultLog "$h answered. It is the login that was refused, not the host name." 'ERROR'
+                Write-VaultLogBlock $reason 'ERROR'
+                throw ('Stopped. Retyping the host will not help and the same password will fail ' +
+                       'again - and Vault locks an account after repeated attempts. Run the command ' +
+                       'again once you know the login works.')
+            }
+
+            Write-VaultLog "Could not reach $h at all. This is not a password problem." 'WARN'
+            Write-VaultLogBlock $reason 'WARN'
             if (-not $canAsk) { throw }
+            if (-not (Read-VaultYesNo 'Try a different vault host?')) { throw "Stopped: could not reach $h." }
             $h = ''; $typed = $false
             continue
         }
@@ -4255,10 +4312,7 @@ function Confirm-VaultSubmissionsVault {
             return $h
         }
 
-        # [y/N] and nothing else: "no" already means "ask me for a different one", so a
-        # third letter would be a third word for the same behaviour.
-        $answer = Read-Host 'Is this the vault to import into? [y/N]'
-        if ($answer -match '^[Yy]') {
+        if (Read-VaultYesNo 'Is this the vault to import into?') {
             # Offered only now, and only for a value that was typed. Saving before the
             # confirmation would write down a vault that was about to be rejected.
             if ($typed) { Save-VaultSubmissionsVault -ConfigPath $ConfigPath -VaultDns $h }
@@ -4351,8 +4405,9 @@ function Confirm-VaultStagingPath {
         Write-VaultLog 'Not a console - proceeding without confirmation.' 'WARN'
         return $p
     }
-    $answer = Read-Host "Is this the right application? [y/N]"
-    if ($answer -notmatch '^[Yy]') { throw 'Stopped: the staging path was not confirmed.' }
+    if (-not (Read-VaultYesNo 'Is this the right application?')) {
+        throw 'Stopped: the staging path was not confirmed.'
+    }
     return $p
 }
 

@@ -103,6 +103,23 @@ function Test-VaultCanPrompt {
     return $true
 }
 
+function Read-VaultYesNo {
+    # An explicit y or n, with no default.
+    #
+    # [y/N] prompts read as harmless until "no" does something expensive. Here it discards
+    # a host name and a login and starts over, so an operator pressing Enter at what looks
+    # like a confirmation loses work she has to retype - and the same shape put Windows
+    # PowerShell's execution-policy prompt at "No" for somebody who just pressed Enter.
+    # Keep asking until a person actually says which one they mean.
+    param([Parameter(Mandatory)][string]$Question)
+    while ($true) {
+        $a = "$(Read-Host "$Question [y/n]")".Trim().ToLowerInvariant()
+        if ($a -in @('y', 'yes')) { return $true }
+        if ($a -in @('n', 'no'))  { return $false }
+        Write-Host '  Answer y or n.' -ForegroundColor Yellow
+    }
+}
+
 function Get-VaultCredential {
     # The credential for one vault. Cached per host, so a long run re-authenticates
     # silently against the right vault and a shared account is still only typed once.
@@ -135,6 +152,16 @@ function Set-VaultCredential {
 
 function Clear-VaultCredentials {
     $script:VaultCredentials = @{}
+}
+
+function Clear-VaultCredential {
+    # Forget one host's credential. Connect-VaultHost registers the credential BEFORE it
+    # knows whether it works, so that a mid-run re-auth uses the right password per vault.
+    # The cost is that a rejected password stays cached and every retry in the same
+    # process silently reuses it - the operator retypes nothing and sees the same failure,
+    # while Vault counts another attempt against an account it will eventually lock.
+    param([Parameter(Mandatory)][string]$VaultHost)
+    if ($script:VaultCredentials.ContainsKey($VaultHost)) { [void]$script:VaultCredentials.Remove($VaultHost) }
 }
 
 function Export-VaultCredentials {

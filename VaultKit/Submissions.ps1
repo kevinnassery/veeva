@@ -581,10 +581,26 @@ function Confirm-VaultSubmissionsVault {
             [void](Confirm-VaultSessions -Vaults @(@{ Role = 'submissions'; Name = $h }) -ApiVersion $ApiVersion -Yes)
         }
         catch {
-            # A mistyped host fails here. Stopping the run over a typo would be its own
-            # small cruelty when the next thing we would do anyway is ask for one.
-            Write-VaultLog "Could not establish a session on ${h}: $_" 'WARN'
+            $reason = "$_"
+            # Registered before it was known to work, so it must be forgotten now or the
+            # next attempt silently reuses a password the vault has already rejected.
+            Clear-VaultCredential -VaultHost $h
+
+            # Two different failures wearing one face, and treating them alike is what
+            # sent an operator back to "Vault host:" after a rejected password - throwing
+            # away a host name that was never the problem, with the reason off screen.
+            if ($reason -like '*Authentication failed*' -or $reason -like '*returned no sessionId*') {
+                Write-VaultLog "$h answered. It is the login that was refused, not the host name." 'ERROR'
+                Write-VaultLogBlock $reason 'ERROR'
+                throw ('Stopped. Retyping the host will not help and the same password will fail ' +
+                       'again - and Vault locks an account after repeated attempts. Run the command ' +
+                       'again once you know the login works.')
+            }
+
+            Write-VaultLog "Could not reach $h at all. This is not a password problem." 'WARN'
+            Write-VaultLogBlock $reason 'WARN'
             if (-not $canAsk) { throw }
+            if (-not (Read-VaultYesNo 'Try a different vault host?')) { throw "Stopped: could not reach $h." }
             $h = ''; $typed = $false
             continue
         }
@@ -595,10 +611,7 @@ function Confirm-VaultSubmissionsVault {
             return $h
         }
 
-        # [y/N] and nothing else: "no" already means "ask me for a different one", so a
-        # third letter would be a third word for the same behaviour.
-        $answer = Read-Host 'Is this the vault to import into? [y/N]'
-        if ($answer -match '^[Yy]') {
+        if (Read-VaultYesNo 'Is this the vault to import into?') {
             # Offered only now, and only for a value that was typed. Saving before the
             # confirmation would write down a vault that was about to be rejected.
             if ($typed) { Save-VaultSubmissionsVault -ConfigPath $ConfigPath -VaultDns $h }
@@ -691,8 +704,9 @@ function Confirm-VaultStagingPath {
         Write-VaultLog 'Not a console - proceeding without confirmation.' 'WARN'
         return $p
     }
-    $answer = Read-Host "Is this the right application? [y/N]"
-    if ($answer -notmatch '^[Yy]') { throw 'Stopped: the staging path was not confirmed.' }
+    if (-not (Read-VaultYesNo 'Is this the right application?')) {
+        throw 'Stopped: the staging path was not confirmed.'
+    }
     return $p
 }
 

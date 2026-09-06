@@ -459,6 +459,7 @@ function Invoke-VaultVaultPromptCase {
     param(
         [string[]]$Answers,
         [string[]]$FailHosts = @(),
+        [string[]]$AuthFailHosts = @(),
         [string]$Candidate = '',
         [string]$Suggested = '',
         [string]$Source    = ''
@@ -468,6 +469,7 @@ function Invoke-VaultVaultPromptCase {
     $script:VkAsked   = New-Object System.Collections.ArrayList
     $script:VkSaved   = ''
     $script:VkFail    = @($FailHosts)
+    $script:VkAuthFail = @($AuthFailHosts)
 
     # Defined inside this function, so they shadow the real ones only for what it calls -
     # stubbing Write-Host at script scope would silence the suite's own output.
@@ -483,7 +485,12 @@ function Invoke-VaultVaultPromptCase {
     }
     function Confirm-VaultSessions {
         param($Vaults, $ApiVersion, [switch]$Yes)
-        if ($script:VkFail -contains $Vaults[0].Name) { throw "login failed for $($Vaults[0].Name)" }
+        $n = $Vaults[0].Name
+        # Vault's own wording, because the code keys on it to tell a refused login from a
+        # host that never answered - a test that invents its own phrasing would pass while
+        # the classification was broken.
+        if ($script:VkAuthFail -contains $n) { throw "Authentication failed for $n as someone: USERNAME_OR_PASSWORD_INCORRECT" }
+        if ($script:VkFail -contains $n) { throw "The remote name could not be resolved: '$n'" }
         return @()
     }
     function Set-VaultSetting {
@@ -534,10 +541,36 @@ T 'blank with no suggestion stops rather than guessing' {
     try { Invoke-VaultVaultPromptCase -Candidate '' -Suggested '' -Answers @('') | Out-Null } catch { $t = $true }
     if (-not $t) { throw 'did not throw' }
 }
-T 'a host that will not log in is asked for again' {
+T 'an unreachable host asks before throwing the answer away' {
     $r = Invoke-VaultVaultPromptCase -Candidate 'typo.example.com' -FailHosts @('typo.example.com') `
-             -Answers @('good.example.com', 'y', 'y')
+             -Answers @('y', 'good.example.com', 'y', 'y')
     Eq $r.Result 'good.example.com' 'host'
+    if ($r.Asked[0] -notmatch 'different vault host') { throw "first question was '$($r.Asked[0])'" }
+}
+T 'declining to try another host stops' {
+    $t = $false
+    try { Invoke-VaultVaultPromptCase -Candidate 'typo.example.com' -FailHosts @('typo.example.com') -Answers @('n') | Out-Null }
+    catch { $t = $true }
+    if (-not $t) { throw 'did not stop' }
+}
+T 'a REFUSED LOGIN stops instead of re-asking for the host' {
+    # The one that bit an operator: a rejected password sent her back to "Vault host:",
+    # discarding a host name that was never wrong, with the reason off the screen edge.
+    $t = ''
+    try { Invoke-VaultVaultPromptCase -Candidate 'good.example.com' -AuthFailHosts @('good.example.com') -Answers @() | Out-Null }
+    catch { $t = "$_" }
+    if (-not $t) { throw 'did not stop' }
+    if ($t -notmatch 'lock') { throw "message did not mention account lockout: $t" }
+}
+T 'a refused login asks nothing at all' {
+    $r = $null
+    try { $r = Invoke-VaultVaultPromptCase -Candidate 'good.example.com' -AuthFailHosts @('good.example.com') -Answers @('y','y','y') } catch { }
+    Eq $script:VkNext 0 'no prompts consumed'
+}
+T 'an unrecognised answer is asked again, not taken as no' {
+    $r = Invoke-VaultVaultPromptCase -Candidate 'sbx.example.com' -Answers @('maybe', '', 'y')
+    Eq $r.Result 'sbx.example.com' 'host'
+    Eq $r.Asked.Count 3 'asked until answered'
 }
 T 'a pasted URL is reduced to a host name' {
     $r = Invoke-VaultVaultPromptCase -Candidate 'https://sbx.example.com/ui/#/x' -Answers @('y')
