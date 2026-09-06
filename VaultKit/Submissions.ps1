@@ -540,9 +540,7 @@ function Confirm-VaultSubmissionsVault {
     )
     # A console can answer; a scheduled run cannot, and blocking for ever on an answer
     # nobody is there to give is worse than either proceeding or stopping outright.
-    $canAsk = $true
-    if ($script:VaultNoPrompt) { $canAsk = $false }
-    if ($canAsk) { try { if ([Console]::IsInputRedirected) { $canAsk = $false } } catch { } }
+    $canAsk = Test-VaultCanPrompt
 
     $h     = "$Candidate".Trim()
     $typed = $false
@@ -648,9 +646,7 @@ function Confirm-VaultStagingPath {
     )
     # A console can answer; a scheduled run cannot, and blocking for ever on an answer
     # nobody is there to give is worse than either proceeding or stopping outright.
-    $canAsk = $true
-    if ($script:VaultNoPrompt) { $canAsk = $false }
-    if ($canAsk) { try { if ([Console]::IsInputRedirected) { $canAsk = $false } } catch { } }
+    $canAsk = Test-VaultCanPrompt
 
     $p = "$Path".Trim()
 

@@ -86,6 +86,23 @@ function Set-VaultNoPrompt {
     $script:VaultNoPrompt = $Value
 }
 
+function Test-VaultCanPrompt {
+    # Is there a person here who can answer a question?
+    #
+    # One function rather than the same four lines in every prompting site, because they
+    # had already started to drift and because a prompt is only as good as the check that
+    # decides whether to show it. -NoPrompt says no outright; otherwise a redirected stdin
+    # means a scheduled run, a pipeline or an SSH command, where Read-Host does not fail -
+    # it blocks for ever on an answer nobody is there to give.
+    #
+    # It is also the seam the tests need: the interactive branches are the whole point of
+    # these prompts, and they cannot be reached at all from a test host without one
+    # function to stand in for.
+    if ($script:VaultNoPrompt) { return $false }
+    try { if ([Console]::IsInputRedirected) { return $false } } catch { }
+    return $true
+}
+
 function Get-VaultCredential {
     # The credential for one vault. Cached per host, so a long run re-authenticates
     # silently against the right vault and a shared account is still only typed once.
@@ -97,11 +114,7 @@ function Get-VaultCredential {
     param([Parameter(Mandatory)][string]$VaultHost, [string]$Message = '')
     if ($script:VaultCredentials.ContainsKey($VaultHost)) { return $script:VaultCredentials[$VaultHost] }
 
-    $blocked = $script:VaultNoPrompt
-    if (-not $blocked) {
-        try { $blocked = [Console]::IsInputRedirected } catch { }
-    }
-    if ($blocked) {
+    if (-not (Test-VaultCanPrompt)) {
         throw "No cached session for $VaultHost and no way to ask for credentials here. Run 'vault login' from a console first."
     }
 
@@ -315,9 +328,7 @@ function Confirm-VaultSessions {
 
     # A console can answer; a scheduled run cannot, and blocking it for ever waiting on
     # an answer nobody is there to give would be worse than proceeding.
-    $canAsk = $true
-    if ($script:VaultNoPrompt) { $canAsk = $false }
-    if ($canAsk) { try { if ([Console]::IsInputRedirected) { $canAsk = $false } } catch { } }
+    $canAsk = Test-VaultCanPrompt
     if (-not $canAsk) {
         Write-VaultLog 'Not a console - proceeding without confirmation.' 'WARN'
         return $rows

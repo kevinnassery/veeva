@@ -449,5 +449,105 @@ T 'budget throws when tight' { $t=$false; try{ Assert-VaultDiskBudget -Path $td 
 T 'budget ok when room'      { Assert-VaultDiskBudget -Path $td -Needed 1024 -ReserveMB 1 }
 
 Pop-Location
+Write-Host "== Which vault the load writes into =="
+# The interactive branches ARE the feature - a prompt that is never shown to a person is
+# not a prompt - so they are driven here with Read-Host, Confirm-VaultSessions and
+# Set-VaultSetting stood in for. Test-VaultCanPrompt exists to be the seam: on a test
+# host stdin is redirected, so without it every one of these paths is skipped and the
+# suite reports green over code nobody ran.
+function Invoke-VaultVaultPromptCase {
+    param(
+        [string[]]$Answers,
+        [string[]]$FailHosts = @(),
+        [string]$Candidate = '',
+        [string]$Suggested = '',
+        [string]$Source    = ''
+    )
+    $script:VkAnswers = @($Answers)
+    $script:VkNext    = 0
+    $script:VkAsked   = New-Object System.Collections.ArrayList
+    $script:VkSaved   = ''
+    $script:VkFail    = @($FailHosts)
+
+    # Defined inside this function, so they shadow the real ones only for what it calls -
+    # stubbing Write-Host at script scope would silence the suite's own output.
+    function Test-VaultCanPrompt { return $true }
+    function Write-Host { param([Parameter(ValueFromRemainingArguments = $true)]$Rest) }
+    function Write-VaultLog { param($Message, $Level = 'INFO') }
+    function Read-Host {
+        param($Prompt)
+        [void]$script:VkAsked.Add("$Prompt")
+        if ($script:VkNext -ge $script:VkAnswers.Count) { throw "asked more than scripted: $Prompt" }
+        $a = $script:VkAnswers[$script:VkNext]; $script:VkNext++
+        return $a
+    }
+    function Confirm-VaultSessions {
+        param($Vaults, $ApiVersion, [switch]$Yes)
+        if ($script:VkFail -contains $Vaults[0].Name) { throw "login failed for $($Vaults[0].Name)" }
+        return @()
+    }
+    function Set-VaultSetting {
+        param($Path, $Section, $Key, $Value)
+        $script:VkSaved = "$Section/$Key=$Value"
+    }
+
+    $h = Confirm-VaultSubmissionsVault -ConfigPath 'C:\x\vault.ini' -Candidate $Candidate `
+             -Suggested $Suggested -ApiVersion 'v26.2' -Source $Source
+    return [pscustomobject]@{ Result = $h; Saved = $script:VkSaved; Asked = @($script:VkAsked) }
+}
+
+T 'a configured vault is confirmed, not re-asked' {
+    $r = Invoke-VaultVaultPromptCase -Candidate 'sbx.example.com' -Source '[submissions] vault' -Answers @('y')
+    Eq $r.Result 'sbx.example.com' 'host'
+    Eq $r.Asked.Count 1 'one question'
+    Eq $r.Saved '' 'nothing saved - it was already in the file'
+}
+T 'confirming does not write to the config' {
+    $r = Invoke-VaultVaultPromptCase -Candidate 'sbx.example.com' -Answers @('y')
+    Eq $r.Saved '' 'saved'
+}
+T 'no means ask for a different vault, not stop' {
+    $r = Invoke-VaultVaultPromptCase -Candidate 'wrong.example.com' -Answers @('n', 'right.example.com', 'y', 'y')
+    Eq $r.Result 'right.example.com' 'host'
+    Eq $r.Saved 'submissions/vault=right.example.com' 'the new one is offered to the config'
+}
+T 'a vault typed after no can be declined for saving' {
+    $r = Invoke-VaultVaultPromptCase -Candidate 'wrong.example.com' -Answers @('n', 'right.example.com', 'y', 'n')
+    Eq $r.Result 'right.example.com' 'host'
+    Eq $r.Saved '' 'not saved'
+}
+T 'no twice keeps asking' {
+    $r = Invoke-VaultVaultPromptCase -Candidate 'a.example.com' -Answers @('n', 'b.example.com', 'n', 'c.example.com', 'y', 'y')
+    Eq $r.Result 'c.example.com' 'host'
+}
+T 'blank config asks, and Enter takes the suggestion' {
+    $r = Invoke-VaultVaultPromptCase -Candidate '' -Suggested 'tgt.example.com' -Answers @('', 'y', 'y')
+    Eq $r.Result 'tgt.example.com' 'host'
+    Eq $r.Saved 'submissions/vault=tgt.example.com' 'saved'
+}
+T 'the suggestion is a suggestion, not the answer' {
+    $r = Invoke-VaultVaultPromptCase -Candidate '' -Suggested 'tgt.example.com' -Answers @('other.example.com', 'y', 'n')
+    Eq $r.Result 'other.example.com' 'typed beats suggested'
+}
+T 'blank with no suggestion stops rather than guessing' {
+    $t = $false
+    try { Invoke-VaultVaultPromptCase -Candidate '' -Suggested '' -Answers @('') | Out-Null } catch { $t = $true }
+    if (-not $t) { throw 'did not throw' }
+}
+T 'a host that will not log in is asked for again' {
+    $r = Invoke-VaultVaultPromptCase -Candidate 'typo.example.com' -FailHosts @('typo.example.com') `
+             -Answers @('good.example.com', 'y', 'y')
+    Eq $r.Result 'good.example.com' 'host'
+}
+T 'a pasted URL is reduced to a host name' {
+    $r = Invoke-VaultVaultPromptCase -Candidate 'https://sbx.example.com/ui/#/x' -Answers @('y')
+    Eq $r.Result 'sbx.example.com' 'host'
+}
+T 'the confirmation names the vault, not the vaults' {
+    $r = Invoke-VaultVaultPromptCase -Candidate 'sbx.example.com' -Answers @('y')
+    if ($r.Asked[0] -notmatch 'import into') { throw "asked '$($r.Asked[0])'" }
+}
+
+
 Write-Host ""; Write-Host ("RESULT: {0} passed, {1} failed" -f $pass,$fail)
 if($fail){ exit 1 }
