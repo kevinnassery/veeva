@@ -121,7 +121,7 @@ One results file holds every application you have loaded, so **filter it to this
 put your application number in place of `000000`:
 
 ```powershell
-Import-Csv .\submission-import-results.csv | Where-Object Application -eq '000000' | Group-Object Status | Select-Object Count, Name
+Import-Csv .\submission-import-results.csv | Where-Object { $_.StagingPath -like '*/000000/*' } | Group-Object Status | Select-Object Count, Name
 ```
 
 **Every row must say `PLANNED`, and the count must equal the dossier count from step 3.**
@@ -131,7 +131,7 @@ Anything else — `ERROR`, or a smaller count — **stop** and send
 Then check *how* each one was matched:
 
 ```powershell
-Import-Csv .\submission-import-results.csv | Where-Object Application -eq '000000' | Group-Object MatchedBy | Select-Object Count, Name
+Import-Csv .\submission-import-results.csv | Where-Object { $_.StagingPath -like '*/000000/*' } | Group-Object MatchedBy | Select-Object Count, Name
 ```
 
 | `MatchedBy` | do |
@@ -166,7 +166,7 @@ Confirm the vault and the application again (`y`, `y`). Leave the window open. S
 Then, filtered to this application again:
 
 ```powershell
-Import-Csv .\submission-import-results.csv | Where-Object Application -eq '000000' | Group-Object Status | Select-Object Count, Name
+Import-Csv .\submission-import-results.csv | Where-Object { $_.StagingPath -like '*/000000/*' } | Group-Object Status | Select-Object Count, Name
 ```
 
 | status | do |
