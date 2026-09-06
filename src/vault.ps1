@@ -152,7 +152,7 @@ param(
     [int]$Workers = 0
 )
 
-$ScriptVersion = '2026.09.06-4'
+$ScriptVersion = '2026.09.06-5'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -526,6 +526,19 @@ function Invoke-Update {
     $retired = @('attachments.bat', 'validator.bat', 'refresh.bat', 'starting-cleanup.bat', 'vault.bat',
                  'Sync-VaultAttachments.ps1', 'Validate-VaultAttachments.ps1', 'Transfer-VaultAttachments.ps1',
                  'Transfer-VaultDocuments.ps1', 'Get-VaultSession.ps1', 'Probe-Vault.ps1')
+    # VaultKit\ is the same idea one layout later. An operator who updated from the
+    # version that shipped the module as twelve files still has the folder, and nothing
+    # loads it any more - the parts live inside vault.ps1 now. Left in place and named,
+    # not deleted: it is somebody's working folder, and the real cost of leaving it is
+    # that a person edits a file in there to fix something and nothing happens.
+    $kit = Join-Path $here 'VaultKit'
+    if (Test-Path -LiteralPath $kit) {
+        Write-Host ''
+        Write-Host '  VaultKit\ is here and nothing loads it. The module is built into vault.ps1' -ForegroundColor Yellow
+        Write-Host '  now, so those files are a copy of an older version - editing them changes' -ForegroundColor Yellow
+        Write-Host '  nothing. Delete the folder once you are sure nothing of yours is in it.' -ForegroundColor Yellow
+    }
+
     $found = @($retired | Where-Object { Test-Path -LiteralPath (Join-Path $here $_) })
     if ($found.Count) {
         Write-Host ''
