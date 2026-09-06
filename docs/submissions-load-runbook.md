@@ -1,6 +1,6 @@
 # Load a submissions application
 
-*Updated 2026-09-06 13:10 EDT — pinned to `9bd8ac5`, version `2026.09.06-8`*
+*Updated 2026-09-06 13:15 EDT — pinned to `f6b541b`, version `2026.09.06-9`*
 
 One application per run. The dossiers are already on File Staging; nothing is uploaded.
 
@@ -32,14 +32,14 @@ Must print `Bypass`. If it prints anything else, repeat this step.
 ## 2. Update, and check the version
 
 ```powershell
-.\vault.ps1 update -Commit 9bd8ac513b93a563529c4a99f533cfb1a1f59886
+.\vault.ps1 update -Commit f6b541b07104eebbe129e4011595359f0f617497
 ```
 
 ```powershell
 .\vault.ps1 version
 ```
 
-Must print `2026.09.06-8`. **Anything else: stop.**
+Must print `2026.09.06-9`. **Anything else: stop.**
 
 Ignore any line telling you to fill in `[vault] source` and `target`, or to run
 `vault.ps1 login`. Neither applies here.
@@ -58,9 +58,9 @@ This writes nothing to Vault. It asks you four things:
 | --- | --- |
 | `Vault host` | the sandbox host name, no `https://` |
 | credentials | your account on that vault |
-| `Is this the vault to import into? [y/N]` | `y` **only if `vaultId` is the sandbox's** — otherwise `n`, and it asks again |
+| `Is this the vault to import into? [y/n]` | `y` **only if `vaultId` is the sandbox's** — otherwise `n`, and it asks again |
 | `Submissions Archive path` | `/SubmissionsArchive/<application>` |
-| `Is this the right application? [y/N]` | `y` if the application number is the one you are loading — otherwise `n` |
+| `Is this the right application? [y/n]` | `y` if the application number is the one you are loading — otherwise `n` |
 
 It saves your answers. Next time it shows them back instead of asking.
 
@@ -133,9 +133,11 @@ To load another application, go back to step 3 and answer `n` when it shows you 
 | --- | --- |
 | `running scripts is disabled on this system` | step 1 again, answer `Y` |
 | `>>` instead of a normal prompt | press Ctrl-C, paste **one** command at a time |
-| version is not `2026.09.06-8` | step 2 again |
+| version is not `2026.09.06-9` | step 2 again |
 | `0 dossiers` | wrong path — step 3 again, answer `n` at the application question |
 | `is not set in ... vault.ini` | run the command from `C:\vault-work` |
+| `It is the login that was refused` | host is fine, the account is not. **Do not retry** — repeated attempts lock it. Stop, send the log |
+| `Could not reach <host>` | wrong or unreachable host name. Answer `y` and type it again |
 | anything else | stop, send the log |
 
 Log files are in `C:\vault-work`, named `submissions-list-<date>.log` and
@@ -156,11 +158,11 @@ cd C:\vault-work
 ```
 
 ```powershell
-curl.exe -sfLO https://raw.githubusercontent.com/kevinnassery/veeva/9bd8ac513b93a563529c4a99f533cfb1a1f59886/vault.ps1
+curl.exe -sfLO https://raw.githubusercontent.com/kevinnassery/veeva/f6b541b07104eebbe129e4011595359f0f617497/vault.ps1
 ```
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\vault.ps1 update -Commit 9bd8ac513b93a563529c4a99f533cfb1a1f59886
+powershell -ExecutionPolicy Bypass -File .\vault.ps1 update -Commit f6b541b07104eebbe129e4011595359f0f617497
 ```
 
 Then start at step 1.
