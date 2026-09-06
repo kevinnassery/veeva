@@ -1,6 +1,6 @@
 # Load a submissions application
 
-*Updated 2026-09-06 14:55 EDT — pinned to `e795670`, version `2026.09.06-13`*
+*Updated 2026-09-06 15:02 EDT — pinned to `61462c6`, version `2026.09.06-14`*
 
 One application per run. The dossiers are already on File Staging; nothing is uploaded.
 
@@ -51,14 +51,14 @@ This is once per PowerShell window and changes no machine-wide setting.
 ## 2. Update, and check the version
 
 ```powershell
-.\vault.ps1 update -Commit e7956703ac61ddc88ef0d71430a3321384267c12
+.\vault.ps1 update -Commit 61462c616e4f3f7507e022e1f2d32d15ba3f5eb8
 ```
 
 ```powershell
 .\vault.ps1 version
 ```
 
-Must print `2026.09.06-13`. **Anything else: stop.**
+Must print `2026.09.06-14`. **Anything else: stop.**
 
 Ignore any line telling you to fill in `[vault] source` and `target`, or to run
 `vault.ps1 login`. Neither applies here.
@@ -124,7 +124,9 @@ put your application number in place of `000000`:
 Import-Csv .\submission-import-results.csv | Where-Object { $_.StagingPath -like '*/000000/*' } | Group-Object Status | Select-Object Count, Name
 ```
 
-**Every row must say `PLANNED`, and the count must equal the dossier count from step 3.**
+**Every row must say `PLANNED`.** The run's last lines state the sum — resolved, plus
+any already imported by an earlier run — and it must equal the dossier count from
+step 3. If the tool says anything is unexplained, **stop**.
 Anything else — `ERROR`, or a smaller count — **stop** and send
 `submission-import-results.csv` and the log.
 
@@ -221,7 +223,7 @@ for credentials again while the window is open.
 | --- | --- |
 | `running scripts is disabled on this system` | step 1, the second half — answer `Y` |
 | `>>` instead of a normal prompt | press Ctrl-C, paste **one** command at a time |
-| version is not `2026.09.06-13` | step 2 again |
+| version is not `2026.09.06-14` | step 2 again |
 | `0 dossiers` | wrong path — step 3 again, answer `n` at the application question |
 | `is not set in ... vault.ini` | run the command from `C:\vault-work` |
 | `It is the login that was refused` | host is fine, the account is not. **Do not retry** — repeated attempts lock it. Stop, send the log |
@@ -246,11 +248,11 @@ cd C:\vault-work
 ```
 
 ```powershell
-curl.exe -sfLO https://raw.githubusercontent.com/kevinnassery/veeva/e7956703ac61ddc88ef0d71430a3321384267c12/vault.ps1
+curl.exe -sfLO https://raw.githubusercontent.com/kevinnassery/veeva/61462c616e4f3f7507e022e1f2d32d15ba3f5eb8/vault.ps1
 ```
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\vault.ps1 update -Commit e7956703ac61ddc88ef0d71430a3321384267c12
+powershell -ExecutionPolicy Bypass -File .\vault.ps1 update -Commit 61462c616e4f3f7507e022e1f2d32d15ba3f5eb8
 ```
 
 Then start at step 1.
