@@ -510,6 +510,127 @@ function Test-VaultSubmissionsPreflight {
     return $fail
 }
 
+function Confirm-VaultSubmissionsVault {
+    # Which vault instance this load writes into, established and agreed before anything
+    # is read or imported.
+    #
+    # Vault File Manager's File Staging is SHARED between the instances on a domain, so
+    # the same /SubmissionsArchive listing is visible from production and from a sandbox
+    # and looks identical in both. The staging path therefore says nothing about where an
+    # import lands, and [vault] target is a setting about the document migration with
+    # nothing to say about this workflow. Inheriting it silently is how a whole wave goes
+    # into the wrong instance, and nothing downstream catches it - every dossier imports
+    # successfully, into production.
+    #
+    # So it is asked for once, remembered, and confirmed on every load. Answering "no"
+    # asks for a different one rather than stopping the run: a confirmation whose only
+    # other answer is "abort" gets a reflex "yes", and the whole point of this prompt is
+    # that somebody reads it.
+    #
+    # The identity block comes from the session that will do the writing, not from the
+    # config, and vaultId is the field that matters - on a shared domain the host names
+    # are near-misses of each other and the vaultId is not.
+    param(
+        [Parameter(Mandatory)][string]$ConfigPath,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Candidate,   # NOT $Host - that is an automatic variable
+        [Parameter(Mandatory)][AllowEmptyString()][string]$Suggested,
+        [Parameter(Mandatory)][string]$ApiVersion,
+        [AllowEmptyString()][string]$Source = '',
+        [switch]$Yes
+    )
+    # A console can answer; a scheduled run cannot, and blocking for ever on an answer
+    # nobody is there to give is worse than either proceeding or stopping outright.
+    $canAsk = $true
+    if ($script:VaultNoPrompt) { $canAsk = $false }
+    if ($canAsk) { try { if ([Console]::IsInputRedirected) { $canAsk = $false } } catch { } }
+
+    $h     = "$Candidate".Trim()
+    $typed = $false
+
+    while ($true) {
+        if (-not $h) {
+            if (-not $canAsk) {
+                throw "[submissions] vault is not set in $ConfigPath, and this is not a console so it cannot be asked for. Set it, or pass -VaultHost."
+            }
+            Write-Host ''
+            Write-Host '  Which vault instance this load imports into. File Staging is shared'
+            Write-Host '  between the instances on a domain, so the folder you picked looks the'
+            Write-Host '  same from a sandbox as it does from production - the path cannot say'
+            Write-Host '  which one this is. Name it.'
+            Write-Host ''
+            Write-Host '      your-vault-sbx.veevavault.com'
+            Write-Host ''
+            $prompt = if ($Suggested) { "Vault host [$Suggested]" } else { 'Vault host' }
+            $answer = (Read-Host $prompt).Trim()
+            if (-not $answer -and $Suggested) {
+                $answer = $Suggested
+                Write-VaultLog "Taking $Suggested, the suggestion - that is [vault] target, which is a guess about this workflow rather than a setting for it." 'WARN'
+            }
+            if (-not $answer) { throw 'Stopped: no vault given.' }
+            $h      = $answer
+            $typed  = $true
+            $Source = ''
+        }
+
+        $h = Get-VaultHostName $h
+        if (-not $h) { throw 'No vault for submissions. Set [submissions] vault, or pass -VaultHost.' }
+        Write-VaultLog "submissions vault: $h$(if ($Source) { " (from $Source)" })"
+
+        # Log in and read who we are there. -Yes suppresses that function's own question:
+        # it establishes the session and prints the identity, and the confirming is done
+        # here, where "no" has somewhere to go.
+        try {
+            [void](Confirm-VaultSessions -Vaults @(@{ Role = 'submissions'; Name = $h }) -ApiVersion $ApiVersion -Yes)
+        }
+        catch {
+            # A mistyped host fails here. Stopping the run over a typo would be its own
+            # small cruelty when the next thing we would do anyway is ask for one.
+            Write-VaultLog "Could not establish a session on ${h}: $_" 'WARN'
+            if (-not $canAsk) { throw }
+            $h = ''; $typed = $false
+            continue
+        }
+
+        if ($Yes) { return $h }
+        if (-not $canAsk) {
+            Write-VaultLog 'Not a console - proceeding without confirmation.' 'WARN'
+            return $h
+        }
+
+        # [y/N] and nothing else: "no" already means "ask me for a different one", so a
+        # third letter would be a third word for the same behaviour.
+        $answer = Read-Host 'Is this the vault to import into? [y/N]'
+        if ($answer -match '^[Yy]') {
+            # Offered only now, and only for a value that was typed. Saving before the
+            # confirmation would write down a vault that was about to be rejected.
+            if ($typed) { Save-VaultSubmissionsVault -ConfigPath $ConfigPath -VaultDns $h }
+            return $h
+        }
+
+        Write-VaultLog 'Not confirmed - asking for a different vault.' 'WARN'
+        $h = ''; $typed = $false
+    }
+}
+
+function Save-VaultSubmissionsVault {
+    # Offered, not assumed. Writing to somebody's config without asking is the kind of
+    # helpfulness that is indistinguishable from a bug when they next read it.
+    param(
+        [Parameter(Mandatory)][string]$ConfigPath,
+        [Parameter(Mandatory)][string]$VaultDns
+    )
+    $save = Read-Host "Save this to [submissions] vault in $(Split-Path -Leaf $ConfigPath)? [Y/n]"
+    if ($save -match '^[Nn]') {
+        Write-VaultLog 'Not saved - this vault applies to this run only.' 'WARN'
+        return
+    }
+    try {
+        Set-VaultSetting -Path $ConfigPath -Section 'submissions' -Key 'vault' -Value $VaultDns
+        Write-VaultLog "Saved to $ConfigPath - it will be confirmed rather than asked for next time." 'OK'
+    }
+    catch { Write-VaultLog "Could not write $ConfigPath, so this vault applies to this run only: $_" 'WARN' }
+}
+
 function Confirm-VaultStagingPath {
     # The Submissions Archive root this run works from, established and agreed before
     # anything reads or imports.
