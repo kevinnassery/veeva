@@ -152,7 +152,7 @@ param(
     [int]$Workers = 0
 )
 
-$ScriptVersion = '2026.09.06-7'
+$ScriptVersion = '2026.09.06-8'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -7961,6 +7961,15 @@ function Get-ConfiguredHosts {
     if ($script:SourceHost) { $hosts += $script:SourceHost }
     if ($script:TargetHost -and $script:TargetHost -ne $script:SourceHost) { $hosts += $script:TargetHost }
     if (-not $hosts.Count) { throw "No vaults configured. Set [vault] source = ... in $($script:CfgPath)" }
+    # The starter vault.ini carries example hosts, so "configured" and "filled in" are not
+    # the same thing. Without this, login takes the examples at face value and fails at
+    # DNS - which reads as a network problem rather than as a file nobody has edited.
+    $unfilled = @($hosts | Where-Object { Test-VaultPlaceholderValue $_ })
+    if ($unfilled.Count) {
+        throw ("[vault] still holds the example host(s) $($unfilled -join ', ') from the starter " +
+               "$($script:CfgPath). Set [vault] source and target to real vaults. " +
+               "Importing submissions needs neither - run 'vault.ps1 submissions list' and it will ask.")
+    }
     return $hosts
 }
 
@@ -8165,7 +8174,14 @@ function Invoke-Update {
         }
         try {
             Invoke-WebRequest -Uri "$base/$rel" -OutFile $dest -UseBasicParsing -TimeoutSec 120
-            Write-Host "  written   $rel - fill in [vault] source and target before running anything" -ForegroundColor Yellow
+            # NOT "fill in [vault] source and target". An operator importing submissions
+            # reads that, goes to Notepad, and fills in two settings this workflow never
+            # touches - while the two it does touch are the ones the commands ask for.
+            Write-Host "  written   $rel" -ForegroundColor Yellow
+            Write-Host "            To import submissions there is nothing to fill in - the commands" -ForegroundColor Yellow
+            Write-Host "            ask for the vault and the application and save your answers here." -ForegroundColor Yellow
+            Write-Host "            Moving documents is the workflow that wants [vault] source and" -ForegroundColor Yellow
+            Write-Host "            target set by hand first." -ForegroundColor Yellow
         }
         catch { Write-Host "  FAILED    $rel - $_" -ForegroundColor Red }
     }
@@ -8198,7 +8214,13 @@ function Invoke-Update {
     }
 
     Write-Host ''
-    Write-Host 'Next: .\vault.ps1 login' -ForegroundColor Green
+    # Which "next" depends on what is configured. Against a starter vault.ini, `login`
+    # reads [vault] source and target - the example hosts - and tries to authenticate to
+    # them, so pointing everyone at it is pointing some people at a guaranteed failure.
+    if (Test-Path -LiteralPath (Join-Path $here 'vault.ini')) {
+        Write-Host 'Next: .\vault.ps1 submissions list   (it will ask which vault)' -ForegroundColor Green
+        Write-Host '      .\vault.ps1 login              (documents and attachments, once [vault] is set)'
+    }
     Write-Host ''
 }
 

@@ -50,6 +50,22 @@ cd C:\vault-work
 Set-ExecutionPolicy -Scope Process Bypass
 ```
 
+**It will ask you to confirm, and the default is No.** Type **`Y`** and press Enter:
+
+```
+Do you want to change the execution policy?
+[Y] Yes  [A] Yes to All  [N] No  [L] No to All  [S] Suspend  [?] Help (default is "N"): Y
+```
+
+Pressing Enter on its own answers **No**, and every command after this fails with a
+message about scripts being disabled. Check it took:
+
+```powershell
+Get-ExecutionPolicy -Scope Process
+```
+
+It should say `Bypass`. If it says `Undefined`, run the line above again and answer `Y`.
+
 ---
 
 ## Step 2 — Check your version, then update
@@ -292,6 +308,15 @@ harmless; the warning is there so it does not look like it was consulted.
 
 **The results CSV is open in Excel.** Preflight stops the run rather than discovering it
 after the imports have happened. Close Excel and re-run.
+
+**"... cannot be loaded because running scripts is disabled on this system."** Step 1's
+prompt was answered No — pressing Enter does that. Run `Set-ExecutionPolicy -Scope Process
+Bypass` again and type `Y`.
+
+**`update` says "fill in [vault] source and target".** Older wording, and not for this
+workflow. To import submissions there is nothing to fill in: Step 3 asks for the vault and
+the application and saves your answers. `[vault] source` and `target` belong to the
+document transfer.
 
 **You are not sure which version you ran.** Every run logs it on the first line, and
 `.\vault.ps1 version` prints it on its own. This playbook is written against
