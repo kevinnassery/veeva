@@ -97,7 +97,44 @@ skipped and named in the output, so the count is of real dossiers only.
 
 ---
 
-## 4. Plan the run
+## 4. Check inside the dossiers
+
+Vault imports everything inside a submission folder. If a folder such as
+`Correspondence` is sitting in there, it comes in with the submission whether you want it
+or not — nothing downstream can filter it, so it has to go before the import.
+
+```powershell
+.\vault.ps1 submissions scan
+```
+
+Read-only. It looks one level inside every dossier and lists anything that should not be
+imported with it.
+
+**If it says `nothing to remove`, go to step 5.**
+
+If it lists folders, remove them:
+
+```powershell
+.\vault.ps1 submissions clean
+```
+
+It prints every folder it would delete, then asks:
+
+```
+  This deletes those folders and everything in them from File Staging.
+  It cannot be undone from here.
+
+Type the number 7 to delete them, or anything else to stop:
+```
+
+**Read the list first.** Type the number it gives you to go ahead; type anything else and
+nothing is deleted. What it removed is recorded in `submission-correspondence.csv`.
+
+Then run `.\vault.ps1 submissions scan` again — it must say `nothing to remove`.
+
+---
+
+## 5. Plan the run
 
 > **Every command from here on confirms the vault and the application first.** Steps 4, 5
 > and 6 each start by showing your saved answers back:
@@ -144,7 +181,7 @@ Import-Csv .\submission-import-results.csv | Where-Object { $_.StagingPath -like
 
 ---
 
-## 5. Import one
+## 6. Import one
 
 ```powershell
 .\vault.ps1 submissions import -Test 1
@@ -157,7 +194,7 @@ under it. **If it is not there, stop** — whatever the CSV says.
 
 ---
 
-## 6. Import the rest
+## 7. Import the rest
 
 ```powershell
 .\vault.ps1 submissions import
@@ -174,7 +211,7 @@ Import-Csv .\submission-import-results.csv | Where-Object { $_.StagingPath -like
 | status | do |
 | --- | --- |
 | `SUCCESS` | nothing — it is imported |
-| `TIMEOUT_AFTER_<n>_MIN` | not a failure. The job is still running in Vault. Re-run step 6 |
+| `TIMEOUT_AFTER_<n>_MIN` | not a failure. The job is still running in Vault. Re-run step 7 |
 | anything else | **stop**, send the CSV and the log |
 
 **`SUCCESS` must equal the dossier count from step 3.** A clean-looking table with a short
@@ -183,7 +220,7 @@ success.
 
 ---
 
-## 7. Finish
+## 8. Finish
 
 Only when you are finished for the day:
 

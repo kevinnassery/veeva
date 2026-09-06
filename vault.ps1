@@ -152,7 +152,7 @@ param(
     [int]$Workers = 0
 )
 
-$ScriptVersion = '2026.09.06-14'
+$ScriptVersion = '2026.09.06-15'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -4513,6 +4513,146 @@ function Save-VaultSubmissionsPath {
     catch { Write-VaultLog "Could not write $ConfigPath, so this path applies to this run only: $_" 'WARN' }
 }
 
+function Get-VaultDossierSubfolder {
+    # The folders one level inside a single dossier.
+    #
+    # Nothing else in this workflow looks in here. The import hands Vault the dossier path
+    # and Vault takes everything under it, so a Correspondence folder inside a submission
+    # is imported with it and this tool never sees it happen. Looking is the only way to
+    # tell somebody before the fact rather than after.
+    param([Parameter(Mandatory)]$Context, [Parameter(Mandatory)][string]$Path)
+    $out  = New-Object System.Collections.ArrayList
+    $next = "/services/file_staging/items/$(ConvertTo-VaultStagingPath $Path)?recursive=false&limit=500"
+    while ($next) {
+        $r = Invoke-VaultApi -VaultHost $Context.VaultHost -ApiVersion $Context.Api -Method GET -Path $next
+        foreach ($d in @(Get-VaultField $r 'data' @())) {
+            if ("$(Get-VaultField $d 'kind' 'file')" -ne 'folder') { continue }
+            [void]$out.Add([pscustomobject]@{
+                Name = "$(Get-VaultField $d 'name' '')"
+                Path = "$(Get-VaultField $d 'path' '')"
+            })
+        }
+        $next = "$(Get-VaultField (Get-VaultField $r 'responseDetails' $null) 'next_page' '')"
+    }
+    return @($out)
+}
+
+function Find-VaultCorrespondence {
+    # Every non-submission folder sitting INSIDE a dossier, across the application.
+    #
+    # One listing per dossier, so it is the most expensive read in this workflow - which
+    # is why it is its own command rather than something the import does on the way past.
+    param([Parameter(Mandatory)]$Context, [Parameter(Mandatory)][array]$Dossiers)
+    $hits = New-Object System.Collections.ArrayList
+    $i = 0
+    foreach ($d in $Dossiers) {
+        $i++
+        if ($d.Kind -ne 'folder') { continue }   # an archive cannot be looked into
+        if (($i % 25) -eq 0) { Write-VaultLog "  looked in $i of $($Dossiers.Count)" }
+        foreach ($sub in (Get-VaultDossierSubfolder -Context $Context -Path $d.Path)) {
+            if (Test-VaultNonSubmissionFolder -Name $sub.Name) {
+                Write-VaultLog "$($d.Name) contains $($sub.Name)" 'WARN'
+                [void]$hits.Add([pscustomobject][ordered]@{
+                    Dossier = $d.Name
+                    Folder  = $sub.Name
+                    Path    = $sub.Path
+                })
+            }
+        }
+    }
+    return @($hits)
+}
+
+function Invoke-VaultSubmissionsScan {
+    # Read-only. What is inside the dossiers that should not be imported with them.
+    param([Parameter(Mandatory)]$Context)
+    $c = $Context
+    Write-VaultLog "Looking inside every dossier under $($c.StagingPath)"
+    $dossiers = @(Get-VaultSubmissionDossier -Context $c -Path $c.StagingPath)
+    if (-not $dossiers.Count) { Write-VaultLog "Nothing under $($c.StagingPath)" 'WARN'; return 0 }
+
+    $hits = @(Find-VaultCorrespondence -Context $c -Dossiers $dossiers)
+    $out  = Join-Path $c.Out 'submission-correspondence.csv'
+    Write-VaultLog '----------------------------------------------------------------'
+    if (-not $hits.Count) {
+        Write-VaultLog "  $($dossiers.Count) dossier(s) checked, nothing to remove" 'OK'
+        Write-VaultLog '----------------------------------------------------------------'
+        return 0
+    }
+    $hits | Export-Csv -LiteralPath $out -NoTypeInformation -Encoding UTF8 -WhatIf:$false
+    Write-VaultLog "  $($hits.Count) folder(s) inside $(@($hits | ForEach-Object { $_.Dossier } | Select-Object -Unique).Count) dossier(s) would be imported with them" 'WARN'
+    Write-VaultLog "  listed in $out"
+    Write-VaultLog '  Remove them with: vault.ps1 submissions clean'
+    Write-VaultLog '----------------------------------------------------------------'
+    return $hits.Count
+}
+
+function Invoke-VaultSubmissionsClean {
+    # DELETES folders from File Staging. The only irreversible thing this tool does.
+    #
+    # So: the full list is printed before anything is asked, the confirmation is the COUNT
+    # typed back rather than a letter - a y is reflex and this should not be - and -Plan
+    # does the whole scan and deletes nothing.
+    param([Parameter(Mandatory)]$Context, [switch]$Plan)
+    $c = $Context
+    Write-VaultLog "Looking inside every dossier under $($c.StagingPath)"
+    $dossiers = @(Get-VaultSubmissionDossier -Context $c -Path $c.StagingPath)
+    if (-not $dossiers.Count) { Write-VaultLog "Nothing under $($c.StagingPath)" 'WARN'; return 0 }
+
+    $hits = @(Find-VaultCorrespondence -Context $c -Dossiers $dossiers)
+    if (-not $hits.Count) { Write-VaultLog "Nothing to remove under $($c.StagingPath)" 'OK'; return 0 }
+
+    Write-VaultLog '----------------------------------------------------------------'
+    Write-VaultLog "  These $($hits.Count) folder(s) would be DELETED from File Staging:" 'WARN'
+    foreach ($h in $hits) { Write-VaultLog "    $($h.Path)" }
+    Write-VaultLog '----------------------------------------------------------------'
+
+    $rec = Join-Path $c.Out 'submission-correspondence.csv'
+    $hits | Export-Csv -LiteralPath $rec -NoTypeInformation -Encoding UTF8 -WhatIf:$false
+    Write-VaultLog "  recorded in $rec"
+
+    if ($Plan -or $c.WhatIf) {
+        Write-VaultLog "$($hits.Count) folder(s) would be removed. NOTHING was deleted." 'OK'
+        return 0
+    }
+
+    if (-not (Test-VaultCanPrompt)) {
+        throw 'Refusing to delete without a console to confirm at. Run this from a PowerShell window.'
+    }
+    Write-Host ''
+    Write-Host '  This deletes those folders and everything in them from File Staging.' -ForegroundColor Yellow
+    Write-Host '  It cannot be undone from here.' -ForegroundColor Yellow
+    Write-Host ''
+    $answer = (Read-Host "Type the number $($hits.Count) to delete them, or anything else to stop").Trim()
+    if ($answer -ne "$($hits.Count)") {
+        Write-VaultLog 'Stopped: nothing was deleted.' 'OK'
+        return 0
+    }
+
+    $gone = 0; $bad = 0
+    foreach ($h in $hits) {
+        try {
+            $r = Invoke-VaultApi -VaultHost $c.VaultHost -ApiVersion $c.Api -Method DELETE `
+                    -Path "/services/file_staging/items/$(ConvertTo-VaultStagingPath $h.Path)?recursive=true"
+            $jobId = "$(Get-VaultField (Get-VaultField $r 'data' $null) 'job_id' '')"
+            if ($jobId) {
+                $status = Wait-VaultJob -Context $c -JobId $jobId -TimeoutMinutes 10 -PollSeconds 5
+                if ($status -ne 'SUCCESS') { throw "delete job $jobId ended $status" }
+            }
+            Write-VaultLog "removed $($h.Path)" 'OK'
+            $gone++
+        }
+        catch {
+            Write-VaultLog "could NOT remove $($h.Path): $_" 'ERROR'
+            $bad++
+        }
+    }
+    Write-VaultLog '----------------------------------------------------------------'
+    Write-VaultLog "Removed $gone, $bad could not be removed." $(if ($bad) { 'WARN' } else { 'OK' })
+    Write-VaultLog "Re-run 'submissions scan' to confirm nothing is left."
+    return $bad
+}
+
 function Invoke-VaultSubmissionsList {
     # What is there, written to a manifest. No VQL, no imports, no vault writes - this
     # answers "did I point it at the right folder" before anything costs anything.
@@ -8606,6 +8746,23 @@ function Invoke-Submissions {
             [void](Invoke-VaultSubmissionsList -Context $ctx -Limit $Limit)
             Write-VaultLog "Log: $script:VaultLogFile"
         }
+        { $_ -in @('scan', 'clean') } {
+            $destructive = ($Action -eq 'clean')
+            Initialize-VaultRun -LogName "submissions-$Action"
+            Start-VaultLock -Name 'submissions'
+            try {
+                Write-VaultLog "vault $ScriptVersion - submissions $Action$(if ($Plan) { ' (plan)' })"
+                $ctx = New-VaultContext -Section 'submissions'
+                $ctx.VaultHost = Resolve-VaultSubmissionsHost -Yes:$Yes
+                $ctx.StagingPath = Confirm-VaultStagingPath -ConfigPath $script:CfgPath -Path $ctx.StagingPath -Yes:$Yes
+                $bad = if ($destructive) { Invoke-VaultSubmissionsClean -Context $ctx -Plan:$Plan }
+                       else               { Invoke-VaultSubmissionsScan  -Context $ctx }
+                Write-VaultLog "Log: $script:VaultLogFile"
+                if ($bad -gt 0 -and -not $destructive) { exit 1 }
+                if ($bad -gt 0) { exit 1 }
+            }
+            finally { Stop-VaultLock }
+        }
         'import' {
             Initialize-VaultRun -LogName 'submissions-import'
             Start-VaultLock -Name 'submissions'
@@ -8621,8 +8778,11 @@ function Invoke-Submissions {
             finally { Stop-VaultLock }
         }
         default {
-            Write-Host "vault.ps1 submissions <list|import>" -ForegroundColor Red
+            Write-Host "vault.ps1 submissions <list|scan|clean|import>" -ForegroundColor Red
             Write-Host "  list            what is under [submissions] path. No vault writes, no VQL" -ForegroundColor Red
+            Write-Host "  scan            look INSIDE each dossier for folders that would be imported with it" -ForegroundColor Red
+            Write-Host "  clean -Plan     the same scan, deletes nothing" -ForegroundColor Red
+            Write-Host "  clean           DELETE those folders from File Staging, after confirming" -ForegroundColor Red
             Write-Host "  import -Plan    resolve every submission id, import nothing" -ForegroundColor Red
             Write-Host "  import          do it for real" -ForegroundColor Red
             exit 2

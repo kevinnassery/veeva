@@ -152,7 +152,7 @@ param(
     [int]$Workers = 0
 )
 
-$ScriptVersion = '2026.09.06-14'
+$ScriptVersion = '2026.09.06-15'
 
 Set-StrictMode -Version 2.0
 $ErrorActionPreference = 'Stop'
@@ -783,6 +783,23 @@ function Invoke-Submissions {
             [void](Invoke-VaultSubmissionsList -Context $ctx -Limit $Limit)
             Write-VaultLog "Log: $script:VaultLogFile"
         }
+        { $_ -in @('scan', 'clean') } {
+            $destructive = ($Action -eq 'clean')
+            Initialize-VaultRun -LogName "submissions-$Action"
+            Start-VaultLock -Name 'submissions'
+            try {
+                Write-VaultLog "vault $ScriptVersion - submissions $Action$(if ($Plan) { ' (plan)' })"
+                $ctx = New-VaultContext -Section 'submissions'
+                $ctx.VaultHost = Resolve-VaultSubmissionsHost -Yes:$Yes
+                $ctx.StagingPath = Confirm-VaultStagingPath -ConfigPath $script:CfgPath -Path $ctx.StagingPath -Yes:$Yes
+                $bad = if ($destructive) { Invoke-VaultSubmissionsClean -Context $ctx -Plan:$Plan }
+                       else               { Invoke-VaultSubmissionsScan  -Context $ctx }
+                Write-VaultLog "Log: $script:VaultLogFile"
+                if ($bad -gt 0 -and -not $destructive) { exit 1 }
+                if ($bad -gt 0) { exit 1 }
+            }
+            finally { Stop-VaultLock }
+        }
         'import' {
             Initialize-VaultRun -LogName 'submissions-import'
             Start-VaultLock -Name 'submissions'
@@ -798,8 +815,11 @@ function Invoke-Submissions {
             finally { Stop-VaultLock }
         }
         default {
-            Write-Host "vault.ps1 submissions <list|import>" -ForegroundColor Red
+            Write-Host "vault.ps1 submissions <list|scan|clean|import>" -ForegroundColor Red
             Write-Host "  list            what is under [submissions] path. No vault writes, no VQL" -ForegroundColor Red
+            Write-Host "  scan            look INSIDE each dossier for folders that would be imported with it" -ForegroundColor Red
+            Write-Host "  clean -Plan     the same scan, deletes nothing" -ForegroundColor Red
+            Write-Host "  clean           DELETE those folders from File Staging, after confirming" -ForegroundColor Red
             Write-Host "  import -Plan    resolve every submission id, import nothing" -ForegroundColor Red
             Write-Host "  import          do it for real" -ForegroundColor Red
             exit 2

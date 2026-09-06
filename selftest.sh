@@ -69,7 +69,7 @@ if [ "$got" = "$want" ]; then ok "version reported alone ($got)"; else bad "lone
 if $PS -NoProfile -File "$t/vault.ps1" help >/dev/null 2>&1; then ok "help works alone"; else bad "lone vault.ps1 help failed"; fi
 # The real gain: a command that needs the module now reaches its own argument handling
 # instead of dying on a missing file. It still stops at the config, which is not shipped.
-if $PS -NoProfile -File "$t/vault.ps1" submissions 2>&1 | grep -q 'list|import'; then
+if $PS -NoProfile -File "$t/vault.ps1" submissions 2>&1 | grep -q 'list|scan|clean|import'; then
   ok "a module command dispatches with nothing else on disk"
 else bad "lone vault.ps1 could not dispatch 'submissions'"; fi
 rm -rf "$t"
