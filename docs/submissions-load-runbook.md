@@ -1,6 +1,6 @@
 # Loading a submissions application — step by step
 
-*Updated 2026-09-06 12:40 EDT*
+*Updated 2026-09-06 12:27 EDT*
 
 Copy and paste, one step at a time. Every command is safe to re-run.
 
@@ -46,33 +46,43 @@ cd C:\vault-work
 
 Already have one from a previous wave? Use it. Step 2 will not overwrite your config.
 
+When you are done the folder holds two files — `vault.ps1` and `vault.ini` — plus the logs
+and results the runs write.
+
 ---
 
 ## Step 2 — Download the script
 
-```powershell
-curl.exe -sfLO https://raw.githubusercontent.com/kevinnassery/veeva/main/vault.ps1
-```
+`vault.ps1` is the whole tool — one self-contained file, nothing to install.
 
-That fetches one file. It fetches the rest itself:
+**This playbook installs one exact version.** Copy the line as it is, commit hash and all:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\vault.ps1 update
+curl.exe -sfLO https://raw.githubusercontent.com/kevinnassery/veeva/ce40dddec8fb29e152ca0349fda0c722448941fd/vault.ps1
 ```
 
-`update` pulls down the `VaultKit\` module, the README and a starter `vault.ini`. It
-**never overwrites a `vault.ini` you have already filled in**, and it downloads everything
-to one side before replacing anything, so a failed update leaves the folder as it was.
+Then let it fetch the README and a starter `vault.ini`, pinned to the same commit:
 
-It prints the commit it fetched. Note that down — it is the answer to "which version was
-this run".
+```powershell
+powershell -ExecutionPolicy Bypass -File .\vault.ps1 update -Commit ce40dddec8fb29e152ca0349fda0c722448941fd
+```
 
-> `raw.githubusercontent.com` caches the branch URL for about five minutes, so a download
-> straight from `/main` can hand back the *previous* version of a file — which looks
-> exactly like a fix that did not work. `update` resolves the head commit itself and
-> fetches from that, which is why it is worth running even on a fresh folder.
+It will print the version. **It must say `2026.09.06-4`.** If it says anything else, stop
+and ask — you are not running what these steps describe.
 
----
+`update` never overwrites a `vault.ini` you have already filled in, and it downloads
+everything to one side before replacing anything, so a failed update leaves the folder
+exactly as it was.
+
+> **Why the hash and not just `main`.** `raw.githubusercontent.com` caches a branch URL
+> for about five minutes and ignores no-cache, so downloading from `/main` can hand back
+> the *previous* version of a file — which looks exactly like a fix that did not work.
+> A commit hash is immutable, so the CDN cannot serve anything else under it. It also
+> means this playbook and the code it describes cannot drift apart: re-running the line
+> above a year from now installs the same script.
+
+To move to the current version later, run `.\vault.ps1 update` with no `-Commit` — it
+resolves the head commit itself and prints the hash it used.
 
 ## Step 3 — Allow scripts for this window
 
@@ -269,9 +279,10 @@ harmless; the warning is there so it does not look like it was consulted.
 **The results CSV is open in Excel.** Preflight stops the run rather than discovering it
 after the imports have happened. Close Excel and re-run.
 
-**You are not sure which version you ran.** Every run logs it on the first line. Re-run
-`.\vault.ps1 update` to get current, or `.\vault.ps1 update -Commit <sha>` to pin an exact
-one.
+**You are not sure which version you ran.** Every run logs it on the first line, and
+`.\vault.ps1 version` prints it on its own. This playbook is written against
+**`2026.09.06-4`**, commit `ce40dddec8fb`. To get back to exactly that, re-run the
+`update -Commit` line in Step 2.
 
 ---
 
