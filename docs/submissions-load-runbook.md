@@ -1,6 +1,6 @@
 # Loading a submissions application — step by step
 
-*Updated 2026-09-06 12:44 EDT*
+*Updated 2026-09-06 12:49 EDT*
 
 Copy and paste, one step at a time. Every command is safe to re-run.
 
@@ -67,13 +67,13 @@ free.
 **Then update to the version these steps describe:**
 
 ```powershell
-.\vault.ps1 update -Commit SHA_HERE
+.\vault.ps1 update -Commit d2675f4bc75857aa4182cd8f4a1f5880b86d6304
 ```
 
 The update ends by naming what it installed:
 
 ```
-All files at version VER_HERE.
+All files at version 2026.09.06-7.
 ```
 
 **Confirm it yourself** — the update said what it wrote, this asks the script that will
@@ -83,7 +83,7 @@ actually run:
 .\vault.ps1 version
 ```
 
-**It must print `VER_HERE`.** If it does not, stop and ask — you are not running what these
+**It must print `2026.09.06-7`.** If it does not, stop and ask — you are not running what these
 steps describe, and everything below is about a different script.
 
 **Your `vault.ini` is not touched.** `update` replaces `vault.ps1` and `README.md` only,
@@ -295,7 +295,7 @@ after the imports have happened. Close Excel and re-run.
 
 **You are not sure which version you ran.** Every run logs it on the first line, and
 `.\vault.ps1 version` prints it on its own. This playbook is written against
-**`2026.09.06-6`**, commit `f7ed7b16ef30`. To get back to exactly that, re-run the
+**`2026.09.06-7`**, commit `d2675f4bc758`. To get back to exactly that, re-run the
 `update -Commit` line in Step 2.
 
 ---
@@ -310,17 +310,17 @@ Step 1 instead.
 ```powershell
 mkdir C:\vault-work
 cd C:\vault-work
-curl.exe -sfLO https://raw.githubusercontent.com/kevinnassery/veeva/SHA_HERE/vault.ps1
+curl.exe -sfLO https://raw.githubusercontent.com/kevinnassery/veeva/d2675f4bc75857aa4182cd8f4a1f5880b86d6304/vault.ps1
 ```
 
 Then let it fetch the README and a starter `vault.ini`, pinned to the same commit. This one
 spells out `-ExecutionPolicy Bypass`, because you have not done Step 1 yet:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\vault.ps1 update -Commit SHA_HERE
+powershell -ExecutionPolicy Bypass -File .\vault.ps1 update -Commit d2675f4bc75857aa4182cd8f4a1f5880b86d6304
 ```
 
-It must print `VER_HERE`. When it is done the folder holds two files, `vault.ps1` and
+It must print `2026.09.06-7`. When it is done the folder holds two files, `vault.ps1` and
 `vault.ini`, plus whatever the runs write. There is nothing to fill in — go to Step 2, and
 Step 3 will ask you for the vault and the application and remember them.
 
