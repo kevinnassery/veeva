@@ -1,6 +1,6 @@
 # Load a submissions application
 
-*Updated 2026-09-06 13:15 EDT — pinned to `f6b541b`, version `2026.09.06-9`*
+*Updated 2026-09-06 13:26 EDT — pinned to `48e9e00`, version `2026.09.06-10`*
 
 One application per run. The dossiers are already on File Staging; nothing is uploaded.
 
@@ -32,14 +32,14 @@ Must print `Bypass`. If it prints anything else, repeat this step.
 ## 2. Update, and check the version
 
 ```powershell
-.\vault.ps1 update -Commit f6b541b07104eebbe129e4011595359f0f617497
+.\vault.ps1 update -Commit 48e9e00f81e77c56b1de0254728b72c7ddd2197b
 ```
 
 ```powershell
 .\vault.ps1 version
 ```
 
-Must print `2026.09.06-9`. **Anything else: stop.**
+Must print `2026.09.06-10`. **Anything else: stop.**
 
 Ignore any line telling you to fill in `[vault] source` and `target`, or to run
 `vault.ps1 login`. Neither applies here.
@@ -133,7 +133,7 @@ To load another application, go back to step 3 and answer `n` when it shows you 
 | --- | --- |
 | `running scripts is disabled on this system` | step 1 again, answer `Y` |
 | `>>` instead of a normal prompt | press Ctrl-C, paste **one** command at a time |
-| version is not `2026.09.06-9` | step 2 again |
+| version is not `2026.09.06-10` | step 2 again |
 | `0 dossiers` | wrong path — step 3 again, answer `n` at the application question |
 | `is not set in ... vault.ini` | run the command from `C:\vault-work` |
 | `It is the login that was refused` | host is fine, the account is not. **Do not retry** — repeated attempts lock it. Stop, send the log |
@@ -158,11 +158,11 @@ cd C:\vault-work
 ```
 
 ```powershell
-curl.exe -sfLO https://raw.githubusercontent.com/kevinnassery/veeva/f6b541b07104eebbe129e4011595359f0f617497/vault.ps1
+curl.exe -sfLO https://raw.githubusercontent.com/kevinnassery/veeva/48e9e00f81e77c56b1de0254728b72c7ddd2197b/vault.ps1
 ```
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File .\vault.ps1 update -Commit f6b541b07104eebbe129e4011595359f0f617497
+powershell -ExecutionPolicy Bypass -File .\vault.ps1 update -Commit 48e9e00f81e77c56b1de0254728b72c7ddd2197b
 ```
 
 Then start at step 1.
