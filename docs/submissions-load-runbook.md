@@ -9,23 +9,20 @@ One application per run. The dossiers are already on File Staging; nothing is up
 
 ---
 
-## 1. Open PowerShell and allow scripts
+## 1. Open PowerShell and see what you have
 
 ```powershell
 cd C:\vault-work
 ```
 
 ```powershell
-Set-ExecutionPolicy -Scope Process Bypass
+.\vault.ps1 version
 ```
 
-It asks a question. **Type `Y` and press Enter.** Pressing Enter alone answers No.
+**If that printed a version**, note it and go to step 2.
 
-```powershell
-Get-ExecutionPolicy -Scope Process
-```
-
-Must print `Bypass`. If it prints anything else, repeat this step.
+**If it said `... cannot be loaded because running scripts is disabled on this system`**,
+do [Allow scripts](#allow-scripts) below, then run it again.
 
 ---
 
@@ -43,6 +40,10 @@ Must print `2026.09.06-10`. **Anything else: stop.**
 
 Ignore any line telling you to fill in `[vault] source` and `target`, or to run
 `vault.ps1 login`. Neither applies here.
+
+**Steps 1 and 2 are once per PowerShell window, not once per application.** Loading
+several in a row, start at step 3 each time — see [Loading the next
+application](#loading-the-next-application).
 
 ---
 
@@ -154,11 +155,58 @@ success.
 
 ## 7. Finish
 
+Only when you are finished for the day:
+
 ```powershell
 .\vault.ps1 logout
 ```
 
-To load another application, go back to step 3 and answer `n` when it shows you this one.
+---
+
+## Loading the next application
+
+Do **not** repeat steps 1 and 2. Go straight to:
+
+```powershell
+.\vault.ps1 submissions list
+```
+
+It shows the last application back at you:
+
+```
+  staging     /SubmissionsArchive/<the one you just did>
+  application <the one you just did>
+Is this the right application? [y/n]:
+```
+
+Answer **`n`**. It asks for the new path, offers to save it (`Y`), and gives the new
+dossier count. Then carry on from step 4.
+
+Answer `y` to the vault question before it — that does not change — and you are not asked
+for credentials again while the window is open.
+
+---
+
+## Allow scripts
+
+Only if step 1 said scripts are disabled. This is once per PowerShell window and changes
+no machine-wide setting.
+
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+```
+
+**It asks you to confirm, and the default is No.** Type `Y` and press Enter:
+
+```
+[Y] Yes  [A] Yes to All  [N] No  [L] No to All  [S] Suspend  [?] Help (default is "N"): Y
+```
+
+```powershell
+Get-ExecutionPolicy -Scope Process
+```
+
+Must print `Bypass`. Then go back to step 1.
 
 ---
 
@@ -166,7 +214,7 @@ To load another application, go back to step 3 and answer `n` when it shows you 
 
 | what you see | do |
 | --- | --- |
-| `running scripts is disabled on this system` | step 1 again, answer `Y` |
+| `running scripts is disabled on this system` | do [Allow scripts](#allow-scripts), answer `Y` |
 | `>>` instead of a normal prompt | press Ctrl-C, paste **one** command at a time |
 | version is not `2026.09.06-10` | step 2 again |
 | `0 dossiers` | wrong path — step 3 again, answer `n` at the application question |
