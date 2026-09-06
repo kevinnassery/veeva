@@ -1,6 +1,6 @@
 # Loading a submissions application — step by step
 
-*Updated 2026-09-06 12:41 EDT*
+*Updated 2026-09-06 12:44 EDT*
 
 Copy and paste, one step at a time. Every command is safe to re-run.
 
@@ -8,6 +8,10 @@ This imports the dossiers of **one application** from a vault's File Staging int
 Submissions Archive. Nothing is downloaded and nothing is uploaded — each dossier is
 imported from where it already sits, so this touches one vault and never puts a dossier on
 the workstation.
+
+**These steps assume you already have `C:\vault-work` with `vault.ps1` in it** from a
+previous wave. If you are starting on a machine that has never run this, do
+[Appendix A](#appendix-a--starting-from-nothing) first, then come back to Step 2.
 
 Every application folder and vault name below is a **placeholder**. Substitute your own.
 
@@ -22,10 +26,11 @@ Every application folder and vault name below is a **placeholder**. Substitute y
 ## Before you start
 
 - Windows, with **Windows PowerShell 5.1** — the one in the Start menu. Not PowerShell 7.
-- A Vault account on the target instance with the RIM Submissions Archive import permission.
+- A Vault account on the instance you are importing into, with the RIM Submissions Archive
+  import permission.
 - The dossiers already on that vault's File Staging, under `/SubmissionsArchive/000000`.
 
-Confirm the PowerShell version first. Copy this into a PowerShell window:
+Confirm the PowerShell version. Copy this into a PowerShell window:
 
 ```powershell
 $PSVersionTable.PSVersion
@@ -35,74 +40,37 @@ Expect `5` in the Major column.
 
 ---
 
-## Step 1 — Make a working folder
-
-Everything the run writes — scripts, config, logs, results — stays in this one folder.
+## Step 1 — Update the script
 
 ```powershell
-mkdir C:\vault-work
 cd C:\vault-work
+powershell -ExecutionPolicy Bypass -File .\vault.ps1 update -Commit f7ed7b16ef30560e85ba4a7bdd8ed27e38a0a1e4
 ```
 
-Already have one from a previous wave? Use it. Step 2 will not overwrite your config.
+It prints the version. **It must say `2026.09.06-6`.** If it says anything else, stop and ask —
+you are not running what these steps describe.
 
-When you are done the folder holds two files — `vault.ps1` and `vault.ini` — plus the logs
-and results the runs write.
+**Your `vault.ini` is not touched.** `update` replaces `vault.ps1` and `README.md` only,
+and it downloads everything to one side before replacing anything, so a failed update
+leaves the folder exactly as it was. Nothing you answered on a previous wave is lost.
+
+> **If it mentions a `VaultKit\` folder.** That is from an older layout, where the tool
+> shipped as thirteen files. Nothing loads it now — the whole tool is inside `vault.ps1` —
+> so you can delete the folder once you are sure nothing of yours is in it. Worth doing:
+> editing a file in there changes nothing, which is a confusing thing to discover later.
+
+> **Why the commit hash and not just `main`.** `raw.githubusercontent.com` caches a branch
+> URL for about five minutes and ignores no-cache, so an update from `/main` can hand back
+> the *previous* version — which looks exactly like a fix that did not work. A commit hash
+> is immutable, so the CDN cannot serve anything else under it. It also means this playbook
+> and the code it describes cannot drift apart.
+
+To move to the current version some other day, run `.\vault.ps1 update` with no `-Commit`;
+it resolves the head commit itself and prints the hash it used.
 
 ---
 
-## Step 2 — Download the script
-
-`vault.ps1` is the whole tool — one self-contained file, nothing to install.
-
-**This playbook installs one exact version.** Copy the line as it is, commit hash and all:
-
-```powershell
-curl.exe -sfLO https://raw.githubusercontent.com/kevinnassery/veeva/f7ed7b16ef30560e85ba4a7bdd8ed27e38a0a1e4/vault.ps1
-```
-
-Then let it fetch the README and a starter `vault.ini`, pinned to the same commit:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\vault.ps1 update -Commit f7ed7b16ef30560e85ba4a7bdd8ed27e38a0a1e4
-```
-
-It will print the version. **It must say `2026.09.06-6`.** If it says anything else, stop
-and ask — you are not running what these steps describe.
-
-`update` never overwrites a `vault.ini` you have already filled in, and it downloads
-everything to one side before replacing anything, so a failed update leaves the folder
-exactly as it was.
-
-> **Why the hash and not just `main`.** `raw.githubusercontent.com` caches a branch URL
-> for about five minutes and ignores no-cache, so downloading from `/main` can hand back
-> the *previous* version of a file — which looks exactly like a fix that did not work.
-> A commit hash is immutable, so the CDN cannot serve anything else under it. It also
-> means this playbook and the code it describes cannot drift apart: re-running the line
-> above a year from now installs the same script.
-
-To move to the current version later, run `.\vault.ps1 update` with no `-Commit` — it
-resolves the head commit itself and prints the hash it used.
-
-### Already have a folder from a previous wave?
-
-**You do not need to download anything by hand.** Run the update from inside it:
-
-```powershell
-cd C:\vault-work
-powershell -ExecutionPolicy Bypass -File .\vault.ps1 update -Commit f7ed7b16ef30560e85ba4a7bdd8ed27e38a0a1e4
-```
-
-It replaces `vault.ps1` and `README.md`, and **leaves your `vault.ini` alone**. Then skip
-to Step 3.
-
-If your folder has a `VaultKit\` directory in it, that is from an older layout where the
-tool shipped as thirteen files. The update will say so. Nothing loads it any more — the
-module is built into `vault.ps1` — so you can delete the folder once you are sure nothing
-of yours is in it. Editing anything inside it changes nothing, which is the only reason
-it is worth mentioning.
-
-## Step 3 — Allow scripts for this window
+## Step 2 — Allow scripts for this window
 
 Once per PowerShell window. It does not change any machine-wide setting.
 
@@ -114,19 +82,25 @@ From here the commands are shorter: `.\vault.ps1 <command>`.
 
 ---
 
-## Step 4 — Look at what is there
+## Step 3 — Confirm the vault and the application
 
-There is nothing to configure first. **The first command asks for what it needs and
-remembers your answers**, so this step is also the setup step.
+There is no file to fill in. **The tool asks for what it needs and remembers your
+answers**, so this step is also the setup step.
 
 ```powershell
 .\vault.ps1 submissions list
 ```
 
-It makes **no vault writes and runs no VQL**. It answers "am I pointed at the right
-folder, on the right vault" before anything costs anything.
+It makes **no vault writes and runs no VQL**. It answers "am I pointed at the right folder,
+on the right vault" before anything costs anything.
 
-On a first run it asks four things, in this order.
+**If you ran a previous wave from this folder**, your answers are already saved. It shows
+them back and waits for a `y` on each — so read them, because the last wave's application
+is exactly what will be sitting there. Answer **`n`** to either one and it asks for the new
+value, then offers to remember that instead. Skip to *"4. Which application"* below for
+what that looks like.
+
+**On a machine that has never run this**, it asks four things, in this order.
 
 **1. Which vault.** File Staging is shared between the instances on a domain, so the same
 Submissions Archive listing is visible from a sandbox and from production and looks
@@ -181,7 +155,7 @@ Is this the right application? [y/N]
 
 Then it lists what is actually there and writes `submission-manifest.csv`. Check the count
 against what you expect. `SubmissionId` is blank in that file on purpose — filling it in
-needs the vault, which is Step 5.
+needs the vault, which is Step 4.
 
 > **Every run after this one confirms rather than asks.** Your answers are written to
 > `vault.ini` beside the script, and each run shows them back and waits for a `y`. To load
@@ -193,7 +167,7 @@ needs the vault, which is Step 5.
 
 ---
 
-## Step 5 — Plan the run
+## Step 4 — Plan the run
 
 ```powershell
 .\vault.ps1 submissions import -Plan
@@ -219,7 +193,7 @@ You want every row `WOULD_IMPORT`. Investigate anything else before continuing:
 
 ---
 
-## Step 6 — Import one, and look at it
+## Step 5 — Import one, and look at it
 
 ```powershell
 .\vault.ps1 submissions import -Test 1
@@ -231,13 +205,13 @@ Vault takes.
 
 ---
 
-## Step 7 — Run the wave
+## Step 6 — Run the wave
 
 ```powershell
 .\vault.ps1 submissions import
 ```
 
-Anything already `SUCCESS` is skipped, so this picks up where Step 6 left off, and the
+Anything already `SUCCESS` is skipped, so this picks up where Step 5 left off, and the
 command is safe to re-run after an interruption.
 
 This one is deliberately **sequential** and has no `-Workers`. Eight parallel processes
@@ -247,7 +221,7 @@ Leave the window open. If you must stop it, Ctrl-C is safe — re-run this same 
 
 ---
 
-## Step 8 — Account for every dossier
+## Step 7 — Account for every dossier
 
 ```powershell
 Import-Csv .\submission-import-results.csv | Group-Object Status | Select-Object Count, Name
@@ -283,7 +257,7 @@ answer being shown back, which is what it is for. Answer **`n`** and give the ne
 Same for the vault. Nothing needs editing by hand.
 
 **Everything errors with the same message.** Almost always the wrong vault or the wrong
-application, not the dossiers. Re-run Step 4 and read the `vaultId`.
+application, not the dossiers. Re-run Step 3 and read the `vaultId`.
 
 **A folder named `VFMTemp`.** That is Vault File Manager's own scratch folder. It is
 skipped by name and needs nothing from you.
@@ -298,7 +272,32 @@ after the imports have happened. Close Excel and re-run.
 **You are not sure which version you ran.** Every run logs it on the first line, and
 `.\vault.ps1 version` prints it on its own. This playbook is written against
 **`2026.09.06-6`**, commit `f7ed7b16ef30`. To get back to exactly that, re-run the
-`update -Commit` line in Step 2.
+`update -Commit` line in Step 1.
+
+---
+
+## Appendix A — Starting from nothing
+
+Only for a machine that has never run this. If `C:\vault-work\vault.ps1` exists, you want
+Step 1 instead.
+
+`vault.ps1` is the whole tool — one self-contained file, nothing to install.
+
+```powershell
+mkdir C:\vault-work
+cd C:\vault-work
+curl.exe -sfLO https://raw.githubusercontent.com/kevinnassery/veeva/f7ed7b16ef30560e85ba4a7bdd8ed27e38a0a1e4/vault.ps1
+```
+
+Then let it fetch the README and a starter `vault.ini`, pinned to the same commit:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\vault.ps1 update -Commit f7ed7b16ef30560e85ba4a7bdd8ed27e38a0a1e4
+```
+
+It must print `2026.09.06-6`. When it is done the folder holds two files, `vault.ps1` and
+`vault.ini`, plus whatever the runs write. There is nothing to fill in — go to Step 2, and
+Step 3 will ask you for the vault and the application and remember them.
 
 ---
 
@@ -306,5 +305,6 @@ after the imports have happened. Close Excel and re-run.
 
 - It does not move files. The dossiers must already be on that vault's File Staging.
 - It does not load documents. That is `documents stage`, a different workflow.
-- It does one application per run. For several, repeat from Step 4 with the next
-  application number.
+- It does one application per run. For several, repeat from Step 3 — answer `n` at
+  "Is this the right application?" and give the next application number. You never edit
+  a file to change it.
